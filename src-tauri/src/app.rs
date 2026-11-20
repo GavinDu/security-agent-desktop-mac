@@ -73,19 +73,20 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 match tokio::net::TcpListener::bind(server_state.bind).await {
                     Ok(listener) => {
-                        server_state
-                            .online
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        server_state.mark_listener_online().await;
                         if let Err(error) =
                             agent::server::serve(listener, server_state.clone()).await
                         {
                             eprintln!("Agent server stopped: {error}");
+                            server_state.mark_listener_failed(&error).await;
+                        } else {
+                            server_state.mark_listener_stopped().await;
                         }
-                        server_state
-                            .online
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
                     }
-                    Err(error) => eprintln!("Agent server could not bind: {error}"),
+                    Err(error) => {
+                        eprintln!("Agent server could not bind: {error}");
+                        server_state.mark_listener_failed(&error).await;
+                    }
                 }
             });
             Ok(())

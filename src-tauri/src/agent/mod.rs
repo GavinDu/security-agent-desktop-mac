@@ -8,7 +8,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{atomic::AtomicBool, Arc},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 pub struct AgentState {
     pub token: String,
@@ -17,6 +17,7 @@ pub struct AgentState {
     pub registry: Arc<ToolRegistry>,
     pub gate: Arc<ApprovalGate>,
     pub settings: Mutex<AgentSettings>,
+    listener_error: RwLock<Option<String>>,
 }
 
 impl AgentState {
@@ -35,7 +36,41 @@ impl AgentState {
             registry,
             gate,
             settings: Mutex::new(settings),
+            listener_error: RwLock::new(None),
         }))
+    }
+
+    /// Export an operator-safe status, without credentials or OS paths.
+    pub async fn status_snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "binding": self.bind.to_string(),
+            "vpn_active": false,
+            "online": self.online.load(std::sync::atomic::Ordering::SeqCst),
+            "error": self.listener_error.read().await.clone(),
+        })
+    }
+
+    pub async fn mark_listener_online(&self) {
+        *self.listener_error.write().await = None;
+        self.online
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub async fn mark_listener_failed(&self, error: &std::io::Error) {
+        let message = match error.kind() {
+            std::io::ErrorKind::AddrInUse => "Local agent port 8080 is already in use",
+            std::io::ErrorKind::AddrNotAvailable => "Local agent interface is unavailable",
+            _ => "Local agent listener failed; see redacted application logs",
+        };
+        self.online
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.listener_error.write().await = Some(message.into());
+    }
+
+    pub async fn mark_listener_stopped(&self) {
+        self.online
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.listener_error.write().await = Some("Local agent listener stopped".into());
     }
 
     pub fn source_allowed(&self, source: IpAddr) -> bool {
@@ -89,5 +124,35 @@ mod tests {
         .unwrap();
         assert!(local.source_allowed("127.0.0.1".parse().unwrap()));
         assert!(!local.source_allowed("10.8.0.2".parse().unwrap()));
+    }
+    #[tokio::test]
+    async fn listener_status_tracks_failure_and_recovery_without_leaking_secrets() {
+        let state = AgentState::new(
+            "secret-token-must-never-leak".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let initial = state.status_snapshot().await;
+        assert_eq!(initial["online"], false);
+        assert!(initial["error"].is_null());
+
+        state
+            .mark_listener_failed(&std::io::Error::from(std::io::ErrorKind::AddrInUse))
+            .await;
+        let failed = state.status_snapshot().await;
+        assert_eq!(failed["online"], false);
+        assert_eq!(failed["error"], "Local agent port 8080 is already in use");
+        assert!(!failed.to_string().contains("secret-token"));
+
+        state.mark_listener_online().await;
+        let recovered = state.status_snapshot().await;
+        assert_eq!(recovered["online"], true);
+        assert!(recovered["error"].is_null());
+
+        state.mark_listener_stopped().await;
+        let stopped = state.status_snapshot().await;
+        assert_eq!(stopped["online"], false);
+        assert_eq!(stopped["error"], "Local agent listener stopped");
     }
 }

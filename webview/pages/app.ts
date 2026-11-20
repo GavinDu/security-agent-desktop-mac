@@ -18,9 +18,10 @@ async function refresh(): Promise<void> {
     const [status, tools, settings] = await Promise.all([
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
     ]);
-    el('status').textContent = status.online ? 'Running' : 'Starting';
+    el('status').textContent = status.online ? 'Running' : status.error ? 'Unavailable' : 'Starting';
     el('status').classList.toggle('ok', status.online);
-    el('binding').textContent = 'Configured ' + status.binding + (status.online ? ' · accepting connections' : ' · not listening');
+    el('binding').textContent = 'Configured ' + status.binding +
+      (status.online ? ' · accepting connections' : status.error ? ' · ' + status.error : ' · not listening');
     el('tools').textContent = JSON.stringify(tools, null, 2);
     configuredRoots = settings.allowed_roots;
     el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';

@@ -46,9 +46,7 @@ pub async fn get_agent_status(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
-    Ok(
-        serde_json::json!({"binding":state.bind.to_string(),"vpn_active":false,"online":state.online.load(std::sync::atomic::Ordering::SeqCst)}),
-    )
+    Ok(state.status_snapshot().await)
 }
 
 #[tauri::command]

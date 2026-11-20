@@ -22,7 +22,7 @@ export interface ConnectorBridge {
   setPolicy(tool: string, policy: 'auto' | 'ask' | 'disable'): Promise<void>;
   setAllowedRoots(roots: string[]): Promise<void>;
   respondApproval(id: string, allow: boolean): Promise<boolean>;
-  status(): Promise<{ binding: string; vpn_active: boolean; online: boolean }>;
+  status(): Promise<{ binding: string; vpn_active: boolean; online: boolean; error: string | null }>;
   previewWireGuardPeer(publicKey: string, tunnelIp: string): Promise<string>;
 }
 
