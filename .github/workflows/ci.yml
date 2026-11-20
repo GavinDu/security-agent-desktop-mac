@@ -67,11 +67,19 @@ jobs:
   macos:
     runs-on: macos-15
     timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Record native macOS queue wait (telemetry only)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/report-macos-queue.mjs
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
