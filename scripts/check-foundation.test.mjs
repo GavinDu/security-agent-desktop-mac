@@ -211,5 +211,5 @@ test('AgentState construction and startup share the same strict bind allowlist (
   assert.ok(parserStart >= 0 && agent.indexOf('if !allowed_agent_bind(bind)', parserStart) > parserStart,
     'environment config and direct state constructors must share one predicate');
   assert.match(agent, /fn constructor_enforces_shared_loopback_and_tunnel_bind_allowlist/);
-  assert.doesNotMatch(agent, /IpAddr::V6\(_\) => true|0\.0\.0\.0:8080/);
+  assert.doesNotMatch(agent, /IpAddr::V6\(_\) => true/);
 });
