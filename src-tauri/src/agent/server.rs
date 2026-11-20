@@ -118,8 +118,8 @@ async fn limit_tool_dispatch(
     request: Request,
     next: Next,
 ) -> Response {
-    let is_tool_post = request.method() == Method::POST
-        && matches!(request.uri().path(), "/tools" | "/chat");
+    let is_tool_post =
+        request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
     if !is_tool_post {
         return next.run(request).await;
     }
@@ -263,13 +263,9 @@ mod tests {
             if authorized {
                 request = request.header("Authorization", "Bearer some-long-test-token");
             }
-            let mut req = request
-                .body(Body::from(r#"{"message":"hello"}"#))
-                .unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                source.parse().unwrap(),
-                42123,
-            )));
+            let mut req = request.body(Body::from(r#"{"message":"hello"}"#)).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 42123)));
             req
         };
 
