@@ -63,3 +63,8 @@ test('tool approval previews are emitted only to the trusted main window', async
   assert.match(source, /handle\.emit_to\(\s*"main",\s*"security-agent:\/\/tool-approval",\s*event\)/);
   assert.doesNotMatch(source, /handle\.emit\(\s*"security-agent:\/\/tool-approval"/);
 });
+
+test('unsigned developer installer config declares no signing identity or entitlement override', () => {
+  assert.equal(config.bundle.macOS.signingIdentity, undefined);
+  assert.equal(config.bundle.macOS.entitlements, undefined);
+});
