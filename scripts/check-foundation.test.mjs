@@ -196,3 +196,19 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
 });
+
+test('empty bearer token cannot reach the Axum router (#102)', async () => {
+  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  const start = agent.indexOf('pub fn new(');
+  const registry = agent.indexOf('ToolRegistry::canonical_roots', start);
+  const validation = agent.indexOf('token.trim().is_empty()', start);
+  assert.ok(start >= 0 && validation > start && registry > validation,
+    'credential validation must happen before constructing the registry or listener');
+  assert.match(agent, /return Err\("Agent authentication token is unavailable"\.into\(\)\)/);
+  assert.match(agent, /fn unavailable_bearer_credentials_fail_closed_before_agent_setup/);
+  assert.match(server, /strip_prefix\("Bearer "\)/);
+  assert.match(server, /unwrap_or_default\(\)/);
+  assert.match(server, /StatusCode::UNAUTHORIZED/);
+  assert.match(server, /async fn health_is_loopback_only_and_tools_need_token/);
+});
