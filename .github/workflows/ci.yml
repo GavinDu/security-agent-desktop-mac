@@ -51,11 +51,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Record native macOS queue wait (telemetry only)
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/report-macos-queue.mjs
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Tauri Linux development libraries
         run: |
@@ -80,6 +75,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Record native macOS queue wait (telemetry only)
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/report-macos-queue.mjs
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
