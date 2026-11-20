@@ -216,12 +216,8 @@ mod tests {
     async fn port_conflict_reports_failure_and_recovers_when_port_is_released() {
         let blocking = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind = blocking.local_addr().unwrap();
-        let state = AgentState::new(
-            "not-a-live-secret".into(),
-            bind,
-            AgentSettings::default(),
-        )
-        .unwrap();
+        let state =
+            AgentState::new("not-a-live-secret".into(), bind, AgentSettings::default()).unwrap();
         let runner = tokio::spawn(serve_with_retry_interval(
             state.clone(),
             Duration::from_millis(25),
