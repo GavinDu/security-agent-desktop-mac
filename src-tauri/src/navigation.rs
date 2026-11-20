@@ -22,7 +22,10 @@ mod tests {
     #[test]
     fn accepts_only_bundled_app_entry() {
         for value in ["tauri://localhost/", "tauri://localhost/index.html"] {
-            assert!(trusted_main_document(&Url::parse(value).unwrap()), "{value}");
+            assert!(
+                trusted_main_document(&Url::parse(value).unwrap()),
+                "{value}"
+            );
         }
         for value in [
             "https://example.com/index.html",

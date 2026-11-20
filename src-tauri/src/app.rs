@@ -47,12 +47,12 @@ pub fn run() {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Missing main window config"))?
                 .clone();
+            app.manage(state.clone());
             let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
                 .on_navigation(navigation::trusted_main_document)
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
             window.set_title("Security Agent")?;
-            app.manage(state.clone());
             tray::install(app)?;
 
             let mut approvals = state.gate.subscribe();
