@@ -7,9 +7,11 @@ pub fn get_or_create_api_token() -> Result<String, String> {
     {
         let entry = keyring::Entry::new("com.gavindu.securityagent.desktop", "agent-api-token")
             .map_err(|e| format!("Keychain unavailable: {e}"))?;
-        if let Ok(token) = entry.get_password() {
-            if token.len() >= 32 { return Ok(token); }
-            return Err("Refusing a short existing API token in Keychain".into());
+        match entry.get_password() {
+            Ok(token) if token.len() >= 32 => return Ok(token),
+            Ok(_) => return Err("Refusing a short existing API token in Keychain".into()),
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(format!("Keychain read failed: {error}")),
         }
         let mut entropy = [0_u8; 32];
         OsRng.fill_bytes(&mut entropy);

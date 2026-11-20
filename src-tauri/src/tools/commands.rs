@@ -2,7 +2,12 @@ use std::sync::Arc;
 use serde_json::Value;
 use tauri::State;
 use uuid::Uuid;
-use crate::{agent::AgentState, tools::{approvals::Policy, registry::{ToolCall, ToolRegistry}}};
+use crate::{agent::AgentState, settings::AgentSettings, tools::{approvals::Policy, registry::{ToolCall, ToolRegistry}}};
+
+#[tauri::command]
+pub async fn get_agent_settings(state: State<'_, Arc<AgentState>>) -> Result<AgentSettings, String> {
+    Ok(state.settings.lock().await.clone())
+}
 
 #[tauri::command]
 pub async fn list_tools(state: State<'_, Arc<AgentState>>) -> Result<Vec<Value>, String> {
@@ -16,7 +21,7 @@ pub async fn invoke_tool(state: State<'_, Arc<AgentState>>, call: ToolCall) -> R
 
 #[tauri::command]
 pub async fn get_agent_status(state: State<'_, Arc<AgentState>>) -> Result<Value, String> {
-    Ok(serde_json::json!({"binding":state.bind.to_string(),"vpn_active":false}))
+    Ok(serde_json::json!({"binding":state.bind.to_string(),"vpn_active":false,"online":state.online.load(std::sync::atomic::Ordering::SeqCst)}))
 }
 
 #[tauri::command]

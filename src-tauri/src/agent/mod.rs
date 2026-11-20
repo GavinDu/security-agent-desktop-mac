@@ -1,11 +1,12 @@
 pub mod server;
 
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, sync::{Arc, atomic::AtomicBool}};
 use tokio::sync::Mutex;
 use crate::{settings::AgentSettings, tools::{approvals::ApprovalGate, registry::ToolRegistry}};
 
 pub struct AgentState {
     pub token: String,
+    pub online: AtomicBool,
     pub bind: SocketAddr,
     pub registry: Arc<ToolRegistry>,
     pub gate: Arc<ApprovalGate>,
@@ -17,14 +18,14 @@ impl AgentState {
         let roots = ToolRegistry::canonical_roots(&settings.allowed_roots)?;
         let gate = ApprovalGate::new(settings.policies.clone());
         let registry = Arc::new(ToolRegistry::new(roots, gate.clone()));
-        Ok(Arc::new(Self { token, bind, registry, gate, settings: Mutex::new(settings) }))
+        Ok(Arc::new(Self { token, online: AtomicBool::new(false), bind, registry, gate, settings: Mutex::new(settings) }))
     }
 
     pub fn source_allowed(&self, source: IpAddr) -> bool {
         match (self.bind.ip(), source) {
             (IpAddr::V4(bind), IpAddr::V4(ip)) if bind == Ipv4Addr::LOCALHOST => ip == Ipv4Addr::LOCALHOST,
             (IpAddr::V4(bind), IpAddr::V4(ip)) if bind == Ipv4Addr::new(10, 8, 0, 1) =>
-                ip.octets()[0..3] == [10, 8, 0] && ip != Ipv4Addr::new(10, 8, 0, 1),
+                ip.octets()[0..3] == [10, 8, 0],
             _ => false,
         }
     }
@@ -48,6 +49,7 @@ mod tests {
     fn checks_source_network() {
         let state = AgentState::new("token".into(), "10.8.0.1:8080".parse().unwrap(), AgentSettings::default()).unwrap();
         assert!(state.source_allowed("10.8.0.2".parse().unwrap()));
+        assert!(state.source_allowed("10.8.0.1".parse().unwrap()));
         assert!(!state.source_allowed("192.168.1.2".parse().unwrap()));
         assert!(!state.source_allowed("10.8.1.2".parse().unwrap()));
         assert!(!state.source_allowed("127.0.0.1".parse().unwrap()));

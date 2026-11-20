@@ -6,6 +6,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             tools::commands::list_tools,
+            tools::commands::get_agent_settings,
             tools::commands::invoke_tool,
             tools::commands::get_agent_status,
             tools::commands::respond_approval,
@@ -31,6 +32,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 match tokio::net::TcpListener::bind(server_state.bind).await {
                     Ok(listener) => {
+                        server_state.online.store(true, std::sync::atomic::Ordering::SeqCst);
                         if let Err(error) = agent::server::serve(listener, server_state).await {
                             eprintln!("Agent server stopped: {error}");
                         }
