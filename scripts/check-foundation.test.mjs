@@ -68,3 +68,10 @@ test('unsigned developer installer config declares no signing identity or entitl
   assert.equal(config.bundle.macOS.signingIdentity, undefined);
   assert.equal(config.bundle.macOS.entitlements, undefined);
 });
+
+test('mounted unsigned DMG verifier fails closed on failed entitlement extraction', async () => {
+  const code = await readFile('scripts/verify-macos-bundle.sh', 'utf8');
+  assert.match(code, /codesign --verify --strict/);
+  assert.match(code, /if ! \/usr\/bin\/codesign --display --entitlements/);
+  assert.match(code, /refusing to assume none/);
+});

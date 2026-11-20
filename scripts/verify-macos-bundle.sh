@@ -55,10 +55,17 @@ if signature_details=$(/usr/bin/codesign --display --verbose=2 "$app" 2>&1); the
     echo "Unexpected distribution signature in unsigned CI installer" >&2
     exit 1
   fi
+  /usr/bin/codesign --verify --strict "$app" || {
+    echo "Ad-hoc signature failed strict verification" >&2
+    exit 1
+  }
   entitlements_path=$(mktemp "${TMPDIR:-/tmp}/security-agent-entitlements.XXXXXX")
-  if /usr/bin/codesign --display --entitlements :- "$app" > "$entitlements_path" 2>/dev/null; then
-    if [[ -s "$entitlements_path" ]]; then
-      python3 - "$entitlements_path" <<'PY'
+  if ! /usr/bin/codesign --display --entitlements :- "$app" > "$entitlements_path" 2>/dev/null; then
+    echo "Cannot inspect ad-hoc signature entitlements; refusing to assume none" >&2
+    exit 1
+  fi
+  if [[ -s "$entitlements_path" ]]; then
+    python3 - "$entitlements_path" <<'PY'
 import plistlib
 import sys
 with open(sys.argv[1], "rb") as payload:
@@ -66,7 +73,6 @@ with open(sys.argv[1], "rb") as payload:
 if not isinstance(entitlements, dict) or entitlements:
     raise SystemExit("Unsigned developer build must not have entitlements")
 PY
-    fi
   fi
   echo "Code-signature check: ad-hoc only, no signature entitlements"
 elif [[ "$signature_details" == *"code object is not signed at all"* ]]; then
