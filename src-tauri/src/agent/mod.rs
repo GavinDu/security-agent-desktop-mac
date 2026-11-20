@@ -52,8 +52,7 @@ impl AgentState {
 
     pub async fn mark_listener_online(&self) {
         *self.listener_error.write().await = None;
-        self.online
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.online.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub async fn mark_listener_failed(&self, error: &std::io::Error) {
