@@ -89,11 +89,12 @@ impl AgentSettings {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
             }
-            let mut file = opts.open(&tmp).map_err(|e| e.to_string())?;
+            let mut file = opts.open(&tmp)
+                .map_err(|_| "Cannot create temporary settings file")?;
             file.write_all(&bytes)
-                .map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
-            fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+                .map_err(|_| "Cannot write settings.json")?;
+            file.sync_all().map_err(|_| "Cannot sync settings.json")?;
+            fs::rename(&tmp, path).map_err(|_| "Cannot replace settings.json")?;
             Ok(())
         })();
         if result.is_err() {
@@ -155,6 +156,52 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_loader_rejects_symlinks_hardlinks_and_public_file_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.json");
+        let leaf = dir.path().join("settings.json");
+        fs::write(&original, b"{\"allowed_roots\":[],\"policies\":{}}").unwrap();
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o600)).unwrap();
+
+        symlink(&original, &leaf).unwrap();
+        assert!(AgentSettings::load_at(&leaf).is_err());
+        fs::remove_file(&leaf).unwrap();
+
+        fs::hard_link(&original, &leaf).unwrap();
+        assert!(AgentSettings::load_at(&leaf).is_err());
+        fs::remove_file(&leaf).unwrap();
+
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(AgentSettings::load_at(&original).is_err());
+        fs::set_permissions(&original, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(AgentSettings::load_at(&original).is_ok());
+    }
+
+    #[test]
+    fn bounded_settings_load_and_save_reject_oversize_without_replacing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = AgentSettings::default();
+        original.save_at(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let mut huge = AgentSettings::default();
+        huge.allowed_roots = vec!["x".repeat(MAX_SETTINGS_BYTES as usize + 1)];
+        assert!(huge.save_at(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        fs::write(&path, vec![b' '; (MAX_SETTINGS_BYTES + 1) as usize]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(AgentSettings::load_at(&path).is_err());
     }
 
     #[test]
