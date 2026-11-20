@@ -79,9 +79,9 @@ impl ToolRegistry {
     pub fn canonical_roots(roots: &[String]) -> Result<Vec<PathBuf>, String> {
         let mut canonical = Vec::new();
         for root in roots {
-            let path = std::fs::canonicalize(root).map_err(|_| format!("Invalid root: {root}"))?;
+            let path = std::fs::canonicalize(root).map_err(|_| "Invalid granted root".to_string())?;
             if !path.is_dir() {
-                return Err(format!("Not a directory: {root}"));
+                return Err("Granted root is not a directory".into());
             }
             if !canonical.contains(&path) {
                 canonical.push(path);
@@ -97,7 +97,7 @@ impl ToolRegistry {
     fn allowed_path(&self, requested: &Path) -> Result<PathBuf, String> {
         let resolved = requested
             .canonicalize()
-            .map_err(|e| format!("Path not accessible: {e}"))?;
+            .map_err(|_| "Requested file path is inaccessible".to_string())?;
         let permitted = self
             .roots
             .read()
@@ -281,6 +281,37 @@ mod tests {
         );
         let _ = reg.invoke(ToolCall {name:"bash__run".into(), arguments:json!({"cwd":root.path(),"command":format!("touch {}", marker.display())})}).await;
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn file_authorization_errors_do_not_echo_private_paths() {
+        let profile = tempfile::tempdir().unwrap();
+        let private_marker = "PRIVATE_PROFILE_CANARY_17FBA2";
+        let private = profile.path().join(private_marker);
+        let absent = private.join("missing");
+        let rejected_root = ToolRegistry::canonical_roots(&[absent.to_string_lossy().into_owned()])
+            .expect_err("missing root must be denied");
+        assert!(!rejected_root.contains(private_marker));
+        assert_eq!(rejected_root, "Invalid granted root");
+
+        let real_file = profile.path().join(private_marker);
+        std::fs::write(&real_file, b"not a directory").unwrap();
+        let invalid_dir = ToolRegistry::canonical_roots(&[real_file.to_string_lossy().into_owned()])
+            .expect_err("file cannot become a directory grant");
+        assert!(!invalid_dir.contains(private_marker));
+        assert_eq!(invalid_dir, "Granted root is not a directory");
+
+        let gate = ApprovalGate::new(HashMap::new());
+        let reg = ToolRegistry::new(vec![profile.path().canonicalize().unwrap()], gate);
+        let inaccessible = reg.allowed_path(&real_file.join("missing"))
+            .expect_err("nonexistent file must fail closed");
+        assert!(!inaccessible.contains(private_marker));
+        assert_eq!(inaccessible, "Requested file path is inaccessible");
+
+        let outside = tempfile::tempdir().unwrap();
+        let denied = reg.allowed_path(outside.path()).expect_err("ungranted directory denied");
+        assert_eq!(denied, "Path outside granted roots");
+        assert_eq!(reg.allowed_path(&real_file).unwrap(), real_file);
     }
 
     #[test]
