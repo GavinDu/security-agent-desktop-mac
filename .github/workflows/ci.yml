@@ -35,6 +35,26 @@ jobs:
         run: npm run typecheck
       - name: Build bundled WebView
         run: npm run build:webview
+  rust-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Prepare app icons
+        run: |
+          npm install --no-audit --no-fund
+          npm run icons:desktop
+          npm run build:webview
+      - name: Run Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
   macos:
     runs-on: macos-15
     timeout-minutes: 50
