@@ -1,6 +1,7 @@
 use crate::tools::approvals::ApprovalGate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::{
     fs::OpenOptions,
     io::Read,
@@ -8,10 +9,36 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
+
+// Drain both pipes concurrently, retaining no more than MAX_SHELL_OUTPUT
+// bytes per stream. Extra output is discarded rather than buffered; pipe
+// writers cannot deadlock because their output is still consumed.
+async fn read_bounded_output<R: AsyncRead + Unpin>(
+    mut reader: R,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut retained = Vec::with_capacity(MAX_SHELL_OUTPUT);
+    let mut chunk = [0_u8; 4096];
+    let mut truncated = false;
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok((retained, truncated));
+        }
+        let remaining = MAX_SHELL_OUTPUT.saturating_sub(retained.len());
+        let keep = remaining.min(n);
+        retained.extend_from_slice(&chunk[..keep]);
+        if keep < n {
+            truncated = true;
+        }
+    }
+}
 
 // Scoped to the already-canonicalized grant path by the caller. This pins
 // the *leaf* inode through a single FD, preventing path replacement between
@@ -161,16 +188,34 @@ impl ToolRegistry {
                     .current_dir(directory)
                     .env_clear()
                     .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
                     .kill_on_drop(true);
-                let result = tokio::time::timeout(Duration::from_secs(15), process.output())
+                let mut child = process
+                    .spawn()
+                    .map_err(|_| "Cannot launch approved command")?;
+                let stdout = child.stdout.take().ok_or("Cannot capture command stdout")?;
+                let stderr = child.stderr.take().ok_or("Cannot capture command stderr")?;
+                // A timeout drops the readers and child; kill_on_drop covers
+                // the direct shell. Process-group cleanup is tracked
+                // separately in #35, not claimed by this output bound.
+                let (stdout, stderr, status) =
+                    tokio::time::timeout(Duration::from_secs(15), async {
+                        tokio::try_join!(
+                            read_bounded_output(stdout),
+                            read_bounded_output(stderr),
+                            child.wait()
+                        )
+                    })
                     .await
                     .map_err(|_| "Command timed out".to_string())?
-                    .map_err(|e| format!("Process launch failed: {e}"))?;
+                    .map_err(|_| "Command execution or output capture failed")?;
                 Ok(json!({
-                    "exit_code": result.status.code(),
-                    "stdout": String::from_utf8_lossy(&result.stdout[..result.stdout.len().min(MAX_SHELL_OUTPUT)]),
-                    "stderr": String::from_utf8_lossy(&result.stderr[..result.stderr.len().min(MAX_SHELL_OUTPUT)]),
-                    "output_truncated": result.stdout.len() > MAX_SHELL_OUTPUT || result.stderr.len() > MAX_SHELL_OUTPUT
+                    "exit_code": status.code(),
+                    "stdout": String::from_utf8_lossy(&stdout.0),
+                    "stderr": String::from_utf8_lossy(&stderr.0),
+                    "output_truncated": stdout.1 || stderr.1
                 }))
             }
             _ => Err("Unknown tool".into()),
@@ -268,6 +313,67 @@ mod tests {
         assert!(read_scoped_file(&approved).is_err());
         std::fs::remove_file(&hardlink).unwrap();
         assert_eq!(read_scoped_file(&approved).unwrap(), "allowed");
+    }
+
+    #[tokio::test]
+    async fn stdout_and_stderr_drains_are_bounded_without_deadlock() {
+        use tokio::io::AsyncWriteExt;
+        let (mut stdout_writer, stdout_reader) = tokio::io::duplex(1024);
+        let (mut stderr_writer, stderr_reader) = tokio::io::duplex(1024);
+
+        let stdout_producer = tokio::spawn(async move {
+            for _ in 0..256 {
+                stdout_writer.write_all(&[b'x'; 4096]).await.unwrap();
+            }
+            stdout_writer.shutdown().await.unwrap();
+        });
+        let stderr_producer = tokio::spawn(async move {
+            for _ in 0..256 {
+                stderr_writer.write_all(&[b'y'; 4096]).await.unwrap();
+            }
+            stderr_writer.shutdown().await.unwrap();
+        });
+
+        let (stdout, stderr) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::try_join!(
+                read_bounded_output(stdout_reader),
+                read_bounded_output(stderr_reader)
+            )
+        })
+        .await
+        .expect("both streams should drain rather than deadlock")
+        .unwrap();
+        stdout_producer.await.unwrap();
+        stderr_producer.await.unwrap();
+        assert_eq!(stdout.0.len(), MAX_SHELL_OUTPUT);
+        assert_eq!(stderr.0.len(), MAX_SHELL_OUTPUT);
+        assert!(stdout.1 && stderr.1);
+        assert!(stdout.0.iter().all(|byte| *byte == b'x'));
+        assert!(stderr.0.iter().all(|byte| *byte == b'y'));
+    }
+
+    #[tokio::test]
+    async fn output_truncation_detects_exact_byte_boundary() {
+        use tokio::io::AsyncWriteExt;
+        let (mut exact_writer, exact_reader) = tokio::io::duplex(MAX_SHELL_OUTPUT + 1);
+        exact_writer
+            .write_all(&vec![b'a'; MAX_SHELL_OUTPUT])
+            .await
+            .unwrap();
+        drop(exact_writer);
+        let exact = read_bounded_output(exact_reader).await.unwrap();
+        assert_eq!(exact.0.len(), MAX_SHELL_OUTPUT);
+        assert!(!exact.1);
+
+        let (mut larger_writer, larger_reader) = tokio::io::duplex(MAX_SHELL_OUTPUT + 1);
+        larger_writer
+            .write_all(&vec![b'b'; MAX_SHELL_OUTPUT + 1])
+            .await
+            .unwrap();
+        drop(larger_writer);
+        let larger = read_bounded_output(larger_reader).await.unwrap();
+        assert_eq!(larger.0.len(), MAX_SHELL_OUTPUT);
+        assert!(larger.1);
     }
 
     #[tokio::test]
