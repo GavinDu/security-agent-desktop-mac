@@ -24,7 +24,12 @@ npm run build
 
 The authenticated smoke command reads the current login's application API
 token from Keychain; it does not echo the token. It tests tool catalog and
-the still-unimplemented /pairing behavior, not tool execution.
+the still-unimplemented /pairing behavior, not tool execution. It also
+audits the local settings file (when present) for mode 0600, a strict
+ask/auto/disable policy schema and accessible absolute root directories.
+The output reports **counts only**, not filesystem paths or secrets.
+Missing settings.json is valid and means no saved grants. This does not
+replace race-free root enforcement (#34) or interactive Mac evidence (#55).
 
 ## Mandatory physical Mac checklist (#12, not yet evidenced)
 
