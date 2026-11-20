@@ -38,7 +38,7 @@ fi
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
 binary="$app/Contents/MacOS/$executable"
 test -x "$binary" || { echo "Missing bundle executable: $executable" >&2; exit 1; }
-lipo -verify_arch arm64 "$binary" || { echo "Bundle lacks Apple Silicon arm64 executable" >&2; exit 1; }
+lipo "$binary" -verify_arch arm64 || { echo "Bundle lacks Apple Silicon arm64 executable" >&2; exit 1; }
 
 icon=$(find "$app/Contents/Resources" -type f -name '*.icns' -print -quit)
 test -n "$icon" || { echo "Missing bundled .icns icon" >&2; exit 1; }
