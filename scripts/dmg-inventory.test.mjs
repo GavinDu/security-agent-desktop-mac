@@ -88,3 +88,24 @@ test('real macOS mounted verifier uses the same strict inventory as artifact upl
   assert.match(verifier, /Cannot inspect ad-hoc signature entitlements/);
   assert.match(verifier, /trap cleanup EXIT/);
 });
+
+
+test('partial find failure after one real candidate cannot appear as a valid unique DMG', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mac-bundle-inventory-'));
+  try {
+    await writeFile(join(dir, 'one.dmg'), 'fixture');
+    const script = String.raw`
+      set -e
+      source "$1"
+      fixture="$2/one.dmg"
+      find() { printf '%s\0' "$fixture"; return 9; }
+      require_single_inventory_path "$2" '*.dmg' file
+    `;
+    const result = spawnSync('bash', [
+      '-c', script, '--', 'scripts/dmg-inventory.sh', dir,
+    ], { encoding: 'utf8', timeout: 5000 });
+    assert.notEqual(result.status, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
