@@ -9,6 +9,18 @@ permissions:
   contents: read
 
 jobs:
+  rustfmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting (prints actionable diff)
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --exit-code -- src-tauri/src
   macos:
     runs-on: macos-15
     timeout-minutes: 50
