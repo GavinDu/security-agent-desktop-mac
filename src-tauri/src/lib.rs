@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod navigation;
 mod secrets;
 mod settings;
 mod tools;
