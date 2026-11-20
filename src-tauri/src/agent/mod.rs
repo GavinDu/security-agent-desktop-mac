@@ -8,7 +8,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{atomic::AtomicBool, Arc},
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+
+/// Maximum number of simultaneously admitted authenticated tool requests.
+pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16;
 
 pub struct AgentState {
     pub token: String,
@@ -16,6 +19,7 @@ pub struct AgentState {
     pub bind: SocketAddr,
     pub registry: Arc<ToolRegistry>,
     pub gate: Arc<ApprovalGate>,
+    pub dispatch_permits: Arc<Semaphore>,
     pub settings: Mutex<AgentSettings>,
     listener_error: RwLock<Option<String>>,
 }
@@ -35,6 +39,7 @@ impl AgentState {
             bind,
             registry,
             gate,
+            dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             settings: Mutex::new(settings),
             listener_error: RwLock::new(None),
         }))
