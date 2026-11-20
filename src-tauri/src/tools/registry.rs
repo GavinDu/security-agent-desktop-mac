@@ -40,7 +40,6 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
     }
 }
 
-
 // Scoped to the already-canonicalized grant path by the caller. This pins
 // the *leaf* inode through a single FD, preventing path replacement between
 // metadata and bytes. Parent-directory races still belong to #34.
