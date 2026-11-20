@@ -115,7 +115,6 @@ mod tests {
                 .err()
                 .expect("missing or whitespace-only bearer credentials must fail");
             assert_eq!(error, "Agent authentication token is unavailable");
-            assert!(!error.contains(token) || token.is_empty());
         }
         let state = AgentState::new(
             "nonempty-test-token".to_owned(),
