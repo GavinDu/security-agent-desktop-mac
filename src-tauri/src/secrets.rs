@@ -16,7 +16,9 @@ pub fn get_or_create_api_token() -> Result<String, String> {
         let mut entropy = [0_u8; 32];
         OsRng.fill_bytes(&mut entropy);
         let token = URL_SAFE_NO_PAD.encode(entropy);
-        entry.set_password(&token).map_err(|e| format!("Keychain write failed: {e}"))?;
+        entry
+            .set_password(&token)
+            .map_err(|e| format!("Keychain write failed: {e}"))?;
         Ok(token)
     }
     #[cfg(not(target_os = "macos"))]

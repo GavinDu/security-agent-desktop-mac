@@ -1,11 +1,19 @@
-use tauri::{menu::{Menu, MenuItem}, tray::TrayIconBuilder, Manager};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Manager,
+};
 
 pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Security Agent", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
     TrayIconBuilder::new()
-        .icon(app.default_window_icon().ok_or(tauri::Error::WindowNotFound)?.clone())
+        .icon(
+            app.default_window_icon()
+                .ok_or(tauri::Error::WindowNotFound)?
+                .clone(),
+        )
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {

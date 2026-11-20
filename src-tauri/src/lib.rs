@@ -1,7 +1,7 @@
-mod app;
 mod agent;
-mod settings;
+mod app;
 mod secrets;
+mod settings;
 mod tools;
 mod tray;
 mod vpn;
