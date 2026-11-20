@@ -11,6 +11,7 @@ pub fn run() {
             tools::commands::respond_approval,
             tools::commands::set_tool_policy,
             tools::commands::set_allowed_roots,
+            crate::vpn::commands::preview_wireguard_peer,
         ])
         .setup(|app| {
             // No HTTP listener is started if macOS Keychain or config is unavailable.
