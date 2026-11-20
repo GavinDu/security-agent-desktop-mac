@@ -235,6 +235,40 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("granted.txt");
+        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize]).unwrap();
+        let exact = read_scoped_file(&file).unwrap();
+        assert_eq!(exact.len(), MAX_FILE_BYTES as usize);
+        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        assert!(read_scoped_file(&file).is_err());
+        std::fs::write(&file, [0xff_u8, 0xfe_u8]).unwrap();
+        assert_eq!(
+            read_scoped_file(&file).unwrap_err(),
+            "Only UTF-8 files are supported"
+        );
+        assert!(read_scoped_file(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_fd_read_rejects_symlink_and_hardlink_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let approved = dir.path().join("approved.txt");
+        let symlink = dir.path().join("symlink.txt");
+        let hardlink = dir.path().join("hardlink.txt");
+        std::fs::write(&approved, b"allowed").unwrap();
+        std::os::unix::fs::symlink(&approved, &symlink).unwrap();
+        assert!(read_scoped_file(&symlink).is_err());
+        std::fs::hard_link(&approved, &hardlink).unwrap();
+        assert!(read_scoped_file(&hardlink).is_err());
+        assert!(read_scoped_file(&approved).is_err());
+        std::fs::remove_file(&hardlink).unwrap();
+        assert_eq!(read_scoped_file(&approved).unwrap(), "allowed");
+    }
+
     #[tokio::test]
     async fn bash_denied_before_execution() {
         let root = tempfile::tempdir().unwrap();
