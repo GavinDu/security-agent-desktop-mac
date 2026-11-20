@@ -29,6 +29,8 @@ the still-unimplemented /pairing behavior, not tool execution.
 ## Mandatory physical Mac checklist (#12, not yet evidenced)
 
 - [ ] Launch dev app: no white/blank main WebView, title Security Agent
+- [ ] Launch a second copy: no duplicate window/server or independent privilege state; the existing app should be used (focus UX remains separate)
+- [ ] Confirm per-user lock releases on app exit/crash, without deleting the lockfile
 - [ ] Close main window: it hides but agent continues running
 - [ ] Select tray Show: same window reappears, focused, no duplicate instances
 - [ ] Quit via tray: process and 127.0.0.1:8080 listener terminate
