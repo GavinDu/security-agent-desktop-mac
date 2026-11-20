@@ -40,7 +40,7 @@ export async function inspectMacListener(afterQuit = false, platform = process.p
   }
   let stdout;
   try {
-    ({ stdout } = await execute('lsof',
+    ({ stdout } = await execute('/usr/sbin/lsof',
       ['-nP', '-iTCP:8080', '-sTCP:LISTEN', '-F', 'n'],
       { timeout: 5000, maxBuffer: 16384 }));
   } catch (error) {
