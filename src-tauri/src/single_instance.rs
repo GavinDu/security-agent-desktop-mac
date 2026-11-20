@@ -21,7 +21,8 @@ impl InstanceGuard {
 
     fn acquire_at(path: &Path) -> Result<Self, String> {
         let parent = path.parent().ok_or("Invalid instance lock directory")?;
-        fs::create_dir_all(parent).map_err(|_| "Cannot initialize desktop instance lock directory")?;
+        fs::create_dir_all(parent)
+            .map_err(|_| "Cannot initialize desktop instance lock directory")?;
 
         // No lock contents, PID, secret or per-user paths are written.
         // Never follow an existing symlink to an arbitrary user file.
@@ -41,8 +42,14 @@ impl InstanceGuard {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let file = opts.open(path).map_err(|_| "Cannot open desktop instance lock")?;
-        if !file.metadata().map_err(|_| "Cannot inspect desktop instance lock")?.is_file() {
+        let file = opts
+            .open(path)
+            .map_err(|_| "Cannot open desktop instance lock")?;
+        if !file
+            .metadata()
+            .map_err(|_| "Cannot inspect desktop instance lock")?
+            .is_file()
+        {
             return Err("Unsafe desktop instance lock file".into());
         }
         #[cfg(unix)]

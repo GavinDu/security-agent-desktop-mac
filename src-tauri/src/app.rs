@@ -32,8 +32,8 @@ pub fn run() {
         .setup(|app| {
             // A second launch must not create duplicate privileges, windows or
             // a competing local HTTP listener. Hold this lock until Tauri exits.
-            let instance = crate::single_instance::InstanceGuard::acquire()
-                .map_err(std::io::Error::other)?;
+            let instance =
+                crate::single_instance::InstanceGuard::acquire().map_err(std::io::Error::other)?;
             app.manage(instance);
 
             // Refuse to start with a missing/invalid Keychain or settings state.
