@@ -61,7 +61,7 @@ pub fn run() {
                 loop {
                     match approvals.recv().await {
                         Ok(event) => {
-                            let _ = handle.emit("security-agent://tool-approval", event);
+                            let _ = handle.emit_to("main", "security-agent://tool-approval", event);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

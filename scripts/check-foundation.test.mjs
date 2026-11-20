@@ -57,3 +57,9 @@ test('each privileged Tauri command checks caller window identity and URL before
       `Every command must enforce trusted sender window/origin in ${file}`);
   }
 });
+
+test('tool approval previews are emitted only to the trusted main window', async () => {
+  const source = await readFile('src-tauri/src/app.rs', 'utf8');
+  assert.match(source, /handle\.emit_to\(\s*"main",\s*"security-agent:\/\/tool-approval",\s*event\)/);
+  assert.doesNotMatch(source, /handle\.emit\(\s*"security-agent:\/\/tool-approval"/);
+});
