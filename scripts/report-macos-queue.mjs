@@ -25,9 +25,9 @@ export function measureQueue(jobs, expectedName = 'macos') {
   };
 }
 
-export function renderQueueSummary(metric, { runId, attempt, headSha }) {
+export function renderQueueSummary(metric, { runId, attempt, headSha, checkoutSha }) {
   if (!/^[0-9]+$/.test(String(runId)) || !/^[0-9]+$/.test(String(attempt))
-      || !/^[0-9a-f]{40}$/.test(headSha)) {
+      || !/^[0-9a-f]{40}$/.test(headSha) || !/^[0-9a-f]{40}$/.test(checkoutSha)) {
     throw new Error('Invalid Actions run identity');
   }
   const minutes = (metric.queueSeconds / 60).toFixed(1);
@@ -37,13 +37,16 @@ export function renderQueueSummary(metric, { runId, attempt, headSha }) {
     '| Evidence | Value |',
     '| --- | --- |',
     '| Workflow run | ' + runId + ' (attempt ' + attempt + ') |',
-    '| Tested commit | ' + headSha + ' |',
+    '| Source head commit | ' + headSha + ' |',
+    '| Workflow checkout commit | ' + checkoutSha + ' |',
     '| Job ID | ' + metric.jobId + ' |',
     '| Job created UTC | ' + metric.queuedAt + ' |',
     '| Native runner started UTC | ' + metric.startedAt + ' |',
     '| Queue wait | ' + minutes + ' minutes |',
     '',
-    'Queue wait does not establish a capacity or billing root cause. The exact-head',
+    'On pull requests, the checkout SHA can be a synthetic merge commit, not the',
+    'source PR head. Review both SHA identities before attributing native results.',
+    'Queue wait does not establish a capacity or billing root cause. The',
     'macos-15 Rust tests, mounted-DMG verification and artifact upload remain mandatory.',
     '',
   ].join('\n');
@@ -55,7 +58,10 @@ export async function reportQueue(env = process.env, fetchImpl = fetch,
   const runId = env.GITHUB_RUN_ID;
   const attempt = env.GITHUB_RUN_ATTEMPT;
   const token = env.GITHUB_TOKEN;
-  const headSha = env.GITHUB_SHA;
+  // On pull_request GITHUB_SHA commonly identifies a synthetic merge ref.
+  // Preserve both the source PR head and the SHA checked out for this run.
+  const headSha = env.SOURCE_HEAD_SHA || env.GITHUB_SHA;
+  const checkoutSha = env.GITHUB_SHA;
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '') ||
       !/^[0-9]+$/.test(runId || '') || !/^[0-9]+$/.test(attempt || '') ||
       !token || !env.GITHUB_STEP_SUMMARY) {
@@ -75,7 +81,7 @@ export async function reportQueue(env = process.env, fetchImpl = fetch,
   const payload = await response.json();
   const metrics = measureQueue(payload.jobs);
   await append(env.GITHUB_STEP_SUMMARY,
-    renderQueueSummary(metrics, { runId, attempt, headSha }), 'utf8');
+    renderQueueSummary(metrics, { runId, attempt, headSha, checkoutSha }), 'utf8');
   process.stdout.write('Native macOS runner queue: ' +
     (metrics.queueSeconds / 60).toFixed(1) + ' minutes (run ' + runId + ').\n');
   return metrics;
