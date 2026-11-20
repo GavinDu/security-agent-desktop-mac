@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   measureQueue, renderQueueSummary, reportQueue,
 } from './report-macos-queue.mjs';
@@ -81,4 +82,19 @@ test('bad identity or API permission failures never produce fake success', async
     /HTTP 403/);
   await assert.rejects(reportQueue({ ...env, GITHUB_REPOSITORY: 'bad/repo/extra' }),
     /environment is unavailable/);
+});
+
+test('reporter runs only in macOS 15 job; native verification remains required', async () => {
+  const ci = await readFile('.github/workflows/ci.yml', 'utf8');
+  const [beforeMacos, native] = ci.split(/^  macos:$/m);
+  assert.ok(native, 'macOS job must exist');
+  assert.doesNotMatch(beforeMacos, /node scripts\/report-macos-queue\.mjs/);
+  assert.match(native, /runs-on: macos-15/);
+  assert.match(native, /actions: read/);
+  assert.match(native, /continue-on-error: true[\s\S]*node scripts\/report-macos-queue\.mjs/);
+  assert.match(native, /cargo test --locked/);
+  assert.match(native, /bash scripts\/verify-macos-bundle\.sh/);
+  assert.match(native, /actions\/upload-artifact@v4/);
+  assert.ok(native.indexOf('node scripts/report-macos-queue.mjs') <
+    native.indexOf('cargo test --locked'), 'report must run before native checks');
 });
