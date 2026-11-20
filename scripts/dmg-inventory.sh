@@ -27,7 +27,7 @@ require_single_inventory_path() {
       directory) [[ -d "$candidate" ]] || return 1 ;;
     esac
     selected=$candidate
-  done < <(find "$directory" -maxdepth 1 -mindepth 1 -name "$pattern" -print0 2>/dev/null && printf '\\0')
+  done < <(find "$directory" -maxdepth 1 -mindepth 1 -name "$pattern" -print0 2>/dev/null && printf '\0')
 
   [[ "$enumeration_complete" -eq 1 && "$count" -eq 1 ]] || return 1
   SINGLE_INVENTORY_PATH=$selected
