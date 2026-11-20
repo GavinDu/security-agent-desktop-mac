@@ -24,7 +24,6 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-
 /// Show only the existing, privileged main WebView. Used by the tray and
 /// native macOS reopen event. Launch arguments never become IPC commands.
 pub(crate) fn show_main(app: &tauri::AppHandle) {
