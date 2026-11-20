@@ -17,10 +17,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Check Rust formatting (prints actionable diff)
-        run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --exit-code -- src-tauri/src
+      - name: Check all Rust source formatting (including build.rs)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 10
