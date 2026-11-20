@@ -179,3 +179,23 @@ test('file read tool validates one opened leaf descriptor before bounded bytes (
   assert.doesNotMatch(code, /tokio::fs::read\(&path\)/);
   assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
 });
+
+test('authenticated tool/chat router shares bounded fail-fast permits (#100)', async () => {
+  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  const api = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  assert.match(agent, /pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16/);
+  assert.match(agent, /dispatch_permits: Arc<Semaphore>/);
+  assert.match(agent, /Arc::new\(Semaphore::new\(MAX_CONCURRENT_TOOL_REQUESTS\)\)/);
+  const limitLayer = api.indexOf('limit_tool_dispatch,');
+  const authLayer = api.indexOf('state.clone(), authorize');
+  assert.ok(limitLayer > 0 && authLayer > limitLayer,
+    'authorization is the outermost and first-entered middleware');
+  assert.match(api, /request\.method\(\) == Method::POST/);
+  assert.match(api, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/chat"\)/);
+  assert.match(api, /dispatch_permits\.clone\(\)\.try_acquire_owned\(\)/);
+  assert.match(api, /StatusCode::TOO_MANY_REQUESTS/);
+  assert.match(api, /fn authenticated_post_routes_share_fail_fast_dispatch_permits/);
+  assert.match(api, /StatusCode::UNAUTHORIZED/);
+  assert.match(api, /StatusCode::FORBIDDEN/);
+  assert.match(api, /StatusCode::NOT_IMPLEMENTED/);
+});
