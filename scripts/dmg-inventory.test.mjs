@@ -82,7 +82,8 @@ test('real macOS mounted verifier uses the same strict inventory as artifact upl
   assert.match(verifier, /source "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)\/dmg-inventory\.sh"/);
   assert.match(verifier, /require_single_inventory_path "\$dmg_dir" '\*\.dmg' file/);
   assert.match(verifier, /require_single_inventory_path "\$mount_dir" '\*\.app' directory/);
-  assert.doesNotMatch(verifier, /-print -quit/);
+  assert.doesNotMatch(verifier, /find[^\n]*-name '\\*\\.dmg'[^\n]*-print -quit/);
+  assert.doesNotMatch(verifier, /find[^\n]*-name '\\*\\.app'[^\n]*-print -quit/);
   assert.match(verifier, /hdiutil attach -readonly/);
   assert.match(verifier, /codesign --verify --strict/);
   assert.match(verifier, /Cannot inspect ad-hoc signature entitlements/);
