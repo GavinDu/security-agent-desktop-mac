@@ -70,25 +70,7 @@ pub fn run() {
             });
 
             let server_state: Arc<AgentState> = state;
-            tauri::async_runtime::spawn(async move {
-                match tokio::net::TcpListener::bind(server_state.bind).await {
-                    Ok(listener) => {
-                        server_state.mark_listener_online().await;
-                        if let Err(error) =
-                            agent::server::serve(listener, server_state.clone()).await
-                        {
-                            eprintln!("Agent server stopped: {error}");
-                            server_state.mark_listener_failed(&error).await;
-                        } else {
-                            server_state.mark_listener_stopped().await;
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("Agent server could not bind: {error}");
-                        server_state.mark_listener_failed(&error).await;
-                    }
-                }
-            });
+            tauri::async_runtime::spawn(agent::server::serve_with_retries(server_state));
             Ok(())
         })
         .run(tauri::generate_context!())
