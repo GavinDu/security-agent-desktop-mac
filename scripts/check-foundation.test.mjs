@@ -165,3 +165,19 @@ test('instance lock leaf protection is enforced on open, not only in preflight (
   assert.match(source, /fn refuses_private_hardlink_to_another_file/);
   assert.match(source, /fn refuses_symlink_leaf_after_metadata_preflight/);
 });
+
+
+test('persisted root grants require a bounded no-follow settings file descriptor (#87)', async () => {
+  const settings = await readFile('src-tauri/src/settings.rs', 'utf8');
+  const limit = settings.indexOf('const MAX_SETTINGS_BYTES: u64 = 256 * 1024');
+  const nofollow = settings.indexOf('opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)');
+  const open = settings.indexOf('let mut file = match opts.open(path)');
+  assert.ok(limit > 0 && nofollow > limit && open > nofollow);
+  assert.match(settings, /metadata\.nlink\(\)\s*!=\s*1/);
+  assert.match(settings, /metadata\.permissions\(\)\.mode\(\)\s*&\s*0o777\s*!=\s*0o600/);
+  assert.match(settings, /file\.take\(MAX_SETTINGS_BYTES \+ 1\)/);
+  assert.match(settings, /bytes\.len\(\) as u64 > MAX_SETTINGS_BYTES/);
+  assert.match(settings, /fn settings_loader_rejects_symlinks_hardlinks_and_public_file_mode/);
+  assert.match(settings, /fn bounded_settings_load_and_save_reject_oversize_without_replacing_file/);
+  assert.doesNotMatch(settings, /fs::read\(path\)/);
+});
