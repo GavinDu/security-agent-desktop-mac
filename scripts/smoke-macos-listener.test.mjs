@@ -33,7 +33,7 @@ test('after Quit requires zero native TCP 8080 listeners', () => {
 
 test('macOS OS-listener collection uses fixed read-only lsof args', async () => {
   const result = await inspectMacListener(false, 'darwin', async (command, args, options) => {
-    assert.equal(command, 'lsof');
+    assert.equal(command, '/usr/sbin/lsof');
     assert.deepEqual(args, ['-nP', '-iTCP:8080', '-sTCP:LISTEN', '-F', 'n']);
     assert.equal(options.timeout, 5000);
     return { stdout: 'p222\ncagent\nn127.0.0.1:8080\n' };
