@@ -196,3 +196,20 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
 });
+
+test('AgentState construction and startup share the same strict bind allowlist (#104)', async () => {
+  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  assert.match(agent, /fn allowed_agent_bind\(bind: SocketAddr\) -> bool/);
+  assert.match(agent, /bind\.port\(\) == 8080/);
+  assert.match(agent, /ip == Ipv4Addr::LOCALHOST \|\| ip == Ipv4Addr::new\(10, 8, 0, 1\)/);
+  const constructorStart = agent.indexOf('pub fn new(');
+  const predicate = agent.indexOf('if !allowed_agent_bind(bind)', constructorStart);
+  const registrySetup = agent.indexOf('ToolRegistry::canonical_roots', constructorStart);
+  assert.ok(constructorStart >= 0 && predicate > constructorStart && predicate < registrySetup,
+    'constructor must reject untrusted bind before any registry/privileged setup');
+  const parserStart = agent.indexOf('pub fn bind_address()');
+  assert.ok(parserStart >= 0 && agent.indexOf('if !allowed_agent_bind(bind)', parserStart) > parserStart,
+    'environment config and direct state constructors must share one predicate');
+  assert.match(agent, /fn constructor_enforces_shared_loopback_and_tunnel_bind_allowlist/);
+  assert.doesNotMatch(agent, /IpAddr::V6\(_\) => true|0\.0\.0\.0:8080/);
+});
