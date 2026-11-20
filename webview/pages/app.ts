@@ -59,6 +59,13 @@ async function updateRoots(roots: string[]): Promise<void> {
 }
 
 el('refresh').addEventListener('click', () => void refresh());
+el('previewPeer').addEventListener('click', () => {
+  const publicKey = (el('peerKey') as HTMLInputElement).value.trim();
+  const tunnelIp = (el('peerIp') as HTMLInputElement).value.trim();
+  void connectorBridge.previewWireGuardPeer(publicKey, tunnelIp)
+    .then((config) => { el('peerPreview').textContent = config; })
+    .catch((error: unknown) => { el('peerPreview').textContent = 'Validation error: ' + String(error); });
+});
 allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
 el('grantRoot').addEventListener('click', () => {

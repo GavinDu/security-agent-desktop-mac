@@ -23,6 +23,7 @@ export interface ConnectorBridge {
   setAllowedRoots(roots: string[]): Promise<void>;
   respondApproval(id: string, allow: boolean): Promise<boolean>;
   status(): Promise<{ binding: string; vpn_active: boolean; online: boolean }>;
+  previewWireGuardPeer(publicKey: string, tunnelIp: string): Promise<string>;
 }
 
 export const connectorBridge: ConnectorBridge = {
@@ -33,6 +34,7 @@ export const connectorBridge: ConnectorBridge = {
   setAllowedRoots: (roots) => invoke('set_allowed_roots', { roots }),
   respondApproval: (id, allow) => invoke('respond_approval', { id, allow }),
   status: () => invoke('get_agent_status'),
+  previewWireGuardPeer: (publicKey, tunnelIp) => invoke('preview_wireguard_peer', { publicKey, tunnelIp }),
 };
 
 declare global {

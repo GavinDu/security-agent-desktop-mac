@@ -34,7 +34,11 @@
       <div class="actions"><button id="allow" disabled>Allow once</button><button id="deny" disabled>Deny</button></div>
     </section>
     <section class="panel">
-      <h2>WireGuard</h2><p>Config generator available in Rust. Daemon setup, QR pairing, routing, and privileged changes are not enabled in this build.</p>
+      <h2>WireGuard configuration preview</h2>
+      <p>Preview a server-side peer entry. This does not enroll the peer, start VPN or expose a private key.</p>
+      <div class="actions"><input id="peerIp" placeholder="10.8.0.2" aria-label="Phone tunnel IP"><input id="peerKey" placeholder="Phone public key (base64)" aria-label="Phone WireGuard public key"><button id="previewPeer">Preview</button></div>
+      <pre id="peerPreview">No peer configuration generated.</pre>
+      <p class="muted">Daemon setup, QR pairing, pf routing and privileged changes are not enabled in this build.</p>
     </section>
   </main>
 </body>
