@@ -8,13 +8,13 @@ the reproducible ad-hoc developer artifact #11/#62.
 The existing macOS 15 CI produces **one development-only arm64 DMG**
 sealed with an ad-hoc code signature (Tauri signingIdentity "-").
 It is **not** Apple Developer ID signed, notarized, stapled or
-Gatekeeper-trusted as a distributable release. The \`upload-artifact\`
+Gatekeeper-trusted as a distributable release. The `upload-artifact`
 action is an internal CI diagnostic only, not a public release.
 
-Run \`npm run check:dev-distribution\` to assert this constrained posture.
-The same audit's mutation tests run in \`npm run test:foundation\` on
+Run `npm run check:dev-distribution` to assert this constrained posture.
+The same audit's mutation tests run in `npm run test:foundation` on
 frontend, Linux and macOS. It examines all tracked YAML workflows in
-\`.github/workflows\`, the macOS signing config, the IPC capability and
+`.github/workflows`, the macOS signing config, the IPC capability and
 Cargo updater dependencies. It rejects known public release/publish
 actions, write-scoped Actions permissions, remote WebView capabilities,
 signing-identity or entitlement overrides, or loss of the native DMG
