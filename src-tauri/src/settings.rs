@@ -89,7 +89,8 @@ impl AgentSettings {
                 use std::os::unix::fs::OpenOptionsExt;
                 opts.mode(0o600);
             }
-            let mut file = opts.open(&tmp)
+            let mut file = opts
+                .open(&tmp)
                 .map_err(|_| "Cannot create temporary settings file")?;
             file.write_all(&bytes)
                 .map_err(|_| "Cannot write settings.json")?;
@@ -214,6 +215,12 @@ mod tests {
             r#"{"allowed_roots":[],"policies":{"bash__run":"permit_all"}}"#,
         ] {
             fs::write(&path, text).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            // Test schema fail-closed, not merely an unsafe mode failure.
             assert!(AgentSettings::load_at(&path).is_err());
         }
     }
