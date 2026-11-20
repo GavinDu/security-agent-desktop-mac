@@ -76,3 +76,14 @@ and generated .icns are correct. For #12, require physical Mac screenshots,
 relaunch/reboot and tray evidence. For #13, require the Rust URL policy
 unit tests, static asset/CSP tests, and manual attempts to navigate away.
 For #14, require smoke output and repeatable instructions.
+
+## Apple Silicon ad-hoc application seal (unsigned developer artifact)
+
+The macOS 15 runner must produce an **ad-hoc bundle code signature** with
+Tauri `bundle.macOS.signingIdentity = "-"`, not merely the Rust linker's
+Mach-O signature. Tauri signs the entire .app before it is placed in the DMG.
+`scripts/verify-macos-bundle.sh` mounts the completed DMG and requires
+`codesign --verify --strict` to accept the complete app; its embedded
+signature must be ad-hoc with **no privileged entitlements**. A failed seal
+or entitlement extraction must make CI red. This check does not amount to
+Developer ID signing, Gatekeeper acceptance or notarization (tracked in #47).

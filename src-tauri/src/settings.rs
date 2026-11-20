@@ -83,10 +83,17 @@ mod tests {
         let mut first = AgentSettings::default();
         first.allowed_roots = vec!["/Users/local/Documents".into()];
         first.policies.insert("bash__run".into(), Policy::Ask);
+        first
+            .policies
+            .insert("filesystem__read_file".into(), Policy::Auto);
         first.save_at(&path).unwrap();
         let loaded = AgentSettings::load_at(&path).unwrap();
         assert_eq!(loaded.allowed_roots, first.allowed_roots);
         assert_eq!(loaded.policies.get("bash__run"), Some(&Policy::Ask));
+        assert_eq!(
+            loaded.policies.get("filesystem__read_file"),
+            Some(&Policy::Auto)
+        );
 
         let mut second = AgentSettings::default();
         second.policies.insert("bash__run".into(), Policy::Disable);
@@ -94,6 +101,7 @@ mod tests {
         let reloaded = AgentSettings::load_at(&path).unwrap();
         assert!(reloaded.allowed_roots.is_empty());
         assert_eq!(reloaded.policies.get("bash__run"), Some(&Policy::Disable));
+        assert!(!reloaded.policies.contains_key("filesystem__read_file"));
 
         let files: Vec<_> = fs::read_dir(path.parent().unwrap())
             .unwrap()

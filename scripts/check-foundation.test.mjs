@@ -139,3 +139,15 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('developer installer is ad-hoc signed as a complete app bundle, without elevated entitlements', () => {
+  assert.equal(config.bundle.macOS.signingIdentity, '-');
+  assert.equal(config.bundle.macOS.entitlements, undefined);
+});
+
+test('mounted unsigned DMG verifier fails closed on failed entitlement extraction', async () => {
+  const code = await readFile('scripts/verify-macos-bundle.sh', 'utf8');
+  assert.match(code, /codesign --verify --strict/);
+  assert.match(code, /if ! \/usr\/bin\/codesign --display --entitlements/);
+  assert.match(code, /refusing to assume none/);
+});
