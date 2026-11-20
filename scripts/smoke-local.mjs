@@ -8,6 +8,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { auditSavedSettings } from './smoke-settings.mjs';
 
 const run = promisify(execFile);
 const base = 'http://127.0.0.1:8080';
@@ -35,10 +38,15 @@ async function main() {
 
   if (authenticated) {
     assert.equal(process.platform, 'darwin', '--authenticated requires macOS Keychain');
-    const { stdout: token } = await run('security', [
-      'find-generic-password', '-s', 'com.gavindu.securityagent.desktop',
-      '-a', 'agent-api-token', '-w',
-    ], { maxBuffer: 2048, timeout: 4000 });
+    let token;
+    try {
+      ({ stdout: token } = await run('security', [
+        'find-generic-password', '-s', 'com.gavindu.securityagent.desktop',
+        '-a', 'agent-api-token', '-w',
+      ], { maxBuffer: 2048, timeout: 4000 }));
+    } catch {
+      throw new Error('Application Keychain token unavailable for the active login.');
+    }
     const apiToken = token.trim();
     assert.ok(apiToken.length >= 32, 'Keychain API token is missing or invalid');
     const tools = await request('/tools', apiToken);
@@ -49,8 +57,13 @@ async function main() {
     assert.ok(catalog.tools.some(({ function: fn }) => fn?.name === 'bash__run'));
     assert.equal((await request('/pairing', apiToken)).status, 501,
       'QR pairing must stay explicitly unavailable until implemented');
+
+    const settingsFile = join(homedir(), 'Library/Application Support',
+      'com.gavindu.securityagent.desktop', 'settings.json');
+    const audit = await auditSavedSettings(settingsFile);
+    process.stdout.write(`PASS: local settings saved=${audit.saved}, root grants=${audit.rootCount}, policies=${audit.policyCount}\n`);
   }
-  process.stdout.write(`PASS: local health, 401 security gates${authenticated ? ', Keychain tool catalog and 501 pairing' : ''}\n`);
+  process.stdout.write(`PASS: local health, 401 security gates${authenticated ? ', Keychain tool catalog, root-grant audit and 501 pairing' : ''}\n`);
 }
 
 main().catch((error) => {
