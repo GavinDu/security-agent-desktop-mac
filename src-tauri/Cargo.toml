@@ -28,6 +28,7 @@ rand = "0.8"
 subtle = "2.6"
 thiserror = "2"
 dirs = "6"
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }

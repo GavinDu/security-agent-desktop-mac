@@ -40,7 +40,10 @@ impl InstanceGuard {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+            // Kernel-enforced on the opened descriptor. A prior
+            // symlink_metadata(path) alone has a check/open race.
+            opts.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let file = opts
             .open(path)
@@ -64,6 +67,18 @@ impl InstanceGuard {
                 != 0o600
             {
                 return Err("Desktop instance lock permissions must be 0600".into());
+            }
+            // An existing hardlink to a different private file is not a
+            // dedicated instance lock. Checking the *opened* inode prevents
+            // a 0600 hardlink from being mistaken for the app's lockfile.
+            use std::os::unix::fs::MetadataExt;
+            if file
+                .metadata()
+                .map_err(|_| "Cannot inspect desktop instance lock")?
+                .nlink()
+                != 1
+            {
+                return Err("Unsafe hard-linked desktop instance lock".into());
             }
         }
 
@@ -93,6 +108,32 @@ mod tests {
         assert!(InstanceGuard::acquire_at(&path).is_ok());
         // The lockfile stays in place after unlock; never unlink a locked inode.
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_private_hardlink_to_another_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("some-private-file");
+        fs::write(&target, b"private value").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let lock_path = dir.path().join("desktop-instance.lock");
+        fs::hard_link(&target, &lock_path).unwrap();
+        assert!(InstanceGuard::acquire_at(&lock_path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"private value");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_leaf_after_metadata_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("external");
+        fs::write(&target, b"untouched").unwrap();
+        let path = dir.path().join("desktop-instance.lock");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(InstanceGuard::acquire_at(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
     }
 
     #[cfg(unix)]
