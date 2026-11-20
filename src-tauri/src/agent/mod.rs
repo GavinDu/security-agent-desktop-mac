@@ -26,6 +26,11 @@ impl AgentState {
         bind: SocketAddr,
         settings: AgentSettings,
     ) -> Result<Arc<Self>, String> {
+        // authorize() treats a missing Bearer header as an empty string.
+        // Never create a live agent whose token could match that default.
+        if token.trim().is_empty() {
+            return Err("Agent authentication token is unavailable".into());
+        }
         let roots = ToolRegistry::canonical_roots(&settings.allowed_roots)?;
         let gate = ApprovalGate::new(settings.policies.clone());
         let registry = Arc::new(ToolRegistry::new(roots, gate.clone()));
@@ -102,6 +107,25 @@ pub fn bind_address() -> Result<SocketAddr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_bearer_credentials_fail_closed_before_agent_setup() {
+        let bind = "127.0.0.1:8080".parse().unwrap();
+        for token in ["", " ", "\t\n", "\u{2003}"] {
+            let error = AgentState::new(token.to_owned(), bind, AgentSettings::default())
+                .err()
+                .expect("missing or whitespace-only bearer credentials must fail");
+            assert_eq!(error, "Agent authentication token is unavailable");
+            assert!(!error.contains(token) || token.is_empty());
+        }
+        let state = AgentState::new(
+            "nonempty-test-token".to_owned(),
+            bind,
+            AgentSettings::default(),
+        )
+        .expect("nonempty bearer credentials must remain supported");
+        assert_eq!(state.token, "nonempty-test-token");
+    }
+
     #[test]
     fn checks_source_network() {
         let state = AgentState::new(
