@@ -91,3 +91,18 @@ jobs:
           name: unsigned-security-agent-mac
           path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+  # Temporary capture of an exact Cargo resolution for a committed Cargo.lock.
+  cargo-lock-capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate Cargo application lockfile
+        run: cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+      - name: Emit Cargo application lock
+        run: |
+          echo BEGIN_CARGO_LOCK
+          cat src-tauri/Cargo.lock
+          echo END_CARGO_LOCK
