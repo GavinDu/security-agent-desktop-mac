@@ -45,11 +45,11 @@ test('four required CI jobs each check the GitHub checkout SHA before building',
   const checkouts = workflow.match(/- uses: actions\/checkout@v4/g) || [];
   assert.equal(checkouts.length, 4);
   assert.equal(invocations.length, 4);
+  // Split only on top-level two-space job headers, never indented steps.
+  const sections = workflow.split(/\n(?=  (?:rustfmt|frontend|rust-linux|macos):\r?\n)/);
   for (const job of ['rustfmt:', 'frontend:', 'rust-linux:', 'macos:']) {
-    const beginning = workflow.indexOf('\n  ' + job);
-    assert.ok(beginning > 0, 'missing required CI job: ' + job);
-    const next = workflow.indexOf('\n  ', beginning + 4);
-    const scope = workflow.slice(beginning, next === -1 ? undefined : next);
+    const scope = sections.find((section) => section.startsWith('  ' + job + '\n'));
+    assert.ok(scope, 'missing required CI job: ' + job);
     const checkout = scope.indexOf('actions/checkout@v4');
     const identity = scope.indexOf('bash scripts/check-ci-checkout.sh');
     assert.ok(checkout >= 0 && identity > checkout, 'identity must run after checkout');
