@@ -31,7 +31,7 @@ Proton authentication, or hosted services.
 macOS 13+, Node 22+, stable Rust, Xcode/Apple Command Line Tools.
 
 ```sh
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 npm run icons:desktop
 npm run typecheck
 npm run dev
@@ -55,7 +55,7 @@ is handled, the call fails closed.
 ```sh
 npm run build:webview
 npm run test:foundation
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run build
 ```
 

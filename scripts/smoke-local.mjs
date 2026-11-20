@@ -11,11 +11,12 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const base = 'http://127.0.0.1:8080';
-const options = { signal: AbortSignal.timeout(4000), redirect: 'error' };
+const options = { redirect: 'error' };
 
 async function request(path, authorization) {
   return fetch(new URL(path, base), {
     ...options,
+    signal: AbortSignal.timeout(4000),
     headers: authorization ? { Authorization: `Bearer ${authorization}` } : {},
   });
 }

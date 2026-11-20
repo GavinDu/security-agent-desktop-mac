@@ -9,11 +9,11 @@ Required: macOS 13+, Apple Silicon Mac Mini, Xcode + Command Line Tools,
 Node.js 22, stable Rust and the Tauri 2 host prerequisites.
 
 ```sh
-npm install --no-audit --no-fund
+npm ci --no-audit --no-fund
 npm run typecheck
 npm run build:webview
 npm run test:foundation
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run dev
 # From a separate terminal:
 npm run smoke
