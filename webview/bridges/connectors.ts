@@ -11,17 +11,23 @@ export interface ToolSpec {
 export interface ToolCall { name: string; arguments: Record<string, unknown> }
 export interface ApprovalEvent { id: string; tool: string; preview: string }
 
+export interface AgentSettings {
+  allowed_roots: string[];
+  policies: Record<string, 'auto' | 'ask' | 'disable'>;
+}
 export interface ConnectorBridge {
+  settings(): Promise<AgentSettings>;
   list(): Promise<ToolSpec[]>;
   invoke(call: ToolCall): Promise<unknown>;
   setPolicy(tool: string, policy: 'auto' | 'ask' | 'disable'): Promise<void>;
   setAllowedRoots(roots: string[]): Promise<void>;
   respondApproval(id: string, allow: boolean): Promise<boolean>;
-  status(): Promise<{ binding: string; vpn_active: boolean }>;
+  status(): Promise<{ binding: string; vpn_active: boolean; online: boolean }>;
 }
 
 export const connectorBridge: ConnectorBridge = {
   list: () => invoke('list_tools'),
+  settings: () => invoke('get_agent_settings'),
   invoke: (call) => invoke('invoke_tool', { call }),
   setPolicy: (tool, policy) => invoke('set_tool_policy', { tool, policy }),
   setAllowedRoots: (roots) => invoke('set_allowed_roots', { roots }),
