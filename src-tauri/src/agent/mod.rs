@@ -25,7 +25,10 @@ impl AgentState {
         match (self.bind.ip(), source) {
             (IpAddr::V4(bind), IpAddr::V4(ip)) if bind == Ipv4Addr::LOCALHOST => ip == Ipv4Addr::LOCALHOST,
             (IpAddr::V4(bind), IpAddr::V4(ip)) if bind == Ipv4Addr::new(10, 8, 0, 1) =>
-                ip.octets()[0..3] == [10, 8, 0],
+                {
+                    let parts = ip.octets();
+                    parts[0] == 10 && parts[1] == 8 && parts[2] == 0
+                },
             _ => false,
         }
     }

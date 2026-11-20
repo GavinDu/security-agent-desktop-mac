@@ -48,9 +48,15 @@ fn validate_peer_ip(ip: Ipv4Addr) -> Result<(), String> {
 
 fn validate_endpoint(endpoint: &str) -> Result<(), String> {
     if endpoint.is_empty() || endpoint.len() > 255 ||
-        !endpoint.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) ||
-        !endpoint.contains(':') {
+        !endpoint.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) {
         return Err("Endpoint must be a host:port without whitespace or control characters".into());
+    }
+    let (host, port) = endpoint.rsplit_once(':').ok_or("Endpoint must include port")?;
+    if host.is_empty() || (host.contains(':') && !(host.starts_with('[') && host.ends_with(']'))) {
+        return Err("IPv6 endpoint hosts must be enclosed in brackets".into());
+    }
+    if port.parse::<u16>().map_err(|_| "Invalid endpoint port")? == 0 {
+        return Err("Invalid endpoint port".into());
     }
     Ok(())
 }
@@ -144,6 +150,12 @@ mod tests {
             full_tunnel:false, dns:None,
         };
         assert!(render_client(&invalid).is_err());
+        let invalid_port = ClientConfig {
+            private_key:key(4), server_public_key:key(1), preshared_key:None,
+            tunnel_ip:"10.8.0.2".parse().unwrap(), endpoint:"vpn.local:0".into(),
+            full_tunnel:false, dns:None,
+        };
+        assert!(render_client(&invalid_port).is_err());
     }
     #[test]
     fn duplicate_peers_denied() {
