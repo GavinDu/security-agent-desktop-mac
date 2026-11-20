@@ -1,13 +1,16 @@
 use crate::tools::approvals::ApprovalGate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::process::Stdio;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
 };
-use std::process::Stdio;
-use tokio::{io::{AsyncRead, AsyncReadExt}, process::Command};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
@@ -156,30 +159,22 @@ impl ToolRegistry {
                 let mut child = process
                     .spawn()
                     .map_err(|_| "Cannot launch approved command")?;
-                let stdout = child
-                    .stdout
-                    .take()
-                    .ok_or("Cannot capture command stdout")?;
-                let stderr = child
-                    .stderr
-                    .take()
-                    .ok_or("Cannot capture command stderr")?;
+                let stdout = child.stdout.take().ok_or("Cannot capture command stdout")?;
+                let stderr = child.stderr.take().ok_or("Cannot capture command stderr")?;
                 // A timeout drops the readers and child; kill_on_drop covers
                 // the direct shell. Process-group cleanup is tracked
                 // separately in #35, not claimed by this output bound.
-                let (stdout, stderr, status) = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    async {
+                let (stdout, stderr, status) =
+                    tokio::time::timeout(Duration::from_secs(15), async {
                         tokio::try_join!(
                             read_bounded_output(stdout),
                             read_bounded_output(stderr),
                             child.wait()
                         )
-                    },
-                )
-                .await
-                .map_err(|_| "Command timed out".to_string())?
-                .map_err(|_| "Command execution or output capture failed")?;
+                    })
+                    .await
+                    .map_err(|_| "Command timed out".to_string())?
+                    .map_err(|_| "Command execution or output capture failed")?;
                 Ok(json!({
                     "exit_code": status.code(),
                     "stdout": String::from_utf8_lossy(&stdout.0),
@@ -269,15 +264,12 @@ mod tests {
             stderr_writer.shutdown().await.unwrap();
         });
 
-        let (stdout, stderr) = tokio::time::timeout(
-            Duration::from_secs(5),
-            async {
-                tokio::try_join!(
-                    read_bounded_output(stdout_reader),
-                    read_bounded_output(stderr_reader)
-                )
-            },
-        )
+        let (stdout, stderr) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::try_join!(
+                read_bounded_output(stdout_reader),
+                read_bounded_output(stderr_reader)
+            )
+        })
         .await
         .expect("both streams should drain rather than deadlock")
         .unwrap();
