@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Security Agent</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><span class="mark">◆</span><div><h1>Security Agent</h1><p>Mac Mini control plane · private by default</p></div><span id="status" class="status">Connecting</span></header>
+    <section class="panel">
+      <h2>Agent server</h2>
+      <p id="binding">Checking local service…</p>
+      <p class="muted">HTTP stays on loopback until WireGuard is configured. A Keychain token protects remote tool requests.</p>
+      <button id="refresh">Refresh status</button>
+    </section>
+    <section class="panel">
+      <h2>Tool catalog</h2><pre id="tools">Loading…</pre>
+    </section>
+    <section class="panel">
+      <h2>Permissions</h2>
+      <p class="muted">Grant read-only filesystem roots explicitly. Shell execution always respects its separate policy.</p>
+      <div class="actions"><input id="rootPath" type="text" placeholder="/Users/you/Documents" aria-label="Directory to grant"><button id="grantRoot">Grant directory</button><button id="clearRoots">Revoke all</button></div>
+      <pre id="roots">No directories granted.</pre>
+      <label for="bashPolicy">Shell tool policy</label>
+      <select id="bashPolicy"><option value="ask">Ask before running</option><option value="disable">Disabled</option><option value="auto">Auto-approve (unsafe)</option></select>
+      <p id="settingsNotice" class="muted"></p>
+    </section>
+    <section class="panel">
+      <h2>Pending approval</h2>
+      <p id="approval-text">No requests awaiting approval.</p>
+      <div class="actions"><button id="allow" disabled>Allow once</button><button id="deny" disabled>Deny</button></div>
+    </section>
+    <section class="panel">
+      <h2>WireGuard configuration preview</h2>
+      <p>Preview a server-side peer entry. This does not enroll the peer, start VPN or expose a private key.</p>
+      <div class="actions"><input id="peerIp" placeholder="10.8.0.2" aria-label="Phone tunnel IP"><input id="peerKey" placeholder="Phone public key (base64)" aria-label="Phone WireGuard public key"><button id="previewPeer">Preview</button></div>
+      <pre id="peerPreview">No peer configuration generated.</pre>
+      <p class="muted">Daemon setup, QR pairing, pf routing and privileged changes are not enabled in this build.</p>
+    </section>
+  </main>
+</body>
+</html>
