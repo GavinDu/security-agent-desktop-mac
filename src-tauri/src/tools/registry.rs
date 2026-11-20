@@ -2,6 +2,8 @@ use crate::tools::approvals::ApprovalGate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    fs::OpenOptions,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
@@ -10,6 +12,45 @@ use tokio::process::Command;
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
+
+// Scoped to the already-canonicalized grant path by the caller. This pins
+// the *leaf* inode through a single FD, preventing path replacement between
+// metadata and bytes. Parent-directory races still belong to #34.
+fn read_scoped_file(path: &Path) -> Result<String, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot open approved file safely")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot inspect approved file")?;
+    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+        return Err("Not a regular file or file exceeds 64 KiB".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err("Hard-linked files cannot be read as a scoped grant".into());
+        }
+    }
+
+    // Protect even if the opened regular file grows after metadata inspection.
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read approved file")?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err("File exceeds 64 KiB limit".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported".into())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -88,18 +129,12 @@ impl ToolRegistry {
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
-                let metadata = tokio::fs::metadata(&path)
+                // File open/read can block on filesystem I/O. Keep the
+                // verified handle and 64 KiB bound together off the reactor.
+                let read_path = path.clone();
+                let text = tokio::task::spawn_blocking(move || read_scoped_file(&read_path))
                     .await
-                    .map_err(|e| e.to_string())?;
-                if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-                    return Err("Not a regular file or file exceeds 64 KiB".into());
-                }
-                let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-                if bytes.len() > MAX_FILE_BYTES as usize {
-                    return Err("File exceeds limit".into());
-                }
-                let text =
-                    String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported")?;
+                    .map_err(|_| "Approved file read task failed")??;
                 Ok(json!({ "path": path, "content": text }))
             }
             "bash__run" => {
