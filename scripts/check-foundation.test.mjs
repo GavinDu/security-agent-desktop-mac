@@ -153,6 +153,19 @@ test('mounted unsigned DMG verifier fails closed on failed entitlement extractio
 });
 
 
+test('instance lock leaf protection is enforced on open, not only in preflight (#79)', async () => {
+  const source = await readFile('src-tauri/src/single_instance.rs', 'utf8');
+  const preflight = source.indexOf('fs::symlink_metadata(path)');
+  const flags = source.indexOf('.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)');
+  const open = source.indexOf('.open(path)');
+  assert.ok(preflight >= 0 && flags > preflight && open > flags,
+    'kernel no-follow flags must be present on the descriptor open');
+  assert.match(source, /\.nlink\(\)\s*!= 1/);
+  assert.match(source, /file\.try_lock\(\)/);
+  assert.match(source, /fn refuses_private_hardlink_to_another_file/);
+  assert.match(source, /fn refuses_symlink_leaf_after_metadata_preflight/);
+});
+
 test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
   const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
   assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
