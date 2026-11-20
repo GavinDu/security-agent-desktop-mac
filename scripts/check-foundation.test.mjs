@@ -151,3 +151,14 @@ test('mounted unsigned DMG verifier fails closed on failed entitlement extractio
   assert.match(code, /if ! \/usr\/bin\/codesign --display --entitlements/);
   assert.match(code, /refusing to assume none/);
 });
+
+
+test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
+  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
+  assert.match(server, /middleware::from_fn_with_state\(state\.clone\(\), authorize\)/);
+  assert.match(server, /async fn oversized_authenticated_json_is_rejected_before_tool_dispatch/);
+  assert.match(server, /StatusCode::PAYLOAD_TOO_LARGE/);
+  assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
+  assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
+});
