@@ -79,7 +79,8 @@ impl ToolRegistry {
     pub fn canonical_roots(roots: &[String]) -> Result<Vec<PathBuf>, String> {
         let mut canonical = Vec::new();
         for root in roots {
-            let path = std::fs::canonicalize(root).map_err(|_| "Invalid granted root".to_string())?;
+            let path =
+                std::fs::canonicalize(root).map_err(|_| "Invalid granted root".to_string())?;
             if !path.is_dir() {
                 return Err("Granted root is not a directory".into());
             }
@@ -296,20 +297,24 @@ mod tests {
 
         let real_file = profile.path().join(private_marker);
         std::fs::write(&real_file, b"not a directory").unwrap();
-        let invalid_dir = ToolRegistry::canonical_roots(&[real_file.to_string_lossy().into_owned()])
-            .expect_err("file cannot become a directory grant");
+        let invalid_dir =
+            ToolRegistry::canonical_roots(&[real_file.to_string_lossy().into_owned()])
+                .expect_err("file cannot become a directory grant");
         assert!(!invalid_dir.contains(private_marker));
         assert_eq!(invalid_dir, "Granted root is not a directory");
 
         let gate = ApprovalGate::new(HashMap::new());
         let reg = ToolRegistry::new(vec![profile.path().canonicalize().unwrap()], gate);
-        let inaccessible = reg.allowed_path(&real_file.join("missing"))
+        let inaccessible = reg
+            .allowed_path(&real_file.join("missing"))
             .expect_err("nonexistent file must fail closed");
         assert!(!inaccessible.contains(private_marker));
         assert_eq!(inaccessible, "Requested file path is inaccessible");
 
         let outside = tempfile::tempdir().unwrap();
-        let denied = reg.allowed_path(outside.path()).expect_err("ungranted directory denied");
+        let denied = reg
+            .allowed_path(outside.path())
+            .expect_err("ungranted directory denied");
         assert_eq!(denied, "Path outside granted roots");
         assert_eq!(reg.allowed_path(&real_file).unwrap(), real_file);
     }
