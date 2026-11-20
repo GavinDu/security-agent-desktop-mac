@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+const MAX_SETTINGS_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -25,13 +27,46 @@ impl AgentSettings {
     }
 
     fn load_at(path: &Path) -> Result<Self, String> {
-        match fs::read(path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings.json: {e}"))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(format!("Cannot load settings.json: {e}")),
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Reject a leaf symlink at the actual kernel open, rather than
+            // checking its path before open (a check/use race).
+            opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
+
+        let mut file = match opts.open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(_) => return Err("Cannot open settings.json safely".into()),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|_| "Cannot inspect settings.json")?;
+        if !metadata.is_file() || metadata.len() > MAX_SETTINGS_BYTES {
+            return Err("Unsafe or oversized settings.json".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if metadata.permissions().mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
+                return Err("Unsafe settings.json file permissions or links".into());
+            }
+        }
+
+        // Keep the same bound if a writer appends after the metadata check.
+        let mut bytes = Vec::new();
+        file.take(MAX_SETTINGS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Cannot read settings.json")?;
+        if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+            return Err("Oversized settings.json".into());
+        }
+        serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings.json: {e}"))
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -39,8 +74,12 @@ impl AgentSettings {
     }
 
     fn save_at(&self, path: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Cannot encode settings.json")?;
+        if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+            return Err("Settings exceed 256 KiB limit".into());
+        }
         fs::create_dir_all(path.parent().ok_or("Invalid settings path")?)
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| "Cannot create settings directory")?;
         let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> Result<(), String> {
             let mut opts = OpenOptions::new();
@@ -51,7 +90,7 @@ impl AgentSettings {
                 opts.mode(0o600);
             }
             let mut file = opts.open(&tmp).map_err(|e| e.to_string())?;
-            file.write_all(&serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?)
+            file.write_all(&bytes)
                 .map_err(|e| e.to_string())?;
             file.sync_all().map_err(|e| e.to_string())?;
             fs::rename(&tmp, path).map_err(|e| e.to_string())?;
