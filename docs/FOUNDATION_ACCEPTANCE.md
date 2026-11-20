@@ -87,3 +87,31 @@ Mach-O signature. Tauri signs the entire .app before it is placed in the DMG.
 signature must be ad-hoc with **no privileged entitlements**. A failed seal
 or entitlement extraction must make CI red. This check does not amount to
 Developer ID signing, Gatekeeper acceptance or notarization (tracked in #47).
+
+
+## Read-only OS listener audit — #74 (physical Mac Mini)
+
+After launching the Tauri app, do this alongside the existing HTTP + Keychain
+smoke commands. This is read-only; it does not launch, stop or reconfigure
+the app, firewall, pf, DNS, VPN interface or any network policy.
+
+```sh
+npm run smoke
+npm run smoke -- --authenticated
+npm run smoke:mac-listener
+# Then choose Quit from the macOS menu-bar tray; after exit:
+npm run smoke:mac-listener -- --after-quit
+```
+
+The native test runs macOS lsof with fixed arguments. In the running case
+it requires exactly one TCP 8080 listener bound to 127.0.0.1:8080, not
+0.0.0.0, LAN, or any IPv6 address. The after-Quit check requires no TCP
+8080 listener at all. Errors are sanitized; successful output shows only
+the expected state and listener count. Neither PID, username, token nor
+directory path is printed. Unit tests inject deterministic lsof fixtures;
+**they do not replace executing these steps on a real Mac Mini**.
+
+Keep #12 and #55 open until the actual physical Mac Mini tests, including
+tray, Keychain login, restart, settings persistence and screenshots, are
+completed and recorded safely. The tool is valid only for development
+loopback binding, not future WireGuard interface binding on 10.8.0.1.
