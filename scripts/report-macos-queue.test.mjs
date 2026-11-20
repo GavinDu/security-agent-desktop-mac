@@ -13,6 +13,7 @@ const job = {
   runner_name: 'hosted',
 };
 const sha = 'f797a55adb3d0953e4fd2f6b873b8db8acdecfdb';
+const syntheticMergeSha = '9f513d181d3f887bc16797d3a4026d859ee60fa9';
 
 test('reports per-job queue time on an exact attempt, not test execution duration', () => {
   const result = measureQueue([
@@ -23,7 +24,7 @@ test('reports per-job queue time on an exact attempt, not test execution duratio
   assert.equal(result.jobId, 123);
   assert.equal(result.queuedAt, '2026-11-20T13:50:53.000Z');
   assert.equal(result.startedAt, '2026-11-20T15:59:27.000Z');
-  const summary = renderQueueSummary(result, { runId: '44747917651', attempt: '2', headSha: sha });
+  const summary = renderQueueSummary(result, { runId: '44747917651', attempt: '2', headSha: sha, checkoutSha: syntheticMergeSha });
   assert.match(summary, /128\.6 minutes/);
   assert.match(summary, /attempt 2/);
   assert.match(summary, /macos-15/);
@@ -37,7 +38,7 @@ test('missing, duplicated and inconsistent job timestamps fail closed', () => {
   assert.throws(() => measureQueue([{ ...job, started_at: null }]), /unavailable/);
   assert.throws(() => measureQueue([{ ...job, started_at: '2026-11-20T13:40:00Z' }]), /inconsistent/);
   assert.throws(() => renderQueueSummary(measureQueue([job]), {
-    runId: 'not-a-number', attempt: '1', headSha: sha,
+    runId: 'not-a-number', attempt: '1', headSha: sha, checkoutSha: sha,
   }), /Invalid/);
 });
 
@@ -47,7 +48,8 @@ test('API integration is read-only, attempt-scoped and keeps tokens out of summa
     GITHUB_RUN_ID: '44747917651',
     GITHUB_RUN_ATTEMPT: '2',
     GITHUB_TOKEN: 'secret-canary-never-print',
-    GITHUB_SHA: sha,
+    GITHUB_SHA: syntheticMergeSha,
+    SOURCE_HEAD_SHA: sha,
     GITHUB_STEP_SUMMARY: '/tmp/fake-summary',
   };
   let endpoint, headers, stored;
@@ -65,7 +67,9 @@ test('API integration is read-only, attempt-scoped and keeps tokens out of summa
   assert.match(endpoint, /\/runs\/44747917651\/attempts\/2\/jobs\?per_page=100$/);
   assert.equal(headers.Authorization, 'Bearer ' + env.GITHUB_TOKEN);
   assert.ok(!stored.includes(env.GITHUB_TOKEN));
-  assert.match(stored, /Tested commit/);
+  assert.match(stored, /Source head commit/);
+  assert.match(stored, /Workflow checkout commit/);
+  assert.match(stored, /9f513d18/);
   assert.match(stored, /f797a55a/);
 });
 
@@ -91,10 +95,24 @@ test('reporter runs only in macOS 15 job; native verification remains required',
   assert.doesNotMatch(beforeMacos, /node scripts\/report-macos-queue\.mjs/);
   assert.match(native, /runs-on: macos-15/);
   assert.match(native, /actions: read/);
+  assert.match(native, /SOURCE_HEAD_SHA: \\$\\{\\{ github\.event\.pull_request\.head\.sha \\|\\| github\.sha \\}\\}/);
   assert.match(native, /continue-on-error: true[\s\S]*node scripts\/report-macos-queue\.mjs/);
   assert.match(native, /cargo test --locked/);
   assert.match(native, /bash scripts\/verify-macos-bundle\.sh/);
   assert.match(native, /actions\/upload-artifact@v4/);
   assert.ok(native.indexOf('node scripts/report-macos-queue.mjs') <
     native.indexOf('cargo test --locked'), 'report must run before native checks');
+});
+
+
+test('PR source and synthetic checkout identities are explicit and individually validated', () => {
+  const summary = renderQueueSummary(measureQueue([job]), {
+    runId: '44747917651', attempt: '1', headSha: sha, checkoutSha: syntheticMergeSha,
+  });
+  assert.match(summary, new RegExp('Source head commit \\| ' + sha));
+  assert.match(summary, new RegExp('Workflow checkout commit \\| ' + syntheticMergeSha));
+  assert.match(summary, /synthetic merge commit/);
+  assert.throws(() => renderQueueSummary(measureQueue([job]), {
+    runId: '44747917651', attempt: '1', headSha: sha, checkoutSha: 'invalid',
+  }), /Invalid Actions run identity/);
 });
