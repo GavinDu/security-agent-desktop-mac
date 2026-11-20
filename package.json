@@ -11,7 +11,8 @@
     "icons:desktop": "tauri icon assets/app-icon.svg -o src-tauri/icons",
     "build:webview": "node scripts/build-webview.mjs",
     "typecheck": "tsc --noEmit -p webview",
-    "test:foundation": "node --test scripts/check-foundation.test.mjs scripts/report-macos-queue.test.mjs",
+    "test:foundation": "node --test scripts/check-foundation.test.mjs scripts/report-macos-queue.test.mjs scripts/check-dev-distribution.test.mjs",
+    "check:dev-distribution": "node scripts/check-dev-distribution.mjs",
     "smoke": "node scripts/smoke-local.mjs"
   },
   "devDependencies": {
