@@ -59,7 +59,7 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
   macos:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
@@ -85,6 +85,21 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Build unsigned macOS DMG
         run: npm run build
+      - name: Verify app bundle metadata and unsigned installer output
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target/release/bundle/macos -type d -name '*.app' -print -quit)
+          test -n "$APP"
+          test -f "$APP/Contents/Info.plist"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")
+          test "$BUNDLE_ID" = 'com.gavindu.securityagent.desktop'
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")
+          test -x "$APP/Contents/MacOS/$EXECUTABLE"
+          test -d "$APP/Contents/Resources"
+          test -n "$(find "$APP/Contents/Resources" -type f -name '*.icns' -print -quit)"
+          test -n "$(find src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          echo "Verified unsigned DMG and bundle: $BUNDLE_ID, executable: $EXECUTABLE"
       - name: Upload unsigned DMG
         uses: actions/upload-artifact@v4
         with:
