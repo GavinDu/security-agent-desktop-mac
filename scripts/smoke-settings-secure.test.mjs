@@ -34,20 +34,20 @@ test('one-descriptor audit handles missing and valid private settings without di
   });
 });
 
-test('one-descriptor audit rejects symlink and hardlink leaves', async () => {
+test('one-descriptor audit rejects existing and dangling symlinks and hardlinks', async () => {
   await fixture(async ({ root, file, valid, save }) => {
     await save(valid);
-    const linkFile = join(root, 'linked.json');
-    await link(file, linkFile);
+    const linked = join(root, 'linked.json');
+    await link(file, linked);
     await assert.rejects(auditSavedSettings(file), /hard links/);
-    await rm(linkFile);
+    await rm(linked);
     await rm(file);
     await symlink(join(root, 'missing-target'), file);
     await assert.rejects(auditSavedSettings(file), /Cannot safely open/);
     await rm(file);
-    await save(valid);
-    await rm(file);
-    await symlink(join(root, 'real-settings.json'), file);
+    const real = join(root, 'real-settings.json');
+    await writeFile(real, JSON.stringify(valid), { mode: 0o600 });
+    await symlink(real, file);
     await assert.rejects(auditSavedSettings(file), /Cannot safely open/);
   });
 });
