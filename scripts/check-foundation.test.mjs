@@ -179,3 +179,20 @@ test('file read tool validates one opened leaf descriptor before bounded bytes (
   assert.doesNotMatch(code, /tokio::fs::read\(&path\)/);
   assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
 });
+
+test('bash tool streams and caps both pipes before producing JSON (#91)', async () => {
+  const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  const manifest = await readFile('src-tauri/Cargo.toml', 'utf8');
+  assert.match(source, /async fn read_bounded_output/);
+  assert.match(source, /Vec::with_capacity\(MAX_SHELL_OUTPUT\)/);
+  assert.match(source, /let remaining = MAX_SHELL_OUTPUT\.saturating_sub\(retained\.len\(\)\)/);
+  assert.match(source, /\.stdout\(Stdio::piped\(\)\)/);
+  assert.match(source, /\.stderr\(Stdio::piped\(\)\)/);
+  assert.match(source, /tokio::try_join!\([\s\S]*read_bounded_output\(stdout\)[\s\S]*read_bounded_output\(stderr\)/);
+  assert.match(source, /"output_truncated": stdout\.1 \|\| stderr\.1/);
+  assert.match(source, /fn stdout_and_stderr_drains_are_bounded_without_deadlock/);
+  assert.match(source, /fn output_truncation_detects_exact_byte_boundary/);
+  assert.doesNotMatch(source, /process\.output\(\)/);
+  assert.match(manifest, /"io-util"/);
+  assert.match(source, /kill_on_drop\(true\)/);
+});
