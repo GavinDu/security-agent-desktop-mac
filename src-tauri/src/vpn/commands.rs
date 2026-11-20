@@ -1,4 +1,7 @@
-use crate::{navigation, vpn::config::{self, Peer}};
+use crate::{
+    navigation,
+    vpn::config::{self, Peer},
+};
 use std::net::Ipv4Addr;
 use tauri::WebviewWindow;
 

@@ -43,3 +43,17 @@ test('WebView distribution is entirely locally bundled', async () => {
   assert.ok(stylesheet.length > 100);
   assert.doesNotMatch(html, /<iframe\b|<form\b|https?:\/\//i);
 });
+
+test('each privileged Tauri command checks caller window identity and URL before execution', async () => {
+  for (const [file, expected] of [
+    ['src-tauri/src/tools/commands.rs', 7],
+    ['src-tauri/src/vpn/commands.rs', 1],
+  ]) {
+    const code = await readFile(file, 'utf8');
+    const commands = code.match(/#\[tauri::command\]/g) ?? [];
+    const guards = code.match(/navigation::ensure_privileged_webview\(&window\)\?/g) ?? [];
+    assert.equal(commands.length, expected, `Unexpected command count in ${file}`);
+    assert.equal(guards.length, commands.length,
+      `Every command must enforce trusted sender window/origin in ${file}`);
+  }
+});

@@ -43,7 +43,9 @@ the still-unimplemented /pairing behavior, not tool execution.
 
 The main privileged WebView is manually instantiated from the Tauri config
 with an allow-only-`tauri://localhost/{,index.html}` navigation callback.
-New-window requests are denied. A CSP prohibits remote scripts, frames,
+New-window requests are denied. Every application Tauri command verifies
+the calling window label **and its currently loaded URL** before exposing
+tools, permissions or approval responses. A CSP prohibits remote scripts, frames,
 forms and workers. The Tauri ACL grants only event listen/unlisten.
 All custom Rust invoke commands remain *inherently privileged*, so never
 expose them to untrusted origins, local HTML files, or future browser tools.
