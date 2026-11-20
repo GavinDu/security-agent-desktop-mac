@@ -87,3 +87,35 @@ Mach-O signature. Tauri signs the entire .app before it is placed in the DMG.
 signature must be ad-hoc with **no privileged entitlements**. A failed seal
 or entitlement extraction must make CI red. This check does not amount to
 Developer ID signing, Gatekeeper acceptance or notarization (tracked in #47).
+
+
+## Native macOS reopen focus — independent #72 code increment
+
+Tauri's macOS \`RunEvent::Reopen\` is delivered when AppKit's
+\`applicationShouldHandleReopen\` callback fires. The app now calls the
+**same** \`tray::show_main\` function for Dock/Finder reactivation and tray
+Show, operating on \`get_webview_window("main")\` only. It neither constructs
+a new WebView nor takes any untrusted URL/launch arguments as tool commands.
+The existing per-user file lock still runs **before** Keychain and AgentState.
+
+This does **not** prove that launching a second process using \`open -n\`
+forwards a native reopen event. The second process still fails closed on
+the instance lock. It also does not prove physical focus behavior.
+
+Physical Apple Silicon verification, after a validated DMG installation:
+
+1. Record redacted macOS version, app commit, bundle type and screenshot.
+2. Close the title-bar window; verify the original process and loopback-only
+   health persist.
+3. Activate via Dock icon and Finder's normal **Open**; confirm the existing
+   trusted \`main\` window returns focused, same process, no extra window.
+4. Use tray **Show** and **Quit**; verify no second server or orphan listener.
+5. Separately launch using \`open -n\`, record whether it rejects/alerts or
+   focuses. Do not count process rejection alone as a passing focus test.
+6. Reboot/relaunch and attach sanitized screenshots, counts, and listener
+   address only (no Keychain tokens, usernames or granted root paths).
+
+If forced-new-process focus is required, #72 must evaluate a security-scoped
+Tauri single-instance callback or same-user activation IPC with validated
+permissions, **without weakening** the existing fail-closed process guard.
+No physical acceptance is asserted by this source-only increment.
