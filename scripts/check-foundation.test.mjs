@@ -166,6 +166,19 @@ test('instance lock leaf protection is enforced on open, not only in preflight (
   assert.match(source, /fn refuses_symlink_leaf_after_metadata_preflight/);
 });
 
+test('file read tool validates one opened leaf descriptor before bounded bytes (#94)', async () => {
+  const code = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  assert.match(code, /fn read_scoped_file\(path: &Path\)/);
+  assert.match(code, /custom_flags\(libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK\)/);
+  assert.match(code, /let metadata = file\s*\.metadata\(\)/);
+  assert.match(code, /metadata\.nlink\(\) != 1/);
+  assert.match(code, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
+  assert.match(code, /spawn_blocking\(move \|\| read_scoped_file\(&read_path\)\)/);
+  assert.match(code, /fn scoped_fd_read_rejects_symlink_and_hardlink_leaf/);
+  assert.match(code, /fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation/);
+  assert.doesNotMatch(code, /tokio::fs::read\(&path\)/);
+  assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
+});
 
 test('persisted root grants require a bounded no-follow settings file descriptor (#87)', async () => {
   const settings = await readFile('src-tauri/src/settings.rs', 'utf8');
