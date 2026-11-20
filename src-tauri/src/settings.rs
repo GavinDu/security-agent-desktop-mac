@@ -83,7 +83,9 @@ mod tests {
         let mut first = AgentSettings::default();
         first.allowed_roots = vec!["/Users/local/Documents".into()];
         first.policies.insert("bash__run".into(), Policy::Ask);
-        first.policies.insert("filesystem__read_file".into(), Policy::Auto);
+        first
+            .policies
+            .insert("filesystem__read_file".into(), Policy::Auto);
         first.save_at(&path).unwrap();
         let loaded = AgentSettings::load_at(&path).unwrap();
         assert_eq!(loaded.allowed_roots, first.allowed_roots);
