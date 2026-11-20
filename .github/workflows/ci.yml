@@ -31,6 +31,12 @@ jobs:
           node-version: '22'
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      # Temporary once-only capture to commit a reproducible npm lockfile.
+      - name: Emit generated npm lock for source control
+        run: |
+          echo BEGIN_NPM_LOCK
+          cat package-lock.json
+          echo END_NPM_LOCK
       - name: Typecheck
         run: npm run typecheck
       - name: Build bundled WebView
