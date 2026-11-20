@@ -95,7 +95,8 @@ test('reporter runs only in macOS 15 job; native verification remains required',
   assert.doesNotMatch(beforeMacos, /node scripts\/report-macos-queue\.mjs/);
   assert.match(native, /runs-on: macos-15/);
   assert.match(native, /actions: read/);
-  assert.match(native, /SOURCE_HEAD_SHA: \\$\\{\\{ github\.event\.pull_request\.head\.sha \\|\\| github\.sha \\}\\}/);
+  assert.ok(native.includes('SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}'));
+
   assert.match(native, /continue-on-error: true[\s\S]*node scripts\/report-macos-queue\.mjs/);
   assert.match(native, /cargo test --locked/);
   assert.match(native, /bash scripts\/verify-macos-bundle\.sh/);
@@ -103,7 +104,6 @@ test('reporter runs only in macOS 15 job; native verification remains required',
   assert.ok(native.indexOf('node scripts/report-macos-queue.mjs') <
     native.indexOf('cargo test --locked'), 'report must run before native checks');
 });
-
 
 test('PR source and synthetic checkout identities are explicit and individually validated', () => {
   const summary = renderQueueSummary(measureQueue([job]), {
