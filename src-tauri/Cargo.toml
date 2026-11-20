@@ -1,0 +1,38 @@
+[package]
+name = "security-agent-desktop-mac"
+version = "0.1.0"
+edition = "2021"
+description = "Private local Mac desktop agent and WireGuard gateway"
+license = "MIT"
+default-run = "security-agent-desktop-mac"
+
+[lib]
+name = "security_agent_desktop_mac"
+
+[[bin]]
+name = "security-agent-desktop-mac"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = ["tray-icon"] }
+axum = { version = "0.8", features = ["json"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+rand = "0.8"
+subtle = "2.6"
+thiserror = "2"
+dirs = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

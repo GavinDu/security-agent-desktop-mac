@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Local trusted Security Agent UI only. No remote WebView origins.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}
