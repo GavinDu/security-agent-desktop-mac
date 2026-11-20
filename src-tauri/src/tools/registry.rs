@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::{
+    fs::OpenOptions,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
@@ -36,6 +38,46 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
             truncated = true;
         }
     }
+}
+
+
+// Scoped to the already-canonicalized grant path by the caller. This pins
+// the *leaf* inode through a single FD, preventing path replacement between
+// metadata and bytes. Parent-directory races still belong to #34.
+fn read_scoped_file(path: &Path) -> Result<String, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "Cannot open approved file safely")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot inspect approved file")?;
+    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+        return Err("Not a regular file or file exceeds 64 KiB".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err("Hard-linked files cannot be read as a scoped grant".into());
+        }
+    }
+
+    // Protect even if the opened regular file grows after metadata inspection.
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read approved file")?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err("File exceeds 64 KiB limit".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported".into())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,18 +157,12 @@ impl ToolRegistry {
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
-                let metadata = tokio::fs::metadata(&path)
+                // File open/read can block on filesystem I/O. Keep the
+                // verified handle and 64 KiB bound together off the reactor.
+                let read_path = path.clone();
+                let text = tokio::task::spawn_blocking(move || read_scoped_file(&read_path))
                     .await
-                    .map_err(|e| e.to_string())?;
-                if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-                    return Err("Not a regular file or file exceeds 64 KiB".into());
-                }
-                let bytes = tokio::fs::read(&path).await.map_err(|e| e.to_string())?;
-                if bytes.len() > MAX_FILE_BYTES as usize {
-                    return Err("File exceeds limit".into());
-                }
-                let text =
-                    String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported")?;
+                    .map_err(|_| "Approved file read task failed")??;
                 Ok(json!({ "path": path, "content": text }))
             }
             "bash__run" => {
@@ -243,6 +279,40 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[test]
+    fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("granted.txt");
+        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize]).unwrap();
+        let exact = read_scoped_file(&file).unwrap();
+        assert_eq!(exact.len(), MAX_FILE_BYTES as usize);
+        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
+        assert!(read_scoped_file(&file).is_err());
+        std::fs::write(&file, [0xff_u8, 0xfe_u8]).unwrap();
+        assert_eq!(
+            read_scoped_file(&file).unwrap_err(),
+            "Only UTF-8 files are supported"
+        );
+        assert!(read_scoped_file(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_fd_read_rejects_symlink_and_hardlink_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let approved = dir.path().join("approved.txt");
+        let symlink = dir.path().join("symlink.txt");
+        let hardlink = dir.path().join("hardlink.txt");
+        std::fs::write(&approved, b"allowed").unwrap();
+        std::os::unix::fs::symlink(&approved, &symlink).unwrap();
+        assert!(read_scoped_file(&symlink).is_err());
+        std::fs::hard_link(&approved, &hardlink).unwrap();
+        assert!(read_scoped_file(&hardlink).is_err());
+        assert!(read_scoped_file(&approved).is_err());
+        std::fs::remove_file(&hardlink).unwrap();
+        assert_eq!(read_scoped_file(&approved).unwrap(), "allowed");
     }
 
     #[tokio::test]
