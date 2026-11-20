@@ -24,11 +24,18 @@ npm run build
 
 The authenticated smoke command reads the current login's application API
 token from Keychain; it does not echo the token. It tests tool catalog and
-the still-unimplemented /pairing behavior, not tool execution.
+the still-unimplemented /pairing behavior, not tool execution. It also
+audits the local settings file (when present) for mode 0600, a strict
+ask/auto/disable policy schema and accessible absolute root directories.
+The output reports **counts only**, not filesystem paths or secrets.
+Missing settings.json is valid and means no saved grants. This does not
+replace race-free root enforcement (#34) or interactive Mac evidence (#55).
 
 ## Mandatory physical Mac checklist (#12, not yet evidenced)
 
 - [ ] Launch dev app: no white/blank main WebView, title Security Agent
+- [ ] Launch a second copy: no duplicate window/server or independent privilege state; the existing app should be used (focus UX remains separate)
+- [ ] Confirm per-user lock releases on app exit/crash, without deleting the lockfile
 - [ ] Close main window: it hides but agent continues running
 - [ ] Select tray Show: same window reappears, focused, no duplicate instances
 - [ ] Quit via tray: process and 127.0.0.1:8080 listener terminate
@@ -69,3 +76,14 @@ and generated .icns are correct. For #12, require physical Mac screenshots,
 relaunch/reboot and tray evidence. For #13, require the Rust URL policy
 unit tests, static asset/CSP tests, and manual attempts to navigate away.
 For #14, require smoke output and repeatable instructions.
+
+## Apple Silicon ad-hoc application seal (unsigned developer artifact)
+
+The macOS 15 runner must produce an **ad-hoc bundle code signature** with
+Tauri `bundle.macOS.signingIdentity = "-"`, not merely the Rust linker's
+Mach-O signature. Tauri signs the entire .app before it is placed in the DMG.
+`scripts/verify-macos-bundle.sh` mounts the completed DMG and requires
+`codesign --verify --strict` to accept the complete app; its embedded
+signature must be ad-hoc with **no privileged entitlements**. A failed seal
+or entitlement extraction must make CI red. This check does not amount to
+Developer ID signing, Gatekeeper acceptance or notarization (tracked in #47).

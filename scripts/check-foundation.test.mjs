@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, writeFile, chmod, symlink, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { auditSavedSettings } from './smoke-settings.mjs';
 
 const json = async (path) => JSON.parse(await readFile(path, 'utf8'));
 const config = await json('src-tauri/tauri.conf.json');
@@ -64,8 +67,66 @@ test('tool approval previews are emitted only to the trusted main window', async
   assert.doesNotMatch(source, /handle\.emit\(\s*"security-agent:\/\/tool-approval"/);
 });
 
-test('unsigned developer installer config declares no signing identity or entitlement override', () => {
-  assert.equal(config.bundle.macOS.signingIdentity, undefined);
+test('CLI settings audit sees default-deny and redacts granted paths', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'security-agent-audit-'));
+  try {
+    const path = join(temp, 'settings.json');
+    assert.deepEqual(await auditSavedSettings(path),
+      { saved: false, rootCount: 0, policyCount: 0 });
+    const root = join(temp, 'private-root');
+    await mkdir(root);
+    await writeFile(path, JSON.stringify({
+      allowed_roots: [root],
+      policies: { bash__run: 'ask', filesystem__read_file: 'auto' },
+    }), { mode: 0o600 });
+    await chmod(path, 0o600);
+    const result = await auditSavedSettings(path);
+    assert.deepEqual(result, { saved: true, rootCount: 1, policyCount: 2 });
+    assert.ok(!JSON.stringify(result).includes(root), 'private root path must not be returned');
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('CLI settings audit refuses public, symlinked, malformed and unavailable grants without path leaks', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'security-agent-audit-'));
+  try {
+    const file = join(temp, 'settings.json');
+    const allowed = join(temp, 'allowed');
+    await mkdir(allowed);
+    const valid = { allowed_roots: [allowed], policies: { bash__run: 'disable' } };
+    const save = async (value) => {
+      await writeFile(file, typeof value === 'string' ? value : JSON.stringify(value));
+      await chmod(file, 0o600);
+    };
+    await save(valid);
+    await chmod(file, 0o644);
+    await assert.rejects(auditSavedSettings(file), /private 0600/);
+    await save('{');
+    await assert.rejects(auditSavedSettings(file), /JSON is unreadable/);
+    await save({ ...valid, unknown: true });
+    await assert.rejects(auditSavedSettings(file), /unknown field/);
+    await save({ ...valid, policies: { bash__run: 'permit_all' } });
+    await assert.rejects(auditSavedSettings(file), /invalid tool policy/);
+    await save({ ...valid, allowed_roots: ['relative-root'] });
+    await assert.rejects(auditSavedSettings(file), /not an absolute directory/);
+    const secret = join(temp, 'secret-personal-folder');
+    await save({ ...valid, allowed_roots: [secret] });
+    await assert.rejects(auditSavedSettings(file), (error) => {
+      assert.match(error.message, /configured root is unavailable/);
+      assert.ok(!error.message.includes(secret), 'failure must not reveal a user path');
+      return true;
+    });
+    await rm(file);
+    await symlink(join(temp, 'nonexistent-private-file'), file);
+    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('developer installer is ad-hoc signed as a complete app bundle, without elevated entitlements', () => {
+  assert.equal(config.bundle.macOS.signingIdentity, '-');
   assert.equal(config.bundle.macOS.entitlements, undefined);
 });
 
