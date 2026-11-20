@@ -246,6 +246,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_post_routes_share_fail_fast_dispatch_permits() {
+        use crate::agent::MAX_CONCURRENT_TOOL_REQUESTS;
+        let state = AgentState::new(
+            "some-long-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let make = |source: &'static str, uri: &'static str, authorized: bool| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Content-Type", "application/json");
+            if authorized {
+                request = request.header("Authorization", "Bearer some-long-test-token");
+            }
+            let mut req = request
+                .body(Body::from(r#"{"message":"hello"}"#))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+                source.parse().unwrap(),
+                42123,
+            )));
+            req
+        };
+
+        // Simulate all running, approved but outstanding tool requests. No
+        // daemon, shell command, HTTP socket, or physical Keychain is needed.
+        let occupied = state
+            .dispatch_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TOOL_REQUESTS as u32)
+            .await
+            .unwrap();
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        // Outer source and bearer middleware must reject first even while
+        // the inner tool dispatch limit is exhausted.
+        assert_eq!(
+            app.clone()
+                .oneshot(make("127.0.0.1", "/tools", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make("192.168.1.2", "/chat", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for path in ["/tools", "/chat"] {
+            let response = app
+                .clone()
+                .oneshot(make("127.0.0.1", path, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "Concurrent tool request limit reached");
+        }
+
+        // Health is deliberately not in the tool budget.
+        let mut health = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        health.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "127.0.0.1".parse().unwrap(),
+            42124,
+        )));
+        assert_eq!(
+            app.clone().oneshot(health).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        drop(occupied);
+        assert_eq!(
+            state.dispatch_permits.available_permits(),
+            MAX_CONCURRENT_TOOL_REQUESTS
+        );
+        assert_eq!(
+            app.oneshot(make("127.0.0.1", "/chat", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        assert_eq!(
+            state.dispatch_permits.available_permits(),
+            MAX_CONCURRENT_TOOL_REQUESTS
+        );
+    }
+
+    #[tokio::test]
     async fn port_conflict_reports_failure_and_recovers_when_port_is_released() {
         let blocking = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let bind = blocking.local_addr().unwrap();
