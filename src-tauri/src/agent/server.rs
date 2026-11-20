@@ -1,7 +1,7 @@
 use crate::{agent::AgentState, tools::registry::ToolCall};
 use axum::{
     extract::{ConnectInfo, Request, State},
-    http::{header, StatusCode},
+    http::{header, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,6 +19,12 @@ pub fn router(state: Arc<AgentState>) -> Router {
         .route("/tools", get(list_tools).post(invoke_tool))
         .route("/chat", post(chat))
         .route("/pairing", get(pairing))
+        // Axum layers are entered in reverse order: authenticate first,
+        // then attempt admission, before any JSON/tool dispatch happens.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limit_tool_dispatch,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
 }
@@ -101,6 +107,33 @@ async fn authorize(
                 .into_response();
         }
     }
+    next.run(request).await
+}
+
+/// Fail fast for authenticated concurrent tool/chat dispatch. This is not
+/// transport-layer connection protection, body byte accounting or per-IP rate
+/// limiting (which remain in the broad P0 security issue #36).
+async fn limit_tool_dispatch(
+    State(state): State<Arc<AgentState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let is_tool_post = request.method() == Method::POST
+        && matches!(request.uri().path(), "/tools" | "/chat");
+    if !is_tool_post {
+        return next.run(request).await;
+    }
+
+    // Same semaphore for both routes and all requests. The owned permit is
+    // held until the response completes, including an awaited approval flow;
+    // cancellation drops it automatically without leaking capacity.
+    let Ok(_permit) = state.dispatch_permits.clone().try_acquire_owned() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"Concurrent tool request limit reached"})),
+        )
+            .into_response();
+    };
     next.run(request).await
 }
 
