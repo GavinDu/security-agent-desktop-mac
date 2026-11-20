@@ -20,7 +20,7 @@ GitHub capacity, billing or runner-label root cause.
 The macOS job now invokes a read-only Node 22 script after checkout. It calls
 the GitHub Actions jobs API for its own *run ID and attempt*, requires one
 named macos job, validates its created/started timestamps and records the
-result to GITHUB_STEP_SUMMARY with the exact SHA. Only the macOS job gets
+result to GITHUB_STEP_SUMMARY with separate source-head and checkout SHAs. Only the macOS job gets
 actions:read. The Actions token is passed via an environment variable and
 is never included in log or summary output.
 
@@ -30,6 +30,18 @@ gates have *not* changed: macos-15, locked native Rust tests, bundled app
 build, strict verification of the mounted DMG and artifact upload still must
 all pass on the exact head. The telemetry script is unit-tested on Linux,
 macOS and frontend jobs.
+
+### PR source head versus workflow checkout identity
+
+For `pull_request` events, GitHub's `GITHUB_SHA` can be the synthetic
+test-merge commit, not the source PR head SHA. This telemetry now records
+**both** the PR source-head SHA from the trusted GitHub event context and
+the workflow checkout SHA (`github.sha`). On a push both values match.
+The step summary calls neither a separate signed release nor a final
+branch-protection approval. A green native job must be tied to the
+correct PR head *and* its tested checkout/merge ref; verify the artifact
+head through the Actions run metadata before merge. The reported queue
+duration alone cannot attest code identity or validate a release.
 
 The metric is *job.created_at to job.started_at*, not run-created to runner
 allocation and not app compile duration. Repeated-job or missing-timestamp
