@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# PRs can generate many rapid updates while the native Mac bundle compiles.
+# Preserve only the newest run for a PR; never treat a canceled run as green.
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rustfmt:
     runs-on: ubuntu-latest
