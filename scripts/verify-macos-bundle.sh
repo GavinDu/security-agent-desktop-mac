@@ -3,10 +3,17 @@
 # intermediate .app after generating its DMG. Never inspect that path.
 set -euo pipefail
 
+# Only the exact artifact we strictly verify may match CI's *.dmg upload.
+# A second, stale or symlinked candidate must stop the release gate.
+source "$(dirname "${BASH_SOURCE[0]}")/dmg-inventory.sh"
 dmg_dir="src-tauri/target/release/bundle/dmg"
-dmg=$(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)
-if [[ -z "$dmg" || ! -s "$dmg" ]]; then
-  echo "Missing or empty unsigned DMG in $dmg_dir" >&2
+if ! require_single_inventory_path "$dmg_dir" '*.dmg' file; then
+  echo "Expected exactly one real non-symlink unsigned DMG" >&2
+  exit 1
+fi
+dmg=$SINGLE_INVENTORY_PATH
+if [[ ! -s "$dmg" ]]; then
+  echo "Unsigned DMG is empty" >&2
   exit 1
 fi
 
@@ -27,9 +34,13 @@ trap cleanup EXIT
 hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
 mounted=1
 
-app=$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)
-if [[ -z "$app" || ! -f "$app/Contents/Info.plist" ]]; then
-  echo "DMG does not contain a macOS application with an Info.plist" >&2
+if ! require_single_inventory_path "$mount_dir" '*.app' directory; then
+  echo "Mounted DMG must contain exactly one real non-symlink application" >&2
+  exit 1
+fi
+app=$SINGLE_INVENTORY_PATH
+if [[ -L "$app/Contents" || -L "$app/Contents/Info.plist" || ! -f "$app/Contents/Info.plist" ]]; then
+  echo "Mounted DMG application has an invalid Info.plist" >&2
   exit 1
 fi
 
@@ -41,7 +52,7 @@ fi
 
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
 binary="$app/Contents/MacOS/$executable"
-test -x "$binary" || { echo "Missing bundle executable: $executable" >&2; exit 1; }
+[[ -x "$binary" && ! -L "$binary" ]] || { echo "Missing or symlinked bundle executable" >&2; exit 1; }
 lipo "$binary" -verify_arch arm64 || { echo "Bundle lacks Apple Silicon arm64 executable" >&2; exit 1; }
 
 icon=$(find "$app/Contents/Resources" -type f -name '*.icns' -print -quit)
