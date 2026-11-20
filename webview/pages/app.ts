@@ -13,15 +13,31 @@ const bashPolicy = el('bashPolicy') as HTMLSelectElement;
 let pending: ApprovalEvent | null = null;
 let configuredRoots: string[] = [];
 
+type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
+
+function renderStatus(status: AgentStatus): void {
+  el('status').textContent = status.online ? 'Running' : status.error ? 'Unavailable' : 'Starting';
+  el('status').classList.toggle('ok', status.online);
+  el('binding').textContent = 'Configured ' + status.binding +
+    (status.online ? ' · accepting connections' : status.error ? ' · ' + status.error : ' · not listening');
+}
+
+async function refreshStatus(): Promise<void> {
+  try {
+    renderStatus(await connectorBridge.status());
+  } catch {
+    el('status').textContent = 'Unavailable';
+    el('status').classList.remove('ok');
+    el('binding').textContent = 'Local agent status could not be retrieved.';
+  }
+}
+
 async function refresh(): Promise<void> {
   try {
     const [status, tools, settings] = await Promise.all([
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
     ]);
-    el('status').textContent = status.online ? 'Running' : status.error ? 'Unavailable' : 'Starting';
-    el('status').classList.toggle('ok', status.online);
-    el('binding').textContent = 'Configured ' + status.binding +
-      (status.online ? ' · accepting connections' : status.error ? ' · ' + status.error : ' · not listening');
+    renderStatus(status);
     el('tools').textContent = JSON.stringify(tools, null, 2);
     configuredRoots = settings.allowed_roots;
     el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
@@ -91,3 +107,6 @@ void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {
   deny.disabled = false;
 });
 void refresh();
+// Status polling must not overwrite a user's in-progress permissions edits.
+// Keep this independent of the full settings/catalog refresh.
+window.setInterval(() => void refreshStatus(), 5000);
