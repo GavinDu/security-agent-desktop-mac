@@ -1,0 +1,42 @@
+name: Mac desktop CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Generate Tauri icons
+        run: npm run icons:desktop
+      - name: Typecheck frontend
+        run: npm run typecheck
+      - name: Build frontend
+        run: npm run build:webview
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build unsigned macOS DMG
+        run: npm run build
+      - name: Upload unsigned DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-security-agent-mac
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
