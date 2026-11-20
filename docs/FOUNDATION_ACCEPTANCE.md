@@ -91,14 +91,14 @@ Developer ID signing, Gatekeeper acceptance or notarization (tracked in #47).
 
 ## Native macOS reopen focus — independent #72 code increment
 
-Tauri's macOS \`RunEvent::Reopen\` is delivered when AppKit's
-\`applicationShouldHandleReopen\` callback fires. The app now calls the
-**same** \`tray::show_main\` function for Dock/Finder reactivation and tray
-Show, operating on \`get_webview_window("main")\` only. It neither constructs
+Tauri's macOS `RunEvent::Reopen` is delivered when AppKit's
+`applicationShouldHandleReopen` callback fires. The app now calls the
+**same** `tray::show_main` function for Dock/Finder reactivation and tray
+Show, operating on `get_webview_window("main")` only. It neither constructs
 a new WebView nor takes any untrusted URL/launch arguments as tool commands.
 The existing per-user file lock still runs **before** Keychain and AgentState.
 
-This does **not** prove that launching a second process using \`open -n\`
+This does **not** prove that launching a second process using `open -n`
 forwards a native reopen event. The second process still fails closed on
 the instance lock. It also does not prove physical focus behavior.
 
@@ -108,9 +108,9 @@ Physical Apple Silicon verification, after a validated DMG installation:
 2. Close the title-bar window; verify the original process and loopback-only
    health persist.
 3. Activate via Dock icon and Finder's normal **Open**; confirm the existing
-   trusted \`main\` window returns focused, same process, no extra window.
+   trusted `main` window returns focused, same process, no extra window.
 4. Use tray **Show** and **Quit**; verify no second server or orphan listener.
-5. Separately launch using \`open -n\`, record whether it rejects/alerts or
+5. Separately launch using `open -n`, record whether it rejects/alerts or
    focuses. Do not count process rejection alone as a passing focus test.
 6. Reboot/relaunch and attach sanitized screenshots, counts, and listener
    address only (no Keychain tokens, usernames or granted root paths).
