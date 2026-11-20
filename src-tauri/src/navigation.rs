@@ -52,6 +52,15 @@ mod tests {
             "tauri://localhost/other.html",
             "tauri://localhost/index.html?remote=true",
             "tauri://localhost:4545/index.html",
+            "tauri://user:pass@localhost/index.html",
+            "tauri://user@localhost/index.html",
+            "tauri://127.0.0.1/index.html",
+            "tauri://localhost.evil/index.html",
+            "tauri://localhost//index.html",
+            "tauri://localhost/INDEX.HTML",
+            "tauri://localhost/index.html/extra",
+            "tauri://localhost/%69ndex.html",
+            "tauri://localhost/index.html?tool=filesystem__read_file",
         ] {
             assert!(
                 !trusted_main_document(&Url::parse(value).unwrap()),

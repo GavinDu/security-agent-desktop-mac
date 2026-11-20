@@ -17,6 +17,21 @@ test('the only configured privileged desktop WebView must be created with naviga
   assert.equal(config.identifier, 'com.gavindu.securityagent.desktop');
 });
 
+test('native WebView must install trusted navigation and popup deny hooks before build', async () => {
+  const source = await readFile('src-tauri/src/app.rs', 'utf8');
+  const constructors = source.match(/WebviewWindowBuilder::from_config\(/g) ?? [];
+  assert.equal(constructors.length, 1, 'exactly one window should be created with explicit guards');
+  assert.doesNotMatch(source, /WebviewWindowBuilder::new\(/, 'no unguarded second window builder');
+  const start = source.indexOf('WebviewWindowBuilder::from_config(app, &window_config)');
+  const navigation = source.indexOf('.on_navigation(navigation::trusted_main_document)', start);
+  const popup = source.indexOf(
+    '.on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)', navigation
+  );
+  const built = source.indexOf('.build()?', popup);
+  assert.ok(start >= 0 && navigation > start && popup > navigation && built > popup,
+    'both origin navigation and popup guards must be installed before native WebView build');
+});
+
 test('CSP prevents remote JS, frames, forms and active third-party resources', () => {
   const csp = config.app.security.csp;
   for (const directive of [
