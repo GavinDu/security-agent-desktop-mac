@@ -2947,6 +2947,7 @@ dependencies = [
  "dirs 6.0.0",
  "http-body-util",
  "keyring",
+ "libc",
  "rand",
  "serde",
  "serde_json",
