@@ -10,7 +10,11 @@ use std::{
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
 #[cfg(unix)]
-use std::{ffi::CString, os::fd::{AsRawFd, FromRawFd}, os::unix::{ffi::OsStrExt, fs::MetadataExt}};
+use std::{
+    ffi::CString,
+    os::fd::{AsRawFd, FromRawFd},
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+};
 
 const MAX_SETTINGS_BYTES: u64 = 256 * 1024;
 
@@ -169,8 +173,11 @@ impl AgentSettings {
                 let mut file = open_settings_at(
                     &directory,
                     &temp,
-                    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
-                        | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
                     0o600,
                 )
                 .map_err(|_| "Cannot create temporary settings file")?;
@@ -184,7 +191,8 @@ impl AgentSettings {
                         directory.as_raw_fd(),
                         leaf.as_ptr(),
                     )
-                } != 0 {
+                } != 0
+                {
                     return Err("Cannot replace settings.json".into());
                 }
                 Ok(())
@@ -405,8 +413,7 @@ mod tests {
         let mut file = open_settings_at(
             &dir,
             &temporary,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
-                | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         )
         .unwrap();
@@ -423,8 +430,14 @@ mod tests {
             },
             0
         );
-        assert_eq!(fs::read(moved.join("settings.json")).unwrap(), b"safe-settings");
-        assert_eq!(fs::read(outside.join("settings.json")).unwrap(), b"outside-sentinel");
+        assert_eq!(
+            fs::read(moved.join("settings.json")).unwrap(),
+            b"safe-settings"
+        );
+        assert_eq!(
+            fs::read(outside.join("settings.json")).unwrap(),
+            b"outside-sentinel"
+        );
     }
 
     #[test]
