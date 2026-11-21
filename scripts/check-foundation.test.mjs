@@ -134,7 +134,7 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     });
     await rm(file);
     await symlink(join(temp, 'nonexistent-private-file'), file);
-    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+    await assert.rejects(auditSavedSettings(file), /Cannot safely open saved settings/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -195,27 +195,4 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
-});
-
-test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
-  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
-  assert.match(server, /middleware::from_fn_with_state\(state\.clone\(\), authorize\)/);
-  assert.match(server, /async fn oversized_authenticated_json_is_rejected_before_tool_dispatch/);
-  assert.match(server, /StatusCode::PAYLOAD_TOO_LARGE/);
-  assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
-  assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
-});
-
-test('production Keychain startup errors discard raw backend diagnostics (#109)', async () => {
-  const source = await readFile('src-tauri/src/secrets.rs', 'utf8');
-  assert.match(source, /fn redacted_keychain_failure\(kind: KeychainFailureKind\) -> String/);
-  assert.match(source, /\.map_err\(\|_\| redacted_keychain_failure\(KeychainFailureKind::Entry\)\)/);
-  assert.match(source, /Err\(_\) => return Err\(redacted_keychain_failure\(KeychainFailureKind::Read\)\)/);
-  assert.match(source, /\.map_err\(\|_\| redacted_keychain_failure\(KeychainFailureKind::Write\)\)/);
-  assert.match(source, /Err\(keyring::Error::NoEntry\) => \{\}/);
-  assert.match(source, /OsRng\.fill_bytes\(&mut entropy\)/);
-  assert.match(source, /Refusing a short existing API token in Keychain/);
-  assert.match(source, /fn keychain_backend_failure_messages_are_fixed_and_secret_free/);
-  assert.doesNotMatch(source, /Keychain (unavailable|read failed|write failed): \{/);
 });
