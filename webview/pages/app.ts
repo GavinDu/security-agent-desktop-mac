@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event';
 import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
+import { RootWriteCoordinator } from '../bridges/root-write';
 
 const el = (id: string): HTMLElement => {
   const element = document.getElementById(id);
@@ -11,6 +12,8 @@ const el = (id: string): HTMLElement => {
 const allow = el('allow') as HTMLButtonElement;
 const deny = el('deny') as HTMLButtonElement;
 const rootInput = el('rootPath') as HTMLInputElement;
+const grantRootButton = el('grantRoot') as HTMLButtonElement;
+const clearRootsButton = el('clearRoots') as HTMLButtonElement;
 const bashPolicy = el('bashPolicy') as HTMLSelectElement;
 let pending: ApprovalEvent | null = null;
 const approvalReplies = new ApprovalReplyCoordinator();
@@ -19,7 +22,9 @@ let configuredRoots: string[] = [];
 const policyWrites = new PolicyWriteCoordinator();
 let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
-// Keep stale asynchronous peer-preview responses from replacing newer input.
+// Prevent overlapping owner root grant/revocation IPC writes from this WebView.
+const rootWrites = new RootWriteCoordinator();
+// Never display a preview for a superseded public key or tunnel address.
 let peerPreviewEpoch = 0;
 bashPolicy.disabled = true;
 
@@ -49,11 +54,13 @@ async function refresh(): Promise<void> {
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
     ]);
     renderStatus(status);
-    el('tools').textContent = JSON.stringify(tools, null, 2);
     configuredRoots = settings.allowed_roots;
     el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
-    // A refresh begun before a policy save must not publish stale state.
+    // A refresh started before a policy save must not re-advertise a
+    // capability that has since been disabled. Apply catalog and policy
+    // together only when both correspond to the current acknowledged epoch.
     if (epoch === policyEpoch && !policyWrites.inFlight) {
+      el('tools').textContent = JSON.stringify(tools, null, 2);
       confirmedBashPolicy = settings.policies['bash__run'] || 'ask';
       bashPolicy.value = confirmedBashPolicy;
       bashPolicy.disabled = false;
@@ -97,16 +104,26 @@ async function respond(approved: boolean): Promise<void> {
 }
 
 async function updateRoots(roots: string[]): Promise<void> {
+  // Native validation can take longer for one directory than another.
+  // Never let two user actions from this window race to commit grants.
+  if (rootWrites.inFlight) return;
+  grantRootButton.disabled = true;
+  clearRootsButton.disabled = true;
+  el('settingsNotice').textContent = 'Updating directory permissions...';
   try {
-    await connectorBridge.setAllowedRoots(roots);
+    const accepted = await rootWrites.tryWrite(roots, (nextRoots) =>
+      connectorBridge.setAllowedRoots(nextRoots));
+    if (!accepted) return;
     rootInput.value = '';
     el('settingsNotice').textContent = 'Directory permissions updated.';
     await refresh();
   } catch {
-    // Never reflect arbitrary native/IPC error data into a trusted window:
-    // paths and OS backend diagnostics can be private.
+    // IPC errors may carry paths; do not reflect private native details.
     el('settingsNotice').textContent =
-      'Directory permissions were not changed. Check the directory and try again.';
+      'Directory permissions could not be changed. Previous confirmed permissions remain in effect.';
+  } finally {
+    grantRootButton.disabled = false;
+    clearRootsButton.disabled = false;
   }
 }
 
@@ -147,11 +164,11 @@ el('previewPeer').addEventListener('click', () => {
 });
 allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
-el('grantRoot').addEventListener('click', () => {
+grantRootButton.addEventListener('click', () => {
   const root = rootInput.value.trim();
   if (root) void updateRoots([...configuredRoots, root]);
 });
-el('clearRoots').addEventListener('click', () => void updateRoots([]));
+clearRootsButton.addEventListener('click', () => void updateRoots([]));
 async function saveBashPolicy(): Promise<void> {
   const requested = bashPolicy.value as ShellPolicy;
   if (confirmedBashPolicy === null || policyWrites.inFlight) {
@@ -169,6 +186,7 @@ async function saveBashPolicy(): Promise<void> {
   policyEpoch += 1;
   bashPolicy.disabled = true;
   el('settingsNotice').textContent = 'Updating shell policy...';
+  let persisted = false;
   try {
     const saved = await policyWrites.tryWrite(requested,
       (policy) => connectorBridge.setPolicy('bash__run', policy));
@@ -176,6 +194,7 @@ async function saveBashPolicy(): Promise<void> {
     confirmedBashPolicy = requested;
     bashPolicy.value = requested;
     el('settingsNotice').textContent = 'Shell policy updated.';
+    persisted = true;
   } catch {
     // Never interpret a failed Tauri invoke as successful policy revocation.
     bashPolicy.value = confirmedBashPolicy;
@@ -185,6 +204,10 @@ async function saveBashPolicy(): Promise<void> {
     policyEpoch += 1;
     bashPolicy.disabled = false;
   }
+  // Read the backend's committed policy AND catalog after successful save,
+  // never publish a speculative disable and never restore a stale snapshot.
+  // Another user edit increments policyEpoch and supersedes this refresh.
+  if (persisted) await refresh();
 }
 bashPolicy.addEventListener('change', () => void saveBashPolicy());
 void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {

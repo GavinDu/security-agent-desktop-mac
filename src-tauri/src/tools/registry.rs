@@ -307,10 +307,20 @@ impl ToolRegistry {
     }
 
     pub fn list(&self) -> Vec<Value> {
+        // The same registry serves Tauri IPC and authenticated HTTP. Hide an
+        // explicitly disabled capability from both discovery surfaces, using
+        // the CURRENT live policy (not the last persisted snapshot).
+        // The approval gate still enforces Disable at invocation time.
         vec![
             json!({"type":"function","function":{"name":"filesystem__read_file","description":"Read a UTF-8 file (64 KiB maximum) beneath a user-granted root.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}),
             json!({"type":"function","function":{"name":"bash__run","description":"Run a shell command in a granted directory, with an interactive approval gate and 15-second timeout.","parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}},"required":["command","cwd"],"additionalProperties":false}}}),
         ]
+        .into_iter()
+        .filter(|tool| {
+            let name = tool["function"]["name"].as_str().unwrap_or_default();
+            self.gate.policy(name) != Policy::Disable
+        })
+        .collect()
     }
 
     pub async fn invoke(&self, call: ToolCall) -> Result<Value, String> {
@@ -423,6 +433,44 @@ mod tests {
             json!({"command":"true","cwd":"/safe","admin":true})
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_tools_are_hidden_and_remain_denied_at_invocation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("visible.txt");
+        std::fs::write(&path, "safe content").unwrap();
+        let gate = ApprovalGate::new(HashMap::new());
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            gate.clone(),
+        );
+        let names = || {
+            registry
+                .list()
+                .iter()
+                .filter_map(|item| item["function"]["name"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(names(), vec!["filesystem__read_file", "bash__run"]);
+        gate.set_policy("filesystem__read_file", Policy::Disable);
+        assert_eq!(names(), vec!["bash__run"]);
+        let denied = registry
+            .invoke(ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!({"path": path}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied, "Tool disabled by policy");
+
+        gate.set_policy("bash__run", Policy::Disable);
+        assert!(names().is_empty());
+        gate.set_policy("filesystem__read_file", Policy::Ask);
+        assert_eq!(names(), vec!["filesystem__read_file"]);
+        gate.set_policy("bash__run", Policy::Auto);
+        assert_eq!(names(), vec!["filesystem__read_file", "bash__run"]);
     }
 
     #[tokio::test]

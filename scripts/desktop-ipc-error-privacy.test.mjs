@@ -9,8 +9,10 @@ const roots = source.slice(source.indexOf('async function updateRoots('), source
 const peer = source.slice(source.indexOf("el('previewPeer').addEventListener"), source.indexOf("allow.addEventListener('click'"));
 
 test('root grant failures use fixed text, never render raw rejected IPC details (#152)', () => {
-  assert.match(roots, /await connectorBridge\.setAllowedRoots\(roots\)/);
-  assert.match(roots, /catch \{[\s\S]*?Directory permissions were not changed\./);
+  // Root writes now pass through the already-merged #154 single-flight coordinator.
+  assert.match(roots, /await rootWrites\.tryWrite\(roots,/);
+  assert.match(roots, /connectorBridge\.setAllowedRoots\(nextRoots\)/);
+  assert.match(roots, /catch \{[\s\S]*?Directory permissions could not be changed\./);
   assert.doesNotMatch(roots, /String\s*\(\s*error\s*\)|JSON\.stringify\s*\(\s*error\s*\)|console\./);
   assert.match(roots, /el\('settingsNotice'\)\.textContent/);
   assert.match(roots, /await refresh\(\)/);

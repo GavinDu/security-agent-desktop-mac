@@ -46,6 +46,17 @@ pub async fn serve_with_retries(state: Arc<AgentState>) {
     serve_with_retry_interval(state, Duration::from_secs(5)).await;
 }
 
+// System I/O error Display/Debug can contain local paths or platform details.
+// Only fixed error classes may enter process logs or operator diagnostics.
+fn safe_listener_log_reason(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::AddrInUse => "address in use",
+        std::io::ErrorKind::AddrNotAvailable => "interface unavailable",
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        _ => "I/O failure",
+    }
+}
+
 async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
     let mut prior_bind_error = None;
     loop {
@@ -56,7 +67,10 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 match serve(listener, state.clone()).await {
                     Ok(()) => state.mark_listener_stopped().await,
                     Err(error) => {
-                        eprintln!("Local agent listener stopped unexpectedly: {error}");
+                        eprintln!(
+                            "Local agent listener stopped unexpectedly: {}",
+                            safe_listener_log_reason(error.kind())
+                        );
                         state.mark_listener_failed(&error).await;
                     }
                 }
@@ -65,7 +79,10 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 // A persistent port conflict should not flood app logs every
                 // five seconds; a different class of failure is recorded once.
                 if prior_bind_error != Some(error.kind()) {
-                    eprintln!("Local agent listener failed to bind: {error}");
+                    eprintln!(
+                        "Local agent listener failed to bind: {}",
+                        safe_listener_log_reason(error.kind())
+                    );
                 }
                 prior_bind_error = Some(error.kind());
                 state.mark_listener_failed(&error).await;
@@ -248,6 +265,40 @@ async fn pairing() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_diagnostics_ignore_os_error_messages() {
+        let private_message = "/Users/private/Library/Keychains/SECRET_TOKEN_DO_NOT_LOG";
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::AddrNotAvailable,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            let error = std::io::Error::new(kind, private_message);
+            let reason = safe_listener_log_reason(error.kind());
+            assert!(!reason.contains("SECRET_TOKEN"));
+            assert!(!reason.contains("/Users"));
+            assert!(!reason.contains("Keychains"));
+        }
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::AddrInUse),
+            "address in use"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::AddrNotAvailable),
+            "interface unavailable"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::PermissionDenied),
+            "permission denied"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::Other),
+            "I/O failure"
+        );
+    }
+
     use crate::settings::AgentSettings;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
@@ -298,6 +349,62 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let response: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn shared_http_catalog_tracks_live_disabled_policy_without_restart() {
+        use crate::tools::approvals::Policy;
+        let state = AgentState::new(
+            "policy-catalog-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let request = |authenticated: bool| {
+            let mut builder = Request::builder().uri("/tools");
+            if authenticated {
+                builder = builder.header("Authorization", "Bearer policy-catalog-test-token");
+            }
+            let mut req = builder.body(Body::empty()).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43210))));
+            req
+        };
+        assert_eq!(
+            app.clone().oneshot(request(false)).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        for (file_policy, shell_policy, expected) in [
+            (
+                Policy::Auto,
+                Policy::Ask,
+                vec!["filesystem__read_file", "bash__run"],
+            ),
+            (Policy::Disable, Policy::Ask, vec!["bash__run"]),
+            (Policy::Disable, Policy::Disable, vec![]),
+            (Policy::Ask, Policy::Disable, vec!["filesystem__read_file"]),
+            (
+                Policy::Ask,
+                Policy::Auto,
+                vec!["filesystem__read_file", "bash__run"],
+            ),
+        ] {
+            state.gate.set_policy("filesystem__read_file", file_policy);
+            state.gate.set_policy("bash__run", shell_policy);
+            let response = app.clone().oneshot(request(true)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: Value = serde_json::from_slice(&bytes).unwrap();
+            let names = payload["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected);
+        }
     }
 
     #[tokio::test]

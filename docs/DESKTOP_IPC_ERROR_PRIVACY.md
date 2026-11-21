@@ -44,3 +44,7 @@ older configuration.
   Linux Rust/native macOS 15 tests, strict mounted developer DMG
   signature/entitlement verification and uploaded artifact. Keep #8,
   #10, #12/#13/#38/#54/#55 open.
+
+## Integration with P0 foundation fixes
+
+Reconciled onto merged `main` after successor Epic #10 P0 #150 and #154, using an explicit two-parent merge commit. Preserve the `RootWriteCoordinator` guard and fixed root-write failure text from #154, the atomic tool catalog/policy refresh from #150, and the input-invalidated VPN preview from this issue #152. The Node root privacy source test now matches the actual single-flight IPC call rather than the obsolete direct call. This merge changes only the trusted WebView and its privacy regression; native policy enforcement remains unchanged. Run full exact-head native macOS CI and strict mounted development DMG checks before merging PR #153; the two-parent reconciliation commit itself is not acceptance evidence.
