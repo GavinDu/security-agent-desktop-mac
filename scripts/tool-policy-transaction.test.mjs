@@ -7,10 +7,16 @@ test('tool-policy persistence publishes only after a successful staged save (#12
   assert.match(source, /fn persist_tool_policy\(/);
   assert.match(source, /let mut staged = settings\.clone\(\)/);
   assert.match(source, /staged\.policies\.insert\(tool\.to_owned\(\), policy\)/);
-  const stage = source.indexOf('let mut staged = settings.clone()');
-  const write = source.indexOf('persist(&staged).map_err');
-  const publish = source.indexOf('gate.set_policy(tool, policy)');
-  const memory = source.indexOf('*settings = staged');
+  // The root-grant helper in the same module also stages and publishes.
+  // Inspect this specific helper so the test validates policy ordering only.
+  const policyStart = source.indexOf('fn persist_tool_policy(');
+  const policyEnd = source.indexOf('#[tauri::command]\npub async fn set_tool_policy(', policyStart);
+  assert.ok(policyStart > 0 && policyEnd > policyStart);
+  const policyHelper = source.slice(policyStart, policyEnd);
+  const stage = policyHelper.indexOf('let mut staged = settings.clone()');
+  const write = policyHelper.indexOf('persist(&staged).map_err');
+  const publish = policyHelper.indexOf('gate.set_policy(tool, policy)');
+  const memory = policyHelper.indexOf('*settings = staged');
   assert.ok(stage > 0 && write > stage && publish > write && memory > publish);
   assert.match(source, /Cannot persist tool policy/);
   assert.match(source, /persist_tool_policy\(\s*&mut settings,\s*&state\.gate,\s*&tool,\s*policy,\s*AgentSettings::save,\s*\)/);

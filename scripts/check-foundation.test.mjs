@@ -208,3 +208,14 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
 });
+
+test('failed persisted root-grant change leaves live registry and UI in sync (#117)', async () => {
+  const source = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
+  assert.match(source, /fn persist_root_grants\(/);
+  assert.match(source, /let mut staged = settings\.clone\(\)/);
+  assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
+  assert.match(source, /registry\.set_roots\(roots\);\s*\*settings = staged/);
+  assert.match(source, /persist_root_grants\(\s*&mut settings,\s*&state\.registry,\s*resolved,\s*AgentSettings::save,\s*\)/);
+  assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
+  assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
+});
