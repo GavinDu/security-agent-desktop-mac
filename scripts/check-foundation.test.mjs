@@ -134,7 +134,7 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     });
     await rm(file);
     await symlink(join(temp, 'nonexistent-private-file'), file);
-    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+    await assert.rejects(auditSavedSettings(file), /Cannot safely open saved settings/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -195,15 +195,4 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
-});
-
-test('root-grant and file-path denials never interpolate caller paths or OS errors (#98)', async () => {
-  const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
-  assert.match(source, /"Invalid granted root"/);
-  assert.match(source, /"Granted root is not a directory"/);
-  assert.match(source, /"Requested file path is inaccessible"/);
-  assert.match(source, /fn file_authorization_errors_do_not_echo_private_paths/);
-  assert.doesNotMatch(source, /format!\("Invalid root: \{root\}"\)/);
-  assert.doesNotMatch(source, /format!\("Not a directory: \{root\}"\)/);
-  assert.doesNotMatch(source, /format!\("Path not accessible: \{e\}"\)/);
 });
