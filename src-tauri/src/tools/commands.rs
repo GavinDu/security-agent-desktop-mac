@@ -241,6 +241,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_native_validation_worker_cannot_publish_a_stale_grant() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "native-root-cancel-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            commit_serialized_roots(
+                &first_state,
+                vec![path],
+                move |requested| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Cancelled fixture timed out".to_owned())?;
+                    ToolRegistry::canonical_roots(&requested)
+                },
+                |_| Ok(()),
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        // The blocking resolver can still be running after cancellation,
+        // but only the aborted future could save or publish its result.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            commit_serialized_roots(
+                &state,
+                Vec::new(),
+                |requested| ToolRegistry::canonical_roots(&requested),
+                |_| Ok(()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+    }
+
+    #[tokio::test]
     async fn invalid_validation_releases_native_mutation_guard_without_publication() {
         let state = AgentState::new(
             "native-root-invalid-test-token".into(),
