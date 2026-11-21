@@ -71,7 +71,7 @@ test('trusted desktop disables both controls before await and restores only afte
   assert.ok(guard >= 0 && disableGrant > guard && disableClear > guard && awaitWrite > disableClear);
   assert.match(section, /if \(!accepted\) return;/);
   assert.match(section, /if \(!accepted\) return;[\s\S]*?await refresh\(\)/);
-  assert.match(section, /finally \{\s*grantRootButton.disabled = false;\s*clearRootsButton.disabled = false;/);
+  assert.match(section, /finally \{\s*rootSnapshots.finishMutation\(\);[\s\S]*?await refresh\(\);[\s\S]*?grantRootButton.disabled = !rootSnapshots.canWrite;[\s\S]*?clearRootsButton.disabled = !rootSnapshots.canWrite;/);
   assert.doesNotMatch(section, /String\(error\)|console\.|JSON\.stringify\(error\)/);
   assert.match(ui, /grantRootButton.addEventListener\('click'/);
   assert.match(ui, /clearRootsButton.addEventListener\('click'/);

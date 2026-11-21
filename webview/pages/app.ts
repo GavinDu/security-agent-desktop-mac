@@ -3,6 +3,7 @@ import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
 import { RootWriteCoordinator } from '../bridges/root-write';
+import { RootSnapshotCoordinator } from '../bridges/root-snapshot';
 
 const el = (id: string): HTMLElement => {
   const element = document.getElementById(id);
@@ -24,7 +25,11 @@ let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
 // Prevent overlapping owner root grant/revocation IPC writes from this WebView.
 const rootWrites = new RootWriteCoordinator();
+// Separate root readback versioning from the bash policy epoch.
+const rootSnapshots = new RootSnapshotCoordinator();
 bashPolicy.disabled = true;
+grantRootButton.disabled = true;
+clearRootsButton.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
 
@@ -47,13 +52,19 @@ async function refreshStatus(): Promise<void> {
 
 async function refresh(): Promise<void> {
   const epoch = policyEpoch;
+  const rootEpoch = rootSnapshots.beginRefresh();
   try {
     const [status, tools, settings] = await Promise.all([
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
     ]);
     renderStatus(status);
-    configuredRoots = settings.allowed_roots;
-    el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
+    // Only the newest authoritative readback may define the next grant array.
+    if (rootSnapshots.applyRefresh(rootEpoch, settings.allowed_roots)) {
+      configuredRoots = rootSnapshots.snapshot();
+      el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
+      grantRootButton.disabled = false;
+      clearRootsButton.disabled = false;
+    }
     // A refresh started before a policy save must not re-advertise a
     // capability that has since been disabled. Apply catalog and policy
     // together only when both correspond to the current acknowledged epoch.
@@ -63,9 +74,16 @@ async function refresh(): Promise<void> {
       bashPolicy.value = confirmedBashPolicy;
       bashPolicy.disabled = false;
     }
-  } catch (error) {
+  } catch {
     el('status').textContent = 'Unavailable';
     el('binding').textContent = 'Local agent settings could not be retrieved.';
+    // A failure of the latest readback is not permission to reuse an old
+    // root set for a later read/modify/write Grant action.
+    if (rootSnapshots.failRefresh(rootEpoch)) {
+      grantRootButton.disabled = true;
+      clearRootsButton.disabled = true;
+      el('roots').textContent = 'Directory permissions unavailable. Retry refresh.';
+    }
   }
 }
 
@@ -102,29 +120,42 @@ async function respond(approved: boolean): Promise<void> {
 }
 
 async function updateRoots(roots: string[]): Promise<void> {
-  // Native validation can take longer for one directory than another.
-  // Never let two user actions from this window race to commit grants.
-  if (rootWrites.inFlight) return;
+  // RootSnapshotCoordinator rejects stale reads and overlapping readback,
+  // while RootWriteCoordinator serializes the actual trusted IPC mutation.
+  if (rootWrites.inFlight || !rootSnapshots.startMutation()) return;
   grantRootButton.disabled = true;
   clearRootsButton.disabled = true;
   el('settingsNotice').textContent = 'Updating directory permissions...';
+  let persisted = false;
   try {
     const accepted = await rootWrites.tryWrite(roots, (nextRoots) =>
       connectorBridge.setAllowedRoots(nextRoots));
     if (!accepted) return;
+    persisted = true;
     rootInput.value = '';
-    el('settingsNotice').textContent = 'Directory permissions updated.';
-    await refresh();
+    el('settingsNotice').textContent = 'Confirming directory permissions...';
   } catch {
-    // IPC errors may carry paths; do not reflect private native details.
+    // Native IPC rejection text may include sensitive paths. Do not claim
+    // that the previous root set was retained until readback confirms it.
     el('settingsNotice').textContent =
-      'Directory permissions could not be changed. Previous confirmed permissions remain in effect.';
+      'Directory permission update was not acknowledged. Checking current permissions.';
   } finally {
-    grantRootButton.disabled = false;
-    clearRootsButton.disabled = false;
+    rootSnapshots.finishMutation();
+    // Read back the actual state after the native call settles, successful
+    // or not. A failed readback keeps both controls disabled.
+    await refresh();
+    grantRootButton.disabled = !rootSnapshots.canWrite;
+    clearRootsButton.disabled = !rootSnapshots.canWrite;
+    if (persisted) {
+      el('settingsNotice').textContent = rootSnapshots.canWrite
+        ? 'Directory permissions updated.'
+        : 'Directory permissions may have changed; refresh to confirm.';
+    } else if (rootSnapshots.canWrite) {
+      el('settingsNotice').textContent =
+        'Directory permission request failed. Confirmed permissions shown.';
+    }
   }
 }
-
 el('refresh').addEventListener('click', () => void refresh());
 el('previewPeer').addEventListener('click', () => {
   const publicKey = (el('peerKey') as HTMLInputElement).value.trim();
@@ -137,7 +168,7 @@ allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
 grantRootButton.addEventListener('click', () => {
   const root = rootInput.value.trim();
-  if (root) void updateRoots([...configuredRoots, root]);
+  if (root && rootSnapshots.canWrite) void updateRoots([...configuredRoots, root]);
 });
 clearRootsButton.addEventListener('click', () => void updateRoots([]));
 async function saveBashPolicy(): Promise<void> {
