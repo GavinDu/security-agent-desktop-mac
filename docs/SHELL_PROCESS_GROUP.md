@@ -31,3 +31,5 @@ Architectural reference only: [Proton Lumo Desktop](https://github.com/ProtonLum
 ## Bounded owner capacity
 
 Independent of the shared HTTP dispatch cap (#100 / PR #101), a process-global 8-permit `Arc<Semaphore>` limits live Unix shell lifecycle workers. The owned permit is moved into the worker and released **only after group termination/reap**, including when its HTTP request is aborted. A ninth concurrent command fails closed before a subprocess is launched; this is not a per-device rate limiter or a guarantee against unauthorized clients. The API-wide admission controls still belong to #100/#36.
+
+An additional native test injects a 200-ms deadline for an infinite stdout/stderr producer, asserts a bounded total return time and the exact timeout error. Production always passes the full 15-second deadline; the injected parameter is test-only plumbing for deterministic validation, not an HTTP-controlled timeout override.

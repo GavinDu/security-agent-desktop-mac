@@ -190,7 +190,9 @@ test('approved Unix bash process group survives request abort long enough to rea
   assert.match(code, /self\.signal_group\(libc::SIGTERM\)/);
   assert.match(code, /self\.signal_group\(libc::SIGKILL\)/);
   assert.match(code, /self\.child\.wait\(\)/);
-  assert.match(code, /tokio::time::timeout\(Duration::from_secs\(15\)/);
+  assert.match(code, /run_shell_owned_with_deadline\(command, directory, cancel_rx, Duration::from_secs\(15\)\)/);
+  assert.match(code, /tokio::time::timeout\(deadline, async/);
+  assert.match(code, /fn shell_timeout_terminates_infinite_streams_without_unbounded_capture/);
   assert.match(code, /let \(cancel_tx, cancel_rx\) = oneshot::channel::<\(\)>\(\)/);
   assert.match(code, /let _ = result_tx\.send\(run_shell_owned/);
   assert.match(code, /const MAX_ACTIVE_SHELLS: usize = 8/);

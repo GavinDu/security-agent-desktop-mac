@@ -179,7 +179,18 @@ async fn run_approved_shell(command: String, directory: PathBuf) -> Result<Value
 async fn run_shell_owned(
     command: String,
     directory: PathBuf,
+    cancel_rx: oneshot::Receiver<()>,
+) -> Result<Value, String> {
+    run_shell_owned_with_deadline(command, directory, cancel_rx, Duration::from_secs(15)).await
+}
+
+// Tests inject a short deadline; production always uses the full 15 seconds.
+#[cfg(unix)]
+async fn run_shell_owned_with_deadline(
+    command: String,
+    directory: PathBuf,
     mut cancel_rx: oneshot::Receiver<()>,
+    deadline: Duration,
 ) -> Result<Value, String> {
     let mut process = Command::new("/bin/sh");
     process
@@ -215,7 +226,7 @@ async fn run_shell_owned(
     let capture = tokio::select! {
         biased;
         _ = &mut cancel_rx => Err("Command cancelled".to_owned()),
-        output = tokio::time::timeout(Duration::from_secs(15), async {
+        output = tokio::time::timeout(deadline, async {
             tokio::try_join!(
                 read_bounded_output(stdout),
                 read_bounded_output(stderr)
@@ -563,6 +574,26 @@ mod tests {
             stopped_len,
             "descendant kept writing after caller cancellation"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_timeout_terminates_infinite_streams_without_unbounded_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            run_shell_owned_with_deadline(
+                "while :; do printf x; printf y >&2; done".into(),
+                dir.path().to_path_buf(),
+                cancel_rx,
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("timeout cleanup must finish even with infinite stdout and stderr")
+        .unwrap_err();
+        assert_eq!(result, "Command timed out");
     }
 
     #[cfg(unix)]
