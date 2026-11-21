@@ -1,3 +1,4 @@
+pub mod rate_limit;
 pub mod server;
 
 use crate::{
@@ -20,6 +21,7 @@ pub struct AgentState {
     pub registry: Arc<ToolRegistry>,
     pub gate: Arc<ApprovalGate>,
     pub dispatch_permits: Arc<Semaphore>,
+    pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
     pub settings: Mutex<AgentSettings>,
     listener_error: RwLock<Option<String>>,
 }
@@ -48,6 +50,7 @@ impl AgentState {
             registry,
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
+            source_rate_limiter: rate_limit::SourceRateLimiter::default(),
             settings: Mutex::new(settings),
             listener_error: RwLock::new(None),
         }))
