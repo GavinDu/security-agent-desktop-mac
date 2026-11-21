@@ -180,6 +180,24 @@ test('file read tool validates one opened leaf descriptor before bounded bytes (
   assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
 });
 
+
+test('approved Unix bash process group survives request abort long enough to reap (#93)', async () => {
+  const code = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  assert.match(code, /\.process_group\(0\)/);
+  assert.match(code, /struct ShellProcessOwner/);
+  assert.match(code, /struct ShellProcessOwner[\s\S]*reaped: bool/);
+  assert.match(code, /libc::kill\(-self\.pgid, signal\)/);
+  assert.match(code, /self\.signal_group\(libc::SIGTERM\)/);
+  assert.match(code, /self\.signal_group\(libc::SIGKILL\)/);
+  assert.match(code, /self\.child\.wait\(\)/);
+  assert.match(code, /tokio::time::timeout\(Duration::from_secs\(15\)/);
+  assert.match(code, /let \(cancel_tx, cancel_rx\) = oneshot::channel\(\)/);
+  assert.match(code, /let _ = result_tx\.send\(run_shell_owned/);
+  assert.match(code, /fn cancelling_shell_owner_kills_descendant_even_after_shell_leader_exits/);
+  assert.match(code, /fn shell_group_isolation_never_signals_unrelated_process_group/);
+  assert.doesNotMatch(code, /\.pre_exec\(/);
+});
+
 test('bash tool streams and caps both pipes before producing JSON (#91)', async () => {
   const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
   const manifest = await readFile('src-tauri/Cargo.toml', 'utf8');
