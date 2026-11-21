@@ -442,8 +442,7 @@ mod tests {
         std::fs::write(&path, "safe content").unwrap();
         let gate = ApprovalGate::new(HashMap::new());
         let registry = ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
-                .unwrap(),
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             gate.clone(),
         );
         let names = || {
