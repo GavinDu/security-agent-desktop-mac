@@ -206,3 +206,14 @@ test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)'
   assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
   assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
 });
+
+test('failed persisted root-grant change leaves live registry and UI in sync (#117)', async () => {
+  const source = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
+  assert.match(source, /fn persist_root_grants\(/);
+  assert.match(source, /let mut staged = settings\.clone\(\)/);
+  assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
+  assert.match(source, /registry\.set_roots\(roots\);\s*\*settings = staged/);
+  assert.match(source, /persist_root_grants\(&mut settings, &state\.registry, resolved, AgentSettings::save\)/);
+  assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
+  assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
+});
