@@ -11,7 +11,7 @@ test('persisted root grants require a bounded no-follow settings file descriptor
   const nofollow = load.indexOf('libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK');
   assert.ok(limit > 0 && parent > 0 && open > parent && nofollow > open,
     'the verified directory FD must be pinned before nofollow nonblocking leaf openat');
-  assert.match(settings, /libc::openat\(directory\.as_raw_fd\(\), leaf\.as_ptr\(\), flags, mode\)/);
+  assert.match(settings, /libc::openat\(\s*directory\.as_raw_fd\(\),\s*leaf\.as_ptr\(\),\s*flags,\s*mode as libc::c_uint,\s*\)/);
   assert.match(settings, /metadata\.nlink\(\)\s*!=\s*1/);
   assert.match(settings, /metadata\.permissions\(\)\.mode\(\)\s*&\s*0o777\s*!=\s*0o600/);
   assert.match(settings, /file\.take\(MAX_SETTINGS_BYTES \+ 1\)/);
@@ -24,7 +24,7 @@ test('persisted root grants require a bounded no-follow settings file descriptor
 test('settings loading must reject a swapped-in FIFO without a blocking open (#106)', async () => {
   const source = await readFile('src-tauri/src/settings.rs', 'utf8');
   assert.match(source, /libc::O_RDONLY \| libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK/);
-  assert.match(source, /libc::openat\(directory\.as_raw_fd\(\), leaf\.as_ptr\(\), flags, mode\)/);
+  assert.match(source, /libc::openat\(\s*directory\.as_raw_fd\(\),\s*leaf\.as_ptr\(\),\s*flags,\s*mode as libc::c_uint,\s*\)/);
   assert.match(source, /fn settings_loader_rejects_fifo_without_blocking/);
   assert.match(source, /libc::mkfifo\(c_path\.as_ptr\(\), 0o600\)/);
   assert.match(source, /Unsafe or oversized settings\.json/);
