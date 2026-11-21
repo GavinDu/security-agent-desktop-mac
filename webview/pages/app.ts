@@ -47,11 +47,13 @@ async function refresh(): Promise<void> {
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
     ]);
     renderStatus(status);
-    el('tools').textContent = JSON.stringify(tools, null, 2);
     configuredRoots = settings.allowed_roots;
     el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
-    // A refresh begun before a policy save must not publish stale state.
+    // A refresh started before a policy save must not re-advertise a
+    // capability that has since been disabled. Apply catalog and policy
+    // together only when both correspond to the current acknowledged epoch.
     if (epoch === policyEpoch && !policyWrites.inFlight) {
+      el('tools').textContent = JSON.stringify(tools, null, 2);
       confirmedBashPolicy = settings.policies['bash__run'] || 'ask';
       bashPolicy.value = confirmedBashPolicy;
       bashPolicy.disabled = false;
@@ -137,6 +139,7 @@ async function saveBashPolicy(): Promise<void> {
   policyEpoch += 1;
   bashPolicy.disabled = true;
   el('settingsNotice').textContent = 'Updating shell policy...';
+  let persisted = false;
   try {
     const saved = await policyWrites.tryWrite(requested,
       (policy) => connectorBridge.setPolicy('bash__run', policy));
@@ -144,6 +147,7 @@ async function saveBashPolicy(): Promise<void> {
     confirmedBashPolicy = requested;
     bashPolicy.value = requested;
     el('settingsNotice').textContent = 'Shell policy updated.';
+    persisted = true;
   } catch {
     // Never interpret a failed Tauri invoke as successful policy revocation.
     bashPolicy.value = confirmedBashPolicy;
@@ -153,6 +157,10 @@ async function saveBashPolicy(): Promise<void> {
     policyEpoch += 1;
     bashPolicy.disabled = false;
   }
+  // Read the backend's committed policy AND catalog after successful save,
+  // never publish a speculative disable and never restore a stale snapshot.
+  // Another user edit increments policyEpoch and supersedes this refresh.
+  if (persisted) await refresh();
 }
 bashPolicy.addEventListener('change', () => void saveBashPolicy());
 void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {
