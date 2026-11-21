@@ -115,3 +115,35 @@ Keep #12 and #55 open until the actual physical Mac Mini tests, including
 tray, Keychain login, restart, settings persistence and screenshots, are
 completed and recorded safely. The tool is valid only for development
 loopback binding, not future WireGuard interface binding on 10.8.0.1.
+
+## Keychain smoke CLI trust and physical acceptance — #81
+
+The `--authenticated` mode is a **manual, local Mac-only** smoke
+test. It uses native `/usr/bin/security` with fixed Keychain service and
+account arguments to read the already-stored app API bearer. The token
+is returned only to the test process and used for local requests to
+`http://127.0.0.1:8080`; the test never prints the bearer or passes it
+as a subprocess argument. The helper rejects missing, short,
+multiline or control-containing results with sanitized errors.
+
+```sh
+npm run smoke
+npm run smoke -- --authenticated
+npm run smoke:mac-listener
+# Quit in the menu bar, then:
+npm run smoke:mac-listener -- --after-quit
+```
+
+Node fixture regressions validate the fixed binary, command arguments,
+error redaction and token output formatting without accessing Keychain.
+**They are not a native Keychain integration test.** On a physical Apple
+Silicon Mac, verify that both unauthenticated and authenticated smoke
+succeed, permitted policies/root counts persist after restarting and the
+listener is removed after Quit. Record only redacted screenshots, OS
+version, app commit and pass/fail output. Never attach a bearer, home
+directory or raw `security` command stderr.
+
+The code-only #81 may close after a fully green native build and merge.
+Physical #55 and #12 remain open until the above steps are actually
+performed. Authentication must remain fail-closed when Keychain access is
+denied or a token is malformed.
