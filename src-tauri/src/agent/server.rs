@@ -315,10 +315,8 @@ mod tests {
                 builder = builder.header("Authorization", "Bearer policy-catalog-test-token");
             }
             let mut req = builder.body(Body::empty()).unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-                [127, 0, 0, 1],
-                43210,
-            ))));
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43210))));
             req
         };
         assert_eq!(
@@ -327,11 +325,19 @@ mod tests {
         );
 
         for (file_policy, shell_policy, expected) in [
-            (Policy::Auto, Policy::Ask, vec!["filesystem__read_file", "bash__run"]),
+            (
+                Policy::Auto,
+                Policy::Ask,
+                vec!["filesystem__read_file", "bash__run"],
+            ),
             (Policy::Disable, Policy::Ask, vec!["bash__run"]),
             (Policy::Disable, Policy::Disable, vec![]),
             (Policy::Ask, Policy::Disable, vec!["filesystem__read_file"]),
-            (Policy::Ask, Policy::Auto, vec!["filesystem__read_file", "bash__run"]),
+            (
+                Policy::Ask,
+                Policy::Auto,
+                vec!["filesystem__read_file", "bash__run"],
+            ),
         ] {
             state.gate.set_policy("filesystem__read_file", file_policy);
             state.gate.set_policy("bash__run", shell_policy);
