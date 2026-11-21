@@ -109,7 +109,13 @@ pub async fn set_tool_policy(
         return Err("Unknown tool".into());
     }
     let mut settings = state.settings.lock().await;
-    persist_tool_policy(&mut settings, &state.gate, &tool, policy, AgentSettings::save)
+    persist_tool_policy(
+        &mut settings,
+        &state.gate,
+        &tool,
+        policy,
+        AgentSettings::save,
+    )
 }
 
 #[cfg(test)]
@@ -123,14 +129,11 @@ mod tests {
         settings.policies.insert("bash__run".into(), Policy::Auto);
         let gate = ApprovalGate::new(settings.policies.clone());
         assert_eq!(gate.policy("bash__run"), Policy::Auto);
-        let failure = persist_tool_policy(
-            &mut settings,
-            &gate,
-            "bash__run",
-            Policy::Disable,
-            |_| Err("private filesystem error /Users/example/password".into()),
-        )
-        .unwrap_err();
+        let failure =
+            persist_tool_policy(&mut settings, &gate, "bash__run", Policy::Disable, |_| {
+                Err("private filesystem error /Users/example/password".into())
+            })
+            .unwrap_err();
         assert_eq!(failure, "Cannot persist tool policy");
         assert_eq!(settings.policies.get("bash__run"), Some(&Policy::Auto));
         assert_eq!(gate.policy("bash__run"), Policy::Auto);
@@ -153,7 +156,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(saved.unwrap().policies.get("bash__run"), Some(&Policy::Disable));
+        assert_eq!(
+            saved.unwrap().policies.get("bash__run"),
+            Some(&Policy::Disable)
+        );
         assert_eq!(settings.policies.get("bash__run"), Some(&Policy::Disable));
         assert_eq!(gate.policy("bash__run"), Policy::Disable);
     }

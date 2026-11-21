@@ -13,7 +13,7 @@ test('tool-policy persistence publishes only after a successful staged save (#12
   const memory = source.indexOf('*settings = staged');
   assert.ok(stage > 0 && write > stage && publish > write && memory > publish);
   assert.match(source, /Cannot persist tool policy/);
-  assert.match(source, /persist_tool_policy\(&mut settings, &state\.gate, &tool, policy, AgentSettings::save\)/);
+  assert.match(source, /persist_tool_policy\(\s*&mut settings,\s*&state\.gate,\s*&tool,\s*policy,\s*AgentSettings::save,\s*\)/);
   assert.match(source, /fn failed_policy_persistence_keeps_ui_memory_and_live_gate_in_sync/);
   assert.match(source, /fn successful_policy_persistence_updates_both_gate_and_ui_memory/);
 });
