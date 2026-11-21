@@ -26,11 +26,17 @@ impl GrantedRoot {
 }
 
 #[cfg(unix)]
-fn open_component(parent: &File, component: &OsStr, extra_flags: libc::c_int) -> Result<File, String> {
+fn open_component(
+    parent: &File,
+    component: &OsStr,
+    extra_flags: libc::c_int,
+) -> Result<File, String> {
     use std::ffi::CString;
-    use std::os::unix::{ffi::OsStrExt, io::{AsRawFd, FromRawFd}};
-    let name = CString::new(component.as_bytes())
-        .map_err(|_| "Invalid approved path component")?;
+    use std::os::unix::{
+        ffi::OsStrExt,
+        io::{AsRawFd, FromRawFd},
+    };
+    let name = CString::new(component.as_bytes()).map_err(|_| "Invalid approved path component")?;
     // SAFETY: parent owns a valid FD; name is a live NUL-terminated CString.
     // openat returns either an error or a distinct owned descriptor.
     let fd = unsafe {
@@ -54,9 +60,9 @@ pub fn pin_absolute_directory(path: &Path) -> Result<File, String> {
         return Err("Granted directory must be absolute".into());
     }
     let mut options = OpenOptions::new();
-    options.read(true).custom_flags(
-        libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-    );
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
     let mut current = options
         .open("/")
         .map_err(|_| "Cannot pin filesystem root")?;
@@ -180,7 +186,10 @@ mod tests {
         std::fs::rename(&path, temp.path().join("old-grant")).unwrap();
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("document"), "replacement-secret").unwrap();
-        assert_eq!(read_scoped_file(&pinned, Path::new("document")).unwrap(), "original");
+        assert_eq!(
+            read_scoped_file(&pinned, Path::new("document")).unwrap(),
+            "original"
+        );
     }
 
     #[cfg(unix)]
@@ -194,7 +203,12 @@ mod tests {
         std::fs::write(secret.join("file"), "not-granted").unwrap();
         let pinned = pin_absolute_directory(&grant.canonicalize().unwrap()).unwrap();
         std::os::unix::fs::symlink(&secret, grant.join("child")).unwrap();
-        for name in ["/etc/passwd", "../secret/file", "child/file", "child/../file"] {
+        for name in [
+            "/etc/passwd",
+            "../secret/file",
+            "child/file",
+            "child/../file",
+        ] {
             assert!(read_scoped_file(&pinned, Path::new(name)).is_err());
         }
     }

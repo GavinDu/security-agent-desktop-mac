@@ -52,7 +52,10 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn new(roots: Vec<crate::tools::pinned_read::GrantedRoot>, gate: Arc<ApprovalGate>) -> Self {
+    pub fn new(
+        roots: Vec<crate::tools::pinned_read::GrantedRoot>,
+        gate: Arc<ApprovalGate>,
+    ) -> Self {
         Self {
             roots: RwLock::new(roots),
             gate,
@@ -63,7 +66,9 @@ impl ToolRegistry {
         matches!(tool, "filesystem__read_file" | "bash__run")
     }
 
-    pub fn canonical_roots(roots: &[String]) -> Result<Vec<crate::tools::pinned_read::GrantedRoot>, String> {
+    pub fn canonical_roots(
+        roots: &[String],
+    ) -> Result<Vec<crate::tools::pinned_read::GrantedRoot>, String> {
         crate::tools::pinned_read::canonical_roots(roots)
     }
 
@@ -223,7 +228,8 @@ mod tests {
         )
         .unwrap();
         let reg = ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[allowed.path().to_string_lossy().into_owned()]).unwrap(),
+            ToolRegistry::canonical_roots(&[allowed.path().to_string_lossy().into_owned()])
+                .unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
         let result = reg
@@ -275,18 +281,24 @@ mod tests {
         let request = tokio::spawn({
             let registry = registry.clone();
             async move {
-                registry.invoke(ToolCall {
-                    name: "filesystem__read_file".into(),
-                    arguments: json!({"path": requested}),
-                }).await
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path": requested}),
+                    })
+                    .await
             }
         });
         let approval = events.recv().await.unwrap();
         std::fs::rename(&child, grant.join("original-child")).unwrap();
         std::os::unix::fs::symlink(&outside, &child).unwrap();
-        gate.resolve(uuid::Uuid::parse_str(&approval.id).unwrap(), true).await;
+        gate.resolve(uuid::Uuid::parse_str(&approval.id).unwrap(), true)
+            .await;
         let result = request.await.unwrap();
-        assert!(result.is_err(), "parent symlink swap must not escape pinned grant");
+        assert!(
+            result.is_err(),
+            "parent symlink swap must not escape pinned grant"
+        );
     }
 
     #[tokio::test]
