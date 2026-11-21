@@ -130,8 +130,8 @@ impl InstanceGuard {
         let name = path
             .file_name()
             .ok_or("Invalid desktop instance lock filename")?;
-        let leaf = CString::new(name.as_bytes())
-            .map_err(|_| "Invalid desktop instance lock filename")?;
+        let leaf =
+            CString::new(name.as_bytes()).map_err(|_| "Invalid desktop instance lock filename")?;
         let fd = unsafe {
             libc::openat(
                 directory.as_raw_fd(),
