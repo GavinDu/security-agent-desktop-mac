@@ -39,15 +39,15 @@ test('checkpoint validation requires GitHub Actions context', () => {
   assert.notEqual(result.status, 0);
 });
 
-test('four required CI jobs each check the GitHub checkout SHA before building', async () => {
+test('five required CI jobs each check the GitHub checkout SHA before building', async () => {
   const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
   const invocations = workflow.match(/- name: Assert checked-out Git revision/g) || [];
   const checkouts = workflow.match(/- uses: actions\/checkout@v4/g) || [];
-  assert.equal(checkouts.length, 4);
-  assert.equal(invocations.length, 4);
+  assert.equal(checkouts.length, 5);
+  assert.equal(invocations.length, 5);
   // Split only on top-level two-space job headers, never indented steps.
-  const sections = workflow.split(/\n(?=  (?:rustfmt|frontend|rust-linux|macos):\r?\n)/);
-  for (const job of ['rustfmt:', 'frontend:', 'rust-linux:', 'macos:']) {
+  const sections = workflow.split(/\n(?=  (?:rustfmt|frontend|rust-linux|macos|required-gates):\r?\n)/);
+  for (const job of ['rustfmt:', 'frontend:', 'rust-linux:', 'macos:', 'required-gates:']) {
     const scope = sections.find((section) => section.startsWith('  ' + job + '\n'));
     assert.ok(scope, 'missing required CI job: ' + job);
     const checkout = scope.indexOf('actions/checkout@v4');
