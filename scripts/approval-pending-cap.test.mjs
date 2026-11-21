@@ -28,7 +28,7 @@ test('bounded approval admission preserves authoritative desktop and UUID respon
   assert.match(source, /if self\s*\.events/);
   assert.match(source, /No desktop approval listener is connected/);
   assert.match(source, /Some\(tx\) => tx\.send\(allow\)\.is_ok\(\)/);
-  assert.match(source, /Err\(_\) => false/);
+  assert.match(source, /None => false/);
   assert.match(source, /Policy::Auto => Ok\(\(\)\)/);
   assert.match(source, /Policy::Disable => Err\("Tool disabled by policy"\.into\(\)\)/);
 });
