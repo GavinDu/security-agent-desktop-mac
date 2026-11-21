@@ -14,7 +14,26 @@ pub struct InstanceGuard {
 }
 
 impl InstanceGuard {
+    // The GUI host owns private user Keychain and approved shell/filesystem
+    // capabilities. A future launchd VPN service is a separate process and
+    // must not accidentally elevate this interactive application.
+    #[cfg(target_os = "macos")]
+    fn validate_unprivileged_user(
+        real_uid: libc::uid_t,
+        effective_uid: libc::uid_t,
+    ) -> Result<(), String> {
+        if real_uid == 0 || effective_uid == 0 || real_uid != effective_uid {
+            return Err("Desktop requires an unprivileged macOS user identity".into());
+        }
+        Ok(())
+    }
+
     pub fn acquire() -> Result<Self, String> {
+        // Reject elevated or setuid GUI startup before discovering home paths,
+        // creating the singleton lock, reading Keychain or launching an agent.
+        #[cfg(target_os = "macos")]
+        Self::validate_unprivileged_user(unsafe { libc::getuid() }, unsafe { libc::geteuid() })?;
+
         let home = dirs::home_dir().ok_or("Home directory unavailable")?;
         let path = home.join(
             "Library/Application Support/com.gavindu.securityagent.desktop/desktop-instance.lock",
@@ -151,6 +170,24 @@ impl InstanceGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_rejects_root_setuid_and_mismatched_macos_identity() {
+        for (real, effective) in [(0, 0), (0, 501), (501, 0), (501, 502)] {
+            assert_eq!(
+                InstanceGuard::validate_unprivileged_user(real, effective),
+                Err("Desktop requires an unprivileged macOS user identity".into()),
+                "real={real}, effective={effective}",
+            );
+        }
+        for uid in [1, 501, 65534] {
+            assert!(
+                InstanceGuard::validate_unprivileged_user(uid, uid).is_ok(),
+                "unprivileged same-UID launch should be accepted",
+            );
+        }
+    }
 
     #[test]
     fn duplicate_process_cannot_acquire_guard_until_first_releases() {
