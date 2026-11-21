@@ -90,7 +90,12 @@ pub async fn set_allowed_roots(
     navigation::ensure_privileged_webview(&window)?;
     let resolved = ToolRegistry::canonical_roots(&roots)?;
     let mut settings = state.settings.lock().await;
-    persist_root_grants(&mut settings, &state.registry, resolved, AgentSettings::save)
+    persist_root_grants(
+        &mut settings,
+        &state.registry,
+        resolved,
+        AgentSettings::save,
+    )
 }
 
 #[tauri::command]
@@ -171,7 +176,12 @@ mod tests {
             ToolRegistry::canonical_roots(&settings.allowed_roots).unwrap(),
             ApprovalGate::new(Default::default()),
         );
-        let new_name = new_root.path().canonicalize().unwrap().to_string_lossy().into_owned();
+        let new_name = new_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let new_grants = ToolRegistry::canonical_roots(&[new_name.clone()]).unwrap();
         let mut staged_disk = None;
         persist_root_grants(&mut settings, &registry, new_grants, |staged| {

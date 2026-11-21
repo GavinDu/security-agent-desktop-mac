@@ -213,7 +213,7 @@ test('failed persisted root-grant change leaves live registry and UI in sync (#1
   assert.match(source, /let mut staged = settings\.clone\(\)/);
   assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
   assert.match(source, /registry\.set_roots\(roots\);\s*\*settings = staged/);
-  assert.match(source, /persist_root_grants\(&mut settings, &state\.registry, resolved, AgentSettings::save\)/);
+  assert.match(source, /persist_root_grants\(\s*&mut settings,\s*&state\.registry,\s*resolved,\s*AgentSettings::save,\s*\)/);
   assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
   assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
 });
