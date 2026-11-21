@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +26,26 @@ pub struct ApprovalGate {
     policies: RwLock<HashMap<String, Policy>>,
     pending: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
     events: broadcast::Sender<ApprovalRequest>,
+}
+
+// This guard is created immediately after inserting a pending approval and
+// removes the exact UUID even if the HTTP/Tauri task is aborted at any await.
+// An asynchronous mutex cannot be awaited from Drop; the tiny HashMap lock
+// is synchronous and is NEVER held across a network or UI await.
+struct PendingApprovalGuard<'a> {
+    gate: &'a ApprovalGate,
+    id: Uuid,
+}
+
+impl Drop for PendingApprovalGuard<'_> {
+    fn drop(&mut self) {
+        let mut pending = self
+            .gate
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pending.remove(&self.id);
+    }
 }
 
 impl ApprovalGate {
@@ -69,7 +89,11 @@ impl ApprovalGate {
             Policy::Ask => {
                 let id = Uuid::new_v4();
                 let (sender, receiver) = oneshot::channel();
-                self.pending.lock().await.insert(id, sender);
+                self.pending
+                    .lock()
+                    .expect("approval lock poisoned")
+                    .insert(id, sender);
+                let _pending_guard = PendingApprovalGuard { gate: self, id };
                 // The absence of a desktop subscriber must deny the request, not allow it.
                 if self
                     .events
@@ -80,11 +104,12 @@ impl ApprovalGate {
                     })
                     .is_err()
                 {
-                    self.pending.lock().await.remove(&id);
+                    // RAII guard removes the pending entry on return.
                     return Err("No desktop approval listener is connected".into());
                 }
                 let answer = tokio::time::timeout(Duration::from_secs(60), receiver).await;
-                self.pending.lock().await.remove(&id);
+                // RAII guard removes the pending ID on normal response,
+                // timeout, closed channel and cancellation alike.
                 match answer {
                     Ok(Ok(true)) => Ok(()),
                     Ok(Ok(false)) => Err("Tool invocation denied".into()),
@@ -96,7 +121,12 @@ impl ApprovalGate {
     }
 
     pub async fn resolve(&self, id: Uuid, allow: bool) -> bool {
-        match self.pending.lock().await.remove(&id) {
+        let sender = self
+            .pending
+            .lock()
+            .expect("approval lock poisoned")
+            .remove(&id);
+        match sender {
             Some(tx) => tx.send(allow).is_ok(),
             None => false,
         }
@@ -113,6 +143,38 @@ mod tests {
         assert_eq!(gate.policy("filesystem__read_file"), Policy::Auto);
         gate.set_policy("bash__run", Policy::Disable);
         assert!(gate.require("bash__run", "dangerous").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_approval_future_drops_pending_id_without_waiting_for_timeout() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        let worker = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.require("bash__run", "approve me").await })
+        };
+        let event = events.recv().await.unwrap();
+        let id = Uuid::parse_str(&event.id).unwrap();
+        assert_eq!(gate.pending.lock().unwrap().len(), 1);
+
+        worker.abort();
+        let _ = worker.await;
+        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(
+            !gate.resolve(id, true).await,
+            "cancelled ID must be invalidated"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_desktop_approval_listener_cleans_pending_id() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let result = gate.require("bash__run", "do not run").await;
+        assert_eq!(
+            result.unwrap_err(),
+            "No desktop approval listener is connected"
+        );
+        assert!(gate.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
