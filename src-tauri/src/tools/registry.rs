@@ -600,10 +600,11 @@ mod tests {
     #[tokio::test]
     async fn shell_group_isolation_never_signals_unrelated_process_group() {
         let dir = tempfile::tempdir().unwrap();
-        let mut unrelated = Command::new("/bin/sh");
+        // Launch sleep directly: killing the test fixture must not leave
+        // its own child orphaned if an interactive shell chose not to exec.
+        let mut unrelated = Command::new("/bin/sleep");
         unrelated
-            .arg("-c")
-            .arg("sleep 4")
+            .arg("4")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
