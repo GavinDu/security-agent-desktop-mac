@@ -41,3 +41,9 @@ test('mounted verifier requires strict ad-hoc seal, not unsigned fallback (#119)
   assert.doesNotMatch(verifier, /code object is not signed at all/);
   assert.doesNotMatch(verifier, /Code-signature check: unsigned,/);
 });
+
+test('mounted codesign validation fails without logging codesign path diagnostics (#119)', async () => {
+  const verifier = await readFile('scripts/verify-macos-bundle.sh', 'utf8');
+  assert.match(verifier, /if ! \/usr\/bin\/codesign --verify --strict "\$app" >\/dev\/null 2>&1; then/);
+  assert.match(verifier, /Ad-hoc signature failed strict verification/);
+});

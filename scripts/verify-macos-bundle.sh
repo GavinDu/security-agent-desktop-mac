@@ -71,10 +71,10 @@ if ! require_exact_adhoc_signature_details "$signature_details"; then
   echo "Developer app is not exclusively ad-hoc code signed" >&2
   exit 1
 fi
-/usr/bin/codesign --verify --strict "$app" || {
+if ! /usr/bin/codesign --verify --strict "$app" >/dev/null 2>&1; then
   echo "Ad-hoc signature failed strict verification" >&2
   exit 1
-}
+fi
 entitlements_path=$(mktemp "${TMPDIR:-/tmp}/security-agent-entitlements.XXXXXX")
 if ! /usr/bin/codesign --display --entitlements :- "$app" > "$entitlements_path" 2>/dev/null; then
   echo "Cannot inspect ad-hoc signature entitlements; refusing to assume none" >&2
