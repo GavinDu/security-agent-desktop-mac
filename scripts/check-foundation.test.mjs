@@ -166,18 +166,21 @@ test('instance lock leaf protection is enforced on open, not only in preflight (
   assert.match(source, /fn refuses_symlink_leaf_after_metadata_preflight/);
 });
 
-test('file read tool validates one opened leaf descriptor before bounded bytes (#94)', async () => {
-  const code = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
-  assert.match(code, /fn read_scoped_file\(path: &Path\)/);
-  assert.match(code, /custom_flags\(libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK\)/);
-  assert.match(code, /let metadata = file\s*\.metadata\(\)/);
-  assert.match(code, /metadata\.nlink\(\) != 1/);
-  assert.match(code, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
-  assert.match(code, /spawn_blocking\(move \|\| read_scoped_file\(&read_path\)\)/);
-  assert.match(code, /fn scoped_fd_read_rejects_symlink_and_hardlink_leaf/);
-  assert.match(code, /fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation/);
-  assert.doesNotMatch(code, /tokio::fs::read\(&path\)/);
-  assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
+test('file read tool validates opened leaf FD and bounded bytes in anchored traversal (#94)', async () => {
+  const source = await readFile('src-tauri/src/tools/pinned_read.rs', 'utf8');
+  const registry = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  assert.match(source, /fn read_scoped_file\(root: &File, relative: &Path\)/);
+  assert.match(source, /libc::O_RDONLY \| libc::O_NOFOLLOW \| libc::O_CLOEXEC \| extra_flags/);
+  assert.match(source, /let metadata = file\s*\.metadata\(\)/);
+  assert.match(source, /metadata\.nlink\(\) != 1/);
+  assert.match(source, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
+  assert.match(source, /Component::Normal\(name\)/);
+  assert.match(registry, /spawn_blocking\(move \|\| \{/);
+  assert.match(registry, /crate::tools::pinned_read::read_scoped_file\(&grant_fd, &relative\)/);
+  assert.match(source, /fn preserves_leaf_type_nlink_utf8_and_64k_limit/);
+  assert.match(source, /fn rejects_absolute_parent_and_symlinked_intermediate_components/);
+  assert.doesNotMatch(registry, /tokio::fs::read\(&path\)/);
+  assert.doesNotMatch(registry, /tokio::fs::metadata\(&path\)/);
 });
 
 test('bash tool streams and caps both pipes before producing JSON (#91)', async () => {
