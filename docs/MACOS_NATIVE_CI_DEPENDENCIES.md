@@ -17,13 +17,21 @@ known-bad head, at the cost of delaying queue entry while Linux tests
 complete. It is a scheduling choice, **not** an assertion about hosted
 runner scarcity, billing or queue root cause.
 
-Critically, a macOS job **skipped** because a dependency failed is
-**not a successful native check**. The repository's PR merge procedure
-still requires all four actual successful conclusions — frontend,
-rustfmt, rust-linux, macos — on the exact immutable PR head, together
-with a nonexpired uploaded `unsigned-security-agent-mac` artifact.
-No `if: always()`, top-level `continue-on-error`, removed check, or
-self-hosted runner workaround can substitute for native evidence.
+Critically, GitHub Actions records a dependent macOS job **skipped** on
+failed prerequisites and [GitHub explicitly documents](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks) that a skipped job can satisfy a *required* status check. Merely
+requiring `macos` in branch protection is **not** a fail-closed gate.
+
+The added `required-gates` job uses `if: ${{ always() }}` and a
+zero-secret-output Bash script to assert literal `success` for **all four**
+needs (frontend, rustfmt, rust-linux, macos). It fails on `skipped`,
+`neutral`, `failure`, `cancelled`, absent and unexpected statuses. It must be
+configured as a **required** check in GitHub branch protection/ruleset;
+without that owner-configured requirement, source changes alone do not
+prove enforcement. A fully successful PR also requires strict native
+mounted-DMG identity, ad-hoc seal/entitlement validation and a nonexpired
+`unsigned-security-agent-mac` artifact at the exact immutable PR head.
+Do not add `if: always()` to the costly macOS job itself, remove source
+checks, relax the native verifier or treat any non-success as sufficient.
 The telemetry-only queue report remains best effort.
 
 The gated macOS job still runs the same exact checked-out revision,
