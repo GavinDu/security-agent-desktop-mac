@@ -223,6 +223,7 @@ async fn run_approved_shell(_command: String, _directory: PathBuf) -> Result<Val
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
     pub name: String,
     #[serde(default)]
@@ -380,6 +381,51 @@ mod tests {
     use super::*;
     use crate::tools::approvals::{ApprovalGate, Policy};
     use std::collections::HashMap;
+    #[test]
+    fn tool_call_envelope_requires_exact_fields_on_both_http_and_tauri_paths() {
+        for (name, arguments) in [
+            ("filesystem__read_file", json!({"path":"/safe/file.txt"})),
+            ("bash__run", json!({"command":"echo ok","cwd":"/safe"})),
+        ] {
+            let valid = json!({"name":name,"arguments":arguments});
+            let parsed: ToolCall = serde_json::from_value(valid.clone()).unwrap();
+            assert_eq!(parsed.name, name);
+            assert_eq!(parsed.arguments, arguments);
+
+            for forbidden in ["approval", "admin", "token", "id", "type"] {
+                let mut altered = valid.clone();
+                altered
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(forbidden.to_owned(), json!(true));
+                assert!(
+                    serde_json::from_value::<ToolCall>(altered).is_err(),
+                    "caller must not inject top-level {forbidden} into the tool contract"
+                );
+            }
+        }
+
+        // Missing tool identity fails at envelope parsing; an omitted
+        // arguments payload remains the documented default Value::Null,
+        // which each typed tool input rejects before any dispatch.
+        assert!(serde_json::from_value::<ToolCall>(json!({"arguments":{}})).is_err());
+        let omitted: ToolCall =
+            serde_json::from_value(json!({"name":"filesystem__read_file"})).unwrap();
+        assert!(omitted.arguments.is_null());
+        assert!(serde_json::from_value::<ReadInput>(omitted.arguments).is_err());
+
+        // Both underlying tool argument structs already independently
+        // enforce additionalProperties:false (no approval-like fields).
+        assert!(serde_json::from_value::<ReadInput>(
+            json!({"path":"/safe","approval":true})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<RunInput>(
+            json!({"command":"true","cwd":"/safe","admin":true})
+        )
+        .is_err());
+    }
+
     #[tokio::test]
     async fn filesystem_root_and_symlink_guard() {
         let allowed = tempfile::tempdir().unwrap();
