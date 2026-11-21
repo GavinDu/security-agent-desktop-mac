@@ -12,6 +12,7 @@ pub fn trusted_main_document(url: &Url) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
+        && url.fragment().is_none()
         && matches!(url.path(), "/" | "/index.html")
 }
 
@@ -51,6 +52,11 @@ mod tests {
             "tauri://attacker.local/index.html",
             "tauri://localhost/other.html",
             "tauri://localhost/index.html?remote=true",
+            "tauri://localhost/#route",
+            "tauri://localhost/index.html#untrusted-command",
+            "tauri://localhost/index.html#%2Fsettings",
+            "tauri://localhost/index.html#",
+            "tauri://localhost/index.html#tool=filesystem__read_file",
             "tauri://localhost:4545/index.html",
             "tauri://user:pass@localhost/index.html",
             "tauri://user@localhost/index.html",
