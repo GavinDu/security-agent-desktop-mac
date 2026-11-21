@@ -187,7 +187,8 @@ mod tests {
         for n in 0..MAX_PENDING_APPROVALS {
             let worker_gate = gate.clone();
             workers.push(tokio::spawn(async move {
-                worker_gate.require("bash__run", &format!("approval {n}")).await
+                let preview = format!("approval {n}");
+                worker_gate.require("bash__run", &preview).await
             }));
             let event = events.recv().await.unwrap();
             ids.push(Uuid::parse_str(&event.id).unwrap());
@@ -207,7 +208,7 @@ mod tests {
         assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
 
         workers[0].abort();
-        let _ = workers[0].await;
+        let _ = (&mut workers[0]).await;
         assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS - 1);
         assert!(!gate.resolve(ids[0], true).await);
 
