@@ -82,6 +82,30 @@ fn persist_root_grants(
     Ok(())
 }
 
+/// Serialize every authorized native caller before validating filesystem
+/// roots.  Validation can open many directory FDs; move it to the blocking
+/// pool while retaining this per-AgentState gate through save/publish.
+///
+/// Dropping the async request during blocking validation cannot commit a grant:
+/// only this future performs persist_root_grants after the worker returns.
+async fn commit_serialized_roots<V, P>(
+    state: &Arc<AgentState>,
+    roots: Vec<String>,
+    validate: V,
+    persist: P,
+) -> Result<(), String>
+where
+    V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
+    P: FnOnce(&AgentSettings) -> Result<(), String>,
+{
+    let _mutation = state.root_mutations.lock().await;
+    let resolved = tokio::task::spawn_blocking(move || validate(roots))
+        .await
+        .map_err(|_| "Cannot validate approved roots".to_owned())??;
+    let mut settings = state.settings.lock().await;
+    persist_root_grants(&mut settings, &state.registry, resolved, persist)
+}
+
 #[tauri::command]
 pub async fn set_allowed_roots(
     window: WebviewWindow,
@@ -89,14 +113,13 @@ pub async fn set_allowed_roots(
     roots: Vec<String>,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
-    let resolved = ToolRegistry::canonical_roots(&roots)?;
-    let mut settings = state.settings.lock().await;
-    persist_root_grants(
-        &mut settings,
-        &state.registry,
-        resolved,
+    commit_serialized_roots(
+        &*state,
+        roots,
+        |requested| ToolRegistry::canonical_roots(&requested),
         AgentSettings::save,
     )
+    .await
 }
 
 // Staged policy publication: never tell the desktop that a tool is
@@ -143,6 +166,167 @@ mod tests {
     use super::*;
     use crate::tools::approvals::ApprovalGate;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn native_root_calls_commit_in_validation_entry_order_even_if_first_is_slow() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("authorized.txt");
+        std::fs::write(&file, "test content").unwrap();
+        let first_grant = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "native-root-order-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            commit_serialized_roots(
+                &first_state,
+                vec![first_grant],
+                move |requested| {
+                    let _ = started_tx.send(());
+                    continue_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "First root validation fixture timed out".to_owned())?;
+                    ToolRegistry::canonical_roots(&requested)
+                },
+                |_| Ok(()),
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+
+        let (second_queued_tx, second_queued_rx) = tokio::sync::oneshot::channel();
+        let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
+        let second_state = state.clone();
+        let second = tokio::spawn(async move {
+            let _ = second_queued_tx.send(());
+            commit_serialized_roots(
+                &second_state,
+                Vec::new(),
+                move |requested| {
+                    let _ = second_started_tx.send(());
+                    ToolRegistry::canonical_roots(&requested)
+                },
+                |_| Ok(()),
+            )
+            .await
+        });
+
+        // Establish that the later async command was actually scheduled
+        // before testing whether its blocking validation can overtake.
+        second_queued_rx.await.unwrap();
+        // This signal is emitted inside the SECOND validation worker. It must
+        // not start until the first native command has finished persisting.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut second_started_rx)
+                .await
+                .is_err(),
+            "a later Clear must not validate or commit ahead of an earlier Grant"
+        );
+        continue_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        second_started_rx.await.unwrap();
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        let denied = state
+            .registry
+            .invoke(ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!({"path": file}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied, "Path outside granted roots");
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_validation_worker_cannot_publish_a_stale_grant() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "native-root-cancel-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            commit_serialized_roots(
+                &first_state,
+                vec![path],
+                move |requested| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Cancelled fixture timed out".to_owned())?;
+                    ToolRegistry::canonical_roots(&requested)
+                },
+                |_| Ok(()),
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        // The blocking resolver can still be running after cancellation,
+        // but only the aborted future could save or publish its result.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            commit_serialized_roots(
+                &state,
+                Vec::new(),
+                |requested| ToolRegistry::canonical_roots(&requested),
+                |_| Ok(()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        release_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_validation_releases_native_mutation_guard_without_publication() {
+        let state = AgentState::new(
+            "native-root-invalid-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+
+        let failure = commit_serialized_roots(
+            &state,
+            vec!["/not-an-authorized-dir".into()],
+            |_| Err("Invalid granted root".into()),
+            |_| panic!("persistence must not run after failed validation"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, "Invalid granted root");
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            |requested| ToolRegistry::canonical_roots(&requested),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+    }
 
     #[tokio::test]
     async fn failed_grant_write_preserves_live_authorization_and_in_memory_settings() {
