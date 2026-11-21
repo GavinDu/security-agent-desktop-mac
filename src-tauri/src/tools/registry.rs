@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::{
-    fs::OpenOptions,
-    io::Read,
+    fs::File,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
@@ -40,45 +39,6 @@ async fn read_bounded_output<R: AsyncRead + Unpin>(
     }
 }
 
-// Scoped to the already-canonicalized grant path by the caller. This pins
-// the *leaf* inode through a single FD, preventing path replacement between
-// metadata and bytes. Parent-directory races still belong to #34.
-fn read_scoped_file(path: &Path) -> Result<String, String> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
-    }
-    let file = options
-        .open(path)
-        .map_err(|_| "Cannot open approved file safely")?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| "Cannot inspect approved file")?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-        return Err("Not a regular file or file exceeds 64 KiB".into());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() != 1 {
-            return Err("Hard-linked files cannot be read as a scoped grant".into());
-        }
-    }
-
-    // Protect even if the opened regular file grows after metadata inspection.
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read approved file")?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("File exceeds 64 KiB limit".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported".into())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
@@ -87,12 +47,15 @@ pub struct ToolCall {
 }
 
 pub struct ToolRegistry {
-    roots: RwLock<Vec<PathBuf>>,
+    roots: RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>,
     gate: Arc<ApprovalGate>,
 }
 
 impl ToolRegistry {
-    pub fn new(roots: Vec<PathBuf>, gate: Arc<ApprovalGate>) -> Self {
+    pub fn new(
+        roots: Vec<crate::tools::pinned_read::GrantedRoot>,
+        gate: Arc<ApprovalGate>,
+    ) -> Self {
         Self {
             roots: RwLock::new(roots),
             gate,
@@ -103,22 +66,29 @@ impl ToolRegistry {
         matches!(tool, "filesystem__read_file" | "bash__run")
     }
 
-    pub fn canonical_roots(roots: &[String]) -> Result<Vec<PathBuf>, String> {
-        let mut canonical = Vec::new();
-        for root in roots {
-            let path = std::fs::canonicalize(root).map_err(|_| format!("Invalid root: {root}"))?;
-            if !path.is_dir() {
-                return Err(format!("Not a directory: {root}"));
-            }
-            if !canonical.contains(&path) {
-                canonical.push(path);
-            }
-        }
-        Ok(canonical)
+    pub fn canonical_roots(
+        roots: &[String],
+    ) -> Result<Vec<crate::tools::pinned_read::GrantedRoot>, String> {
+        crate::tools::pinned_read::canonical_roots(roots)
     }
 
-    pub fn set_roots(&self, roots: Vec<PathBuf>) {
+    pub fn set_roots(&self, roots: Vec<crate::tools::pinned_read::GrantedRoot>) {
         *self.roots.write().expect("roots lock poisoned") = roots;
+    }
+
+    // Resolve only against the CURRENT grants, after a potentially lengthy
+    // user approval await. The FD keeps that root's inode alive until read.
+    #[cfg(unix)]
+    fn scoped_read_grant(&self, path: &Path) -> Result<(File, PathBuf), String> {
+        let roots = self.roots.read().expect("roots lock poisoned");
+        for grant in roots.iter() {
+            if let Ok(relative) = path.strip_prefix(grant.path()) {
+                if relative.components().next().is_some() {
+                    return Ok((grant.clone_directory()?, relative.to_path_buf()));
+                }
+            }
+        }
+        Err("Path outside granted roots".into())
     }
 
     fn allowed_path(&self, requested: &Path) -> Result<PathBuf, String> {
@@ -130,7 +100,7 @@ impl ToolRegistry {
             .read()
             .expect("roots lock poisoned")
             .iter()
-            .any(|root| resolved.starts_with(root));
+            .any(|root| resolved.starts_with(root.path()));
         if !permitted {
             return Err("Path outside granted roots".into());
         }
@@ -156,12 +126,18 @@ impl ToolRegistry {
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
-                // File open/read can block on filesystem I/O. Keep the
-                // verified handle and 64 KiB bound together off the reactor.
-                let read_path = path.clone();
-                let text = tokio::task::spawn_blocking(move || read_scoped_file(&read_path))
-                    .await
-                    .map_err(|_| "Approved file read task failed")??;
+                // Open only relative to the pinned CURRENT grant FD, never
+                // by a possibly swapped absolute pathname after approval.
+                #[cfg(unix)]
+                let (grant_fd, relative) = self.scoped_read_grant(&path)?;
+                #[cfg(unix)]
+                let text = tokio::task::spawn_blocking(move || {
+                    crate::tools::pinned_read::read_scoped_file(&grant_fd, &relative)
+                })
+                .await
+                .map_err(|_| "Approved file read task failed")??;
+                #[cfg(not(unix))]
+                let text: String = return Err("Scoped reads require Unix".into());
                 Ok(json!({ "path": path, "content": text }))
             }
             "bash__run" => {
@@ -252,7 +228,8 @@ mod tests {
         )
         .unwrap();
         let reg = ToolRegistry::new(
-            vec![allowed.path().canonicalize().unwrap()],
+            ToolRegistry::canonical_roots(&[allowed.path().to_string_lossy().into_owned()])
+                .unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
         let result = reg
@@ -280,38 +257,48 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("granted.txt");
-        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize]).unwrap();
-        let exact = read_scoped_file(&file).unwrap();
-        assert_eq!(exact.len(), MAX_FILE_BYTES as usize);
-        std::fs::write(&file, vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
-        assert!(read_scoped_file(&file).is_err());
-        std::fs::write(&file, [0xff_u8, 0xfe_u8]).unwrap();
-        assert_eq!(
-            read_scoped_file(&file).unwrap_err(),
-            "Only UTF-8 files are supported"
-        );
-        assert!(read_scoped_file(dir.path()).is_err());
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn scoped_fd_read_rejects_symlink_and_hardlink_leaf() {
-        let dir = tempfile::tempdir().unwrap();
-        let approved = dir.path().join("approved.txt");
-        let symlink = dir.path().join("symlink.txt");
-        let hardlink = dir.path().join("hardlink.txt");
-        std::fs::write(&approved, b"allowed").unwrap();
-        std::os::unix::fs::symlink(&approved, &symlink).unwrap();
-        assert!(read_scoped_file(&symlink).is_err());
-        std::fs::hard_link(&approved, &hardlink).unwrap();
-        assert!(read_scoped_file(&hardlink).is_err());
-        assert!(read_scoped_file(&approved).is_err());
-        std::fs::remove_file(&hardlink).unwrap();
-        assert_eq!(read_scoped_file(&approved).unwrap(), "allowed");
+    #[tokio::test]
+    async fn parent_symlink_swap_during_approval_is_denied() {
+        let temp = tempfile::tempdir().unwrap();
+        let grant = temp.path().join("grant");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&grant).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let child = grant.join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("file.txt"), "original").unwrap();
+        std::fs::write(outside.join("file.txt"), "outside-secret").unwrap();
+        let mut policies = HashMap::new();
+        policies.insert("filesystem__read_file".into(), Policy::Ask);
+        let gate = ApprovalGate::new(policies);
+        let mut events = gate.subscribe();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[grant.to_string_lossy().into_owned()]).unwrap(),
+            gate.clone(),
+        ));
+        let requested = child.join("file.txt");
+        let request = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path": requested}),
+                    })
+                    .await
+            }
+        });
+        let approval = events.recv().await.unwrap();
+        std::fs::rename(&child, grant.join("original-child")).unwrap();
+        std::os::unix::fs::symlink(&outside, &child).unwrap();
+        gate.resolve(uuid::Uuid::parse_str(&approval.id).unwrap(), true)
+            .await;
+        let result = request.await.unwrap();
+        assert!(
+            result.is_err(),
+            "parent symlink swap must not escape pinned grant"
+        );
     }
 
     #[tokio::test]
@@ -382,7 +369,7 @@ mod tests {
         let mut policies = HashMap::new();
         policies.insert("bash__run".into(), Policy::Disable);
         let reg = ToolRegistry::new(
-            vec![root.path().canonicalize().unwrap()],
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(policies),
         );
         let _ = reg.invoke(ToolCall {name:"bash__run".into(), arguments:json!({"cwd":root.path(),"command":format!("touch {}", marker.display())})}).await;
@@ -393,7 +380,7 @@ mod tests {
     fn does_not_grant_parent_directory() {
         let root = tempfile::tempdir().unwrap();
         let reg = ToolRegistry::new(
-            vec![root.path().canonicalize().unwrap()],
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
         assert!(reg.allowed_path(root.path().parent().unwrap()).is_err());
