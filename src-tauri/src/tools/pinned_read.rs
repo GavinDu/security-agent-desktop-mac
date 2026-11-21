@@ -81,8 +81,10 @@ pub fn pin_absolute_directory(path: &Path) -> Result<File, String> {
 pub fn canonical_roots(roots: &[String]) -> Result<Vec<GrantedRoot>, String> {
     let mut pinned: Vec<GrantedRoot> = Vec::new();
     for configured in roots {
-        let path = std::fs::canonicalize(configured)
-            .map_err(|_| "Configured granted root is unavailable")?;
+        let path = std::fs::canonicalize(configured).map_err(|_| "Invalid granted root")?;
+        if !path.is_dir() {
+            return Err("Granted root is not a directory".into());
+        }
         if pinned.iter().any(|root| root.path == path) {
             continue;
         }
