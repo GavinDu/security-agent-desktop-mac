@@ -89,7 +89,10 @@ impl ApprovalGate {
             Policy::Ask => {
                 let id = Uuid::new_v4();
                 let (sender, receiver) = oneshot::channel();
-                self.pending.lock().expect("approval lock poisoned").insert(id, sender);
+                self.pending
+                    .lock()
+                    .expect("approval lock poisoned")
+                    .insert(id, sender);
                 let _pending_guard = PendingApprovalGuard { gate: self, id };
                 // The absence of a desktop subscriber must deny the request, not allow it.
                 if self
@@ -157,14 +160,20 @@ mod tests {
         worker.abort();
         let _ = worker.await;
         assert!(gate.pending.lock().unwrap().is_empty());
-        assert!(!gate.resolve(id, true).await, "cancelled ID must be invalidated");
+        assert!(
+            !gate.resolve(id, true).await,
+            "cancelled ID must be invalidated"
+        );
     }
 
     #[tokio::test]
     async fn unavailable_desktop_approval_listener_cleans_pending_id() {
         let gate = ApprovalGate::new(HashMap::new());
         let result = gate.require("bash__run", "do not run").await;
-        assert_eq!(result.unwrap_err(), "No desktop approval listener is connected");
+        assert_eq!(
+            result.unwrap_err(),
+            "No desktop approval listener is connected"
+        );
         assert!(gate.pending.lock().unwrap().is_empty());
     }
 
