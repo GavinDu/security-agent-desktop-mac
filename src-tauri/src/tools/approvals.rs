@@ -7,6 +7,10 @@ use std::{
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
+/// Upper bound shared by all awaiting Ask approvals (IPC and HTTP).
+/// Invalid/excess submissions must fail *before* a preview is broadcast.
+const MAX_PENDING_APPROVALS: usize = 32;
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Policy {
@@ -89,10 +93,18 @@ impl ApprovalGate {
             Policy::Ask => {
                 let id = Uuid::new_v4();
                 let (sender, receiver) = oneshot::channel();
-                self.pending
-                    .lock()
-                    .expect("approval lock poisoned")
-                    .insert(id, sender);
+                {
+                    // Short synchronous critical section; never hold it over
+                    // event delivery, a desktop response or a timeout.
+                    let mut pending = self
+                        .pending
+                        .lock()
+                        .map_err(|_| "Approval system unavailable")?;
+                    if pending.len() >= MAX_PENDING_APPROVALS {
+                        return Err("Too many pending tool approvals".into());
+                    }
+                    pending.insert(id, sender);
+                }
                 let _pending_guard = PendingApprovalGuard { gate: self, id };
                 // The absence of a desktop subscriber must deny the request, not allow it.
                 if self
@@ -164,6 +176,66 @@ mod tests {
             !gate.resolve(id, true).await,
             "cancelled ID must be invalidated"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_approval_capacity_fails_closed_and_cancellation_releases_one_slot() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        let mut workers = Vec::with_capacity(MAX_PENDING_APPROVALS);
+        let mut ids = Vec::with_capacity(MAX_PENDING_APPROVALS);
+        for n in 0..MAX_PENDING_APPROVALS {
+            let worker_gate = gate.clone();
+            workers.push(tokio::spawn(async move {
+                let preview = format!("approval {n}");
+                worker_gate.require("bash__run", &preview).await
+            }));
+            let event = events.recv().await.unwrap();
+            ids.push(Uuid::parse_str(&event.id).unwrap());
+        }
+        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+
+        // No 33rd preview is ever broadcast, and the excess caller is not
+        // enqueued to wait for capacity or a timeout.
+        assert_eq!(
+            gate.require("bash__run", "excess request")
+                .await
+                .unwrap_err(),
+            "Too many pending tool approvals"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+
+        workers[0].abort();
+        let _ = (&mut workers[0]).await;
+        assert_eq!(
+            gate.pending.lock().unwrap().len(),
+            MAX_PENDING_APPROVALS - 1
+        );
+        assert!(!gate.resolve(ids[0], true).await);
+
+        let worker_gate = gate.clone();
+        let replacement = tokio::spawn(async move {
+            worker_gate
+                .require("bash__run", "replacement request")
+                .await
+        });
+        let replacement_id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
+        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert!(gate.resolve(replacement_id, true).await);
+        assert!(replacement.await.unwrap().is_ok());
+        assert!(!gate.resolve(replacement_id, true).await);
+
+        for (idx, worker) in workers.into_iter().enumerate() {
+            if idx != 0 {
+                worker.abort();
+                let _ = worker.await;
+            }
+        }
+        assert!(gate.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
