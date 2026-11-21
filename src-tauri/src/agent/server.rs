@@ -722,4 +722,5 @@ mod tests {
             40402,
         )));
         assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
-   }
+    }
+}
