@@ -1,6 +1,6 @@
 use crate::{agent::AgentState, tools::registry::ToolCall};
 use axum::{
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -19,6 +19,9 @@ pub fn router(state: Arc<AgentState>) -> Router {
         .route("/tools", get(list_tools).post(invoke_tool))
         .route("/chat", post(chat))
         .route("/pairing", get(pairing))
+        // Bound JSON request extraction before it reaches tool dispatch.
+        // Keep independent auth/source checks on every request.
+        .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
 }
@@ -210,6 +213,66 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let response: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(response["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn oversized_authenticated_json_is_rejected_before_tool_dispatch() {
+        let state = AgentState::new(
+            "test-token-for-body-limit".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+
+        for path in ["/chat", "/tools"] {
+            let oversized = serde_json::json!({
+                "message": "x".repeat(64 * 1024),
+                "name": "bash__run",
+                "arguments": {}
+            });
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-token-for-body-limit")
+                .body(Body::from(oversized.to_string()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+                "127.0.0.1".parse().unwrap(),
+                40111,
+            )));
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "oversized JSON unexpectedly accepted on {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn small_authorized_chat_keeps_explicit_no_provider_response() {
+        let state = AgentState::new(
+            "test-token-for-body-limit".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/chat")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-token-for-body-limit")
+            .body(Body::from(r#"{"message":"hello"}"#))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "127.0.0.1".parse().unwrap(),
+            40112,
+        )));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]

@@ -76,3 +76,28 @@ document remaining capacity uncertainty and obtain adversarial principal
 Rust/macOS architecture review. Until then #70 remains open under Epic #10.
 Physical Mac Mini lifecycle #12, WebKit hostile-navigation #54 and Keychain
 smoke #55 remain separate acceptance work and are not replaced by CI.
+
+### Required checked-out HEAD assertion — #89
+
+After every `actions/checkout@v4` step (rustfmt, frontend, rust-linux,
+and native `macos-15`), the workflow invokes
+`bash scripts/check-ci-checkout.sh`. The checker uses fixed
+`/usr/bin/git rev-parse --verify HEAD` and requires an exact
+40-character lowercase SHA match against GitHub Actions' `GITHUB_SHA`.
+On pull requests that SHA can represent the synthetic merge commit and
+**must not be replaced by** the source PR head. Missing/invalid values,
+mismatched heads, or inaccessible Git metadata fail the **required** job.
+
+This is a same-instant repository checkout assertion, **not** a
+cryptographic provenance/signature claim, protection from later
+in-job workspace mutations, or proof that developer-DMG bytes match
+a stored Git tree. The existing native Rust tests, strict mounted DMG
+signature/entitlement checks and artifact upload still gate merging.
+The operator can correlate the original source PR SHA separately via
+the existing read-only queue reporter; the latter is telemetry only.
+
+Node fixtures run the actual Bash script against GitHub's checked-out
+repository, exercise absent/invalid/wrong SHA, and verify that a
+different `SOURCE_HEAD_SHA` does not incorrectly invalidate a PR
+test-merge checkout. No auth token, workspace path or user data is
+included in success/failure output.
