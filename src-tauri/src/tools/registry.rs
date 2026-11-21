@@ -383,7 +383,8 @@ mod tests {
         let private = profile.path().join(private_marker);
         let absent = private.join("missing");
         let rejected_root = ToolRegistry::canonical_roots(&[absent.to_string_lossy().into_owned()])
-            .err().expect("missing root must be denied");
+            .err()
+            .expect("missing root must be denied");
         assert!(!rejected_root.contains(private_marker));
         assert_eq!(rejected_root, "Invalid granted root");
 
@@ -391,13 +392,15 @@ mod tests {
         std::fs::write(&real_file, b"not a directory").unwrap();
         let invalid_dir =
             ToolRegistry::canonical_roots(&[real_file.to_string_lossy().into_owned()])
-                .err().expect("file cannot become a directory grant");
+                .err()
+                .expect("file cannot become a directory grant");
         assert!(!invalid_dir.contains(private_marker));
         assert_eq!(invalid_dir, "Granted root is not a directory");
 
         let gate = ApprovalGate::new(HashMap::new());
         let reg = ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[profile.path().to_string_lossy().into_owned()]).unwrap(),
+            ToolRegistry::canonical_roots(&[profile.path().to_string_lossy().into_owned()])
+                .unwrap(),
             gate,
         );
         let inaccessible = reg
