@@ -59,7 +59,7 @@ fn open_settings_at(
     flags: libc::c_int,
     mode: libc::mode_t,
 ) -> std::io::Result<File> {
-    let fd = unsafe { libc::openat(directory.as_raw_fd(), leaf.as_ptr(), flags, mode) };
+    let fd = unsafe { libc::openat(directory.as_raw_fd(), leaf.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -86,7 +86,7 @@ impl AgentSettings {
 
     fn load_at(path: &Path) -> Result<Self, String> {
         #[cfg(unix)]
-        let mut file = {
+        let file = {
             let parent = path.parent().ok_or("Invalid settings directory")?;
             let directory = match checked_settings_directory(parent) {
                 Ok(directory) => directory,
