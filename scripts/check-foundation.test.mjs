@@ -226,3 +226,36 @@ test('authenticated tool/chat router shares bounded fail-fast permits (#100)', a
   assert.match(api, /StatusCode::FORBIDDEN/);
   assert.match(api, /StatusCode::NOT_IMPLEMENTED/);
 });
+
+test('empty bearer token cannot reach the Axum router (#102)', async () => {
+  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  const start = agent.indexOf('pub fn new(');
+  const registry = agent.indexOf('ToolRegistry::canonical_roots', start);
+  const validation = agent.indexOf('token.trim().is_empty()', start);
+  assert.ok(start >= 0 && validation > start && registry > validation,
+    'credential validation must happen before constructing the registry or listener');
+  assert.match(agent, /return Err\("Agent authentication token is unavailable"\.into\(\)\)/);
+  assert.match(agent, /fn unavailable_bearer_credentials_fail_closed_before_agent_setup/);
+  assert.match(server, /strip_prefix\("Bearer "\)/);
+  assert.match(server, /unwrap_or_default\(\)/);
+  assert.match(server, /StatusCode::UNAUTHORIZED/);
+  assert.match(server, /async fn health_is_loopback_only_and_tools_need_token/);
+});
+
+test('AgentState construction and startup share the same strict bind allowlist (#104)', async () => {
+  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  assert.match(agent, /fn allowed_agent_bind\(bind: SocketAddr\) -> bool/);
+  assert.match(agent, /bind\.port\(\) == 8080/);
+  assert.match(agent, /ip == Ipv4Addr::LOCALHOST \|\| ip == Ipv4Addr::new\(10, 8, 0, 1\)/);
+  const constructorStart = agent.indexOf('pub fn new(');
+  const predicate = agent.indexOf('if !allowed_agent_bind(bind)', constructorStart);
+  const registrySetup = agent.indexOf('ToolRegistry::canonical_roots', constructorStart);
+  assert.ok(constructorStart >= 0 && predicate > constructorStart && predicate < registrySetup,
+    'constructor must reject untrusted bind before any registry/privileged setup');
+  const parserStart = agent.indexOf('pub fn bind_address()');
+  assert.ok(parserStart >= 0 && agent.indexOf('if !allowed_agent_bind(bind)', parserStart) > parserStart,
+    'environment config and direct state constructors must share one predicate');
+  assert.match(agent, /fn constructor_enforces_shared_loopback_and_tunnel_bind_allowlist/);
+  assert.doesNotMatch(agent, /IpAddr::V6\(_\) => true/);
+});

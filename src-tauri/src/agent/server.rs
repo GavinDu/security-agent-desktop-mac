@@ -407,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn port_conflict_reports_failure_and_recovers_when_port_is_released() {
-        let blocking = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocking = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         let bind = blocking.local_addr().unwrap();
         let state =
             AgentState::new("not-a-live-secret".into(), bind, AgentSettings::default()).unwrap();
