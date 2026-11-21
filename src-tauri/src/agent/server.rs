@@ -46,6 +46,17 @@ pub async fn serve_with_retries(state: Arc<AgentState>) {
     serve_with_retry_interval(state, Duration::from_secs(5)).await;
 }
 
+// System I/O error Display/Debug can contain local paths or platform details.
+// Only fixed error classes may enter process logs or operator diagnostics.
+fn safe_listener_log_reason(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::AddrInUse => "address in use",
+        std::io::ErrorKind::AddrNotAvailable => "interface unavailable",
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        _ => "I/O failure",
+    }
+}
+
 async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
     let mut prior_bind_error = None;
     loop {
@@ -56,7 +67,7 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 match serve(listener, state.clone()).await {
                     Ok(()) => state.mark_listener_stopped().await,
                     Err(error) => {
-                        eprintln!("Local agent listener stopped unexpectedly: {error}");
+                        eprintln!("Local agent listener stopped unexpectedly: {}", safe_listener_log_reason(error.kind()));
                         state.mark_listener_failed(&error).await;
                     }
                 }
@@ -65,7 +76,7 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 // A persistent port conflict should not flood app logs every
                 // five seconds; a different class of failure is recorded once.
                 if prior_bind_error != Some(error.kind()) {
-                    eprintln!("Local agent listener failed to bind: {error}");
+                    eprintln!("Local agent listener failed to bind: {}", safe_listener_log_reason(error.kind()));
                 }
                 prior_bind_error = Some(error.kind());
                 state.mark_listener_failed(&error).await;
@@ -247,6 +258,28 @@ async fn pairing() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_diagnostics_ignore_os_error_messages() {
+        let private_message = "/Users/private/Library/Keychains/SECRET_TOKEN_DO_NOT_LOG";
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::AddrNotAvailable,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            let error = std::io::Error::new(kind, private_message);
+            let reason = safe_listener_log_reason(error.kind());
+            assert!(!reason.contains("SECRET_TOKEN"));
+            assert!(!reason.contains("/Users"));
+            assert!(!reason.contains("Keychains"));
+        }
+        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::AddrInUse), "address in use");
+        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::AddrNotAvailable), "interface unavailable");
+        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::PermissionDenied), "permission denied");
+        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::Other), "I/O failure");
+    }
+
     use crate::settings::AgentSettings;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
