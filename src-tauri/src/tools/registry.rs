@@ -1,4 +1,4 @@
-use crate::tools::approvals::ApprovalGate;
+use crate::tools::approvals::{ApprovalGate, Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::process::{ExitStatus, Stdio};
@@ -277,7 +277,7 @@ impl ToolRegistry {
     fn allowed_path(&self, requested: &Path) -> Result<PathBuf, String> {
         let resolved = requested
             .canonicalize()
-            .map_err(|e| format!("Path not accessible: {e}"))?;
+            .map_err(|_| "Requested file path is inaccessible".to_string())?;
         let permitted = self
             .roots
             .read()
@@ -288,6 +288,21 @@ impl ToolRegistry {
             return Err("Path outside granted roots".into());
         }
         Ok(resolved)
+    }
+
+    // Approval may wait 60 seconds. A former grant or Ask decision is not
+    // a capability that survives a newer explicit disable/root revocation.
+    // This recheck is intentionally after the await and before execution.
+    // An already-running tool needs a separate revocation supervisor (#34).
+    fn reauthorize_after_approval(&self, tool: &str, approved: &Path) -> Result<(), String> {
+        if self.gate.policy(tool) == Policy::Disable {
+            return Err("Tool disabled by policy".into());
+        }
+        let current = self.allowed_path(approved)?;
+        if current != approved {
+            return Err("Approved path changed during authorization".into());
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> Vec<Value> {
@@ -309,6 +324,7 @@ impl ToolRegistry {
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
+                self.reauthorize_after_approval("filesystem__read_file", &path)?;
                 // Open only relative to the pinned CURRENT grant FD, never
                 // by a possibly swapped absolute pathname after approval.
                 #[cfg(unix)]
@@ -339,6 +355,7 @@ impl ToolRegistry {
                         &format!("{} (cwd: {})", input.command, directory.display()),
                     )
                     .await?;
+                self.reauthorize_after_approval("bash__run", &directory)?;
                 run_approved_shell(input.command, directory).await
             }
             _ => Err("Unknown tool".into()),
@@ -624,6 +641,167 @@ mod tests {
         );
         let _ = reg.invoke(ToolCall {name:"bash__run".into(), arguments:json!({"cwd":root.path(),"command":format!("touch {}", marker.display())})}).await;
         assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn revoked_root_after_approval_request_cannot_launch_bash() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("revoked-must-not-run");
+        let mut policies = HashMap::new();
+        policies.insert("bash__run".into(), Policy::Ask);
+        let gate = ApprovalGate::new(policies);
+        let mut listener = gate.subscribe();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            gate.clone(),
+        ));
+        let command = format!("touch {}", marker.display());
+        let cwd = root.path().to_path_buf();
+        let pending = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .invoke(ToolCall {
+                        name: "bash__run".into(),
+                        arguments: json!({"cwd":cwd, "command":command}),
+                    })
+                    .await
+            }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        registry.set_roots(Vec::new());
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
+        assert!(pending.await.unwrap().is_err());
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn disabling_file_tool_during_approval_denies_stale_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let document = root.path().join("allowed.txt");
+        std::fs::write(&document, b"old file").unwrap();
+        let mut policies = HashMap::new();
+        policies.insert("filesystem__read_file".into(), Policy::Ask);
+        let gate = ApprovalGate::new(policies);
+        let mut listener = gate.subscribe();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            gate.clone(),
+        ));
+        let pending = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path":document}),
+                    })
+                    .await
+            }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        gate.set_policy("filesystem__read_file", Policy::Disable);
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
+        let outcome = pending.await.unwrap().unwrap_err();
+        assert_eq!(outcome, "Tool disabled by policy");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_approved_file_name_during_approval_is_denied() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("approved.txt");
+        let replacement = root.path().join("replacement.txt");
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&replacement, b"different").unwrap();
+        let mut policies = HashMap::new();
+        policies.insert("filesystem__read_file".into(), Policy::Ask);
+        let gate = ApprovalGate::new(policies);
+        let mut listener = gate.subscribe();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            gate.clone(),
+        ));
+        let name = original.clone();
+        let pending = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path":name}),
+                    })
+                    .await
+            }
+        });
+        let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::rename(&original, root.path().join("moved.txt")).unwrap();
+        std::os::unix::fs::symlink(&replacement, &original).unwrap();
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
+        let outcome = pending.await.unwrap().unwrap_err();
+        assert_eq!(outcome, "Approved path changed during authorization");
+    }
+
+    #[test]
+    fn file_authorization_errors_do_not_echo_private_paths() {
+        let profile = tempfile::tempdir().unwrap();
+        let private_marker = "PRIVATE_PROFILE_CANARY_17FBA2";
+        let private = profile.path().join(private_marker);
+        let absent = private.join("missing");
+        let rejected_root = ToolRegistry::canonical_roots(&[absent.to_string_lossy().into_owned()])
+            .err()
+            .expect("missing root must be denied");
+        assert!(!rejected_root.contains(private_marker));
+        assert_eq!(rejected_root, "Invalid granted root");
+
+        let real_file = profile.path().join(private_marker);
+        std::fs::write(&real_file, b"not a directory").unwrap();
+        let invalid_dir =
+            ToolRegistry::canonical_roots(&[real_file.to_string_lossy().into_owned()])
+                .err()
+                .expect("file cannot become a directory grant");
+        assert!(!invalid_dir.contains(private_marker));
+        assert_eq!(invalid_dir, "Granted root is not a directory");
+
+        let gate = ApprovalGate::new(HashMap::new());
+        let reg = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[profile.path().to_string_lossy().into_owned()])
+                .unwrap(),
+            gate,
+        );
+        let inaccessible = reg
+            .allowed_path(&real_file.join("missing"))
+            .expect_err("nonexistent file must fail closed");
+        assert!(!inaccessible.contains(private_marker));
+        assert_eq!(inaccessible, "Requested file path is inaccessible");
+
+        let outside = tempfile::tempdir().unwrap();
+        let denied = reg
+            .allowed_path(outside.path())
+            .expect_err("ungranted directory denied");
+        assert_eq!(denied, "Path outside granted roots");
+        assert_eq!(
+            reg.allowed_path(&real_file).unwrap(),
+            real_file.canonicalize().unwrap(),
+        );
     }
 
     #[test]
