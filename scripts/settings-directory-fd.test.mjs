@@ -9,7 +9,7 @@ test('settings load and save are pinned to owned nofollow directory descriptor (
   assert.match(code, /metadata\.uid\(\) != unsafe \{ libc::geteuid\(\) \}/);
   assert.match(code, /metadata\.mode\(\) & 0o022 != 0/);
   assert.match(code, /fn open_settings_at\(/);
-  assert.match(code, /libc::openat\(directory\.as_raw_fd\(\), leaf\.as_ptr\(\), flags, mode\)/);
+  assert.match(code, /libc::openat\(\s*directory\.as_raw_fd\(\),\s*leaf\.as_ptr\(\),\s*flags,\s*mode as libc::c_uint,\s*\)/);
 
   const load = code.slice(code.indexOf('fn load_at('), code.indexOf('pub fn save('));
   assert.match(load, /checked_settings_directory\(parent\)/);
