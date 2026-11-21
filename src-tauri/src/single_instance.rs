@@ -35,17 +35,15 @@ impl InstanceGuard {
             Err(_) => return Err("Cannot inspect desktop instance lock".into()),
         }
 
-        let mut opts = OpenOptions::new();
-        opts.read(true).write(true).create(true);
+        // Pin the containing directory before resolving the leaf. A leaf-only
+        // O_NOFOLLOW path open would still follow a substituted parent.
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // Kernel-enforced on the opened descriptor. A prior
-            // symlink_metadata(path) alone has a check/open race.
-            opts.mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let file = opts
+        let file = Self::open_lock_in_pinned_directory(parent, path)?;
+        #[cfg(not(unix))]
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
             .open(path)
             .map_err(|_| "Cannot open desktop instance lock")?;
         if !file
@@ -91,6 +89,63 @@ impl InstanceGuard {
             Err(TryLockError::Error(_)) => Err("Cannot acquire desktop instance lock".into()),
         }
     }
+
+    /// Pin the final Application Support directory with the kernel, then
+    /// resolve only the lock basename relative to that checked descriptor.
+    /// This does not make arbitrary same-UID directory renames impossible.
+    #[cfg(unix)]
+    fn open_lock_in_pinned_directory(parent: &Path, path: &Path) -> Result<File, String> {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::MetadataExt,
+        };
+
+        let dir_name = CString::new(parent.as_os_str().as_bytes())
+            .map_err(|_| "Invalid desktop instance lock directory")?;
+        // O_NOFOLLOW applies to the directory leaf. Retain the FD until the
+        // relative lockfile open completes; never trust only metadata by name.
+        let dir_fd = unsafe {
+            libc::open(
+                dir_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if dir_fd < 0 {
+            return Err("Cannot safely open desktop instance lock directory".into());
+        }
+        // SAFETY: a successful open returns a uniquely owned descriptor.
+        let directory = unsafe { File::from_raw_fd(dir_fd) };
+        let metadata = directory
+            .metadata()
+            .map_err(|_| "Cannot inspect desktop instance lock directory")?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err("Unsafe desktop instance lock directory".into());
+        }
+
+        let name = path
+            .file_name()
+            .ok_or("Invalid desktop instance lock filename")?;
+        let leaf = CString::new(name.as_bytes())
+            .map_err(|_| "Invalid desktop instance lock filename")?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err("Cannot open desktop instance lock".into());
+        }
+        // SAFETY: a successful openat returns a uniquely owned descriptor.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +163,39 @@ mod tests {
         assert!(InstanceGuard::acquire_at(&path).is_ok());
         // The lockfile stays in place after unlock; never unlink a locked inode.
         assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_containing_directory_without_creating_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        fs::create_dir(&actual).unwrap();
+        let substitute = dir.path().join("application-support");
+        std::os::unix::fs::symlink(&actual, &substitute).unwrap();
+        let error = match InstanceGuard::acquire_at(&substitute.join("desktop-instance.lock")) {
+            Ok(_) => panic!("must reject symlinked lock parent"),
+            Err(error) => error,
+        };
+        assert!(error.contains("lock directory"));
+        assert!(!actual.join("desktop-instance.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_group_writable_containing_directory_before_lock_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("application-support");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o770)).unwrap();
+        let path = parent.join("desktop-instance.lock");
+        let error = match InstanceGuard::acquire_at(&path) {
+            Ok(_) => panic!("must reject writable lock parent"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "Unsafe desktop instance lock directory");
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]
