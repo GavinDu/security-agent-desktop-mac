@@ -548,10 +548,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("descendant-ticks");
         // The outer /bin/sh exits immediately, leaving an inner shell in
-        // the SAME PGID holding stdout/stderr open. The inner shell ignores
-        // TERM and writes an observable heartbeat; SIGKILL must stop it.
+        // the SAME PGID holding stdout/stderr open without writing to them.
+        // The inner shell ignores TERM and writes a file heartbeat, so a
+        // broken stdout pipe cannot be mistaken for successful group KILL.
         let command = format!(
-            "sh -c 'trap \"\" TERM; while :; do printf x >> \"{}\"; printf y; sleep 0.02; done' & exit 0",
+            "sh -c 'trap \"\" TERM; while :; do printf x >> \"{}\"; sleep 0.02; done' & exit 0",
             marker.display()
         );
         let handle = tokio::spawn(run_approved_shell(command, dir.path().to_path_buf()));
