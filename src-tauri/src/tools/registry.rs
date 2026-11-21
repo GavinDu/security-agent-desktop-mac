@@ -80,7 +80,6 @@ fn read_scoped_file(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Only UTF-8 files are supported".into())
 }
 
-
 // An approved command always starts a fresh Unix process group. The group's
 // numeric ID is the unreaped child PID: keep the Child handle and do NOT wait
 // before signalling the entire group. Reaping early would allow PID/PGID reuse.
@@ -96,8 +95,8 @@ struct ShellProcessOwner {
 impl ShellProcessOwner {
     fn new(child: Child) -> Result<Self, String> {
         let pid = child.id().ok_or("Approved shell has no process ID")?;
-        let pgid = libc::pid_t::try_from(pid)
-            .map_err(|_| "Approved shell process ID is out of range")?;
+        let pgid =
+            libc::pid_t::try_from(pid).map_err(|_| "Approved shell process ID is out of range")?;
         if pgid <= 1 {
             return Err("Approved shell process group is unsafe".into());
         }
@@ -127,7 +126,9 @@ impl ShellProcessOwner {
         self.signal_group(libc::SIGKILL);
         let status = tokio::time::timeout(Duration::from_secs(2), self.child.wait())
             .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "shell reap timed out"))??;
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "shell reap timed out")
+            })??;
         self.reaped = true;
         Ok(status)
     }
@@ -566,12 +567,9 @@ mod tests {
             .process_group(0)
             .kill_on_drop(true);
         let mut stranger = unrelated.spawn().unwrap();
-        let result = run_approved_shell(
-            "printf isolated".into(),
-            dir.path().to_path_buf(),
-        )
-        .await
-        .unwrap();
+        let result = run_approved_shell("printf isolated".into(), dir.path().to_path_buf())
+            .await
+            .unwrap();
         assert_eq!(result["stdout"], "isolated");
         assert!(
             stranger.try_wait().unwrap().is_none(),
