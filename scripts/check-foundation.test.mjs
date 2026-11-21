@@ -218,7 +218,7 @@ test('failed persisted root-grant change leaves live registry and UI in sync (#1
   // The native serialized helper now carries the production save callback
   // through the root-mutation mutex; do not demand direct calls from the UI.
   assert.match(source, /persist_root_grants\(\s*&mut settings,\s*&state\.registry,\s*resolved,\s*persist\s*\)/);
-  assert.match(source, /commit_serialized_roots\(\s*&state\.0,\s*roots,[\s\S]*?AgentSettings::save,\s*\)/);
+  assert.match(source, /commit_serialized_roots\(\s*&\*state,\s*roots,[\s\S]*?AgentSettings::save,\s*\)/);
   assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
   assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
 });
