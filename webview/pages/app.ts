@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event';
 import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
+import { RootWriteCoordinator } from '../bridges/root-write';
 
 const el = (id: string): HTMLElement => {
   const element = document.getElementById(id);
@@ -11,6 +12,8 @@ const el = (id: string): HTMLElement => {
 const allow = el('allow') as HTMLButtonElement;
 const deny = el('deny') as HTMLButtonElement;
 const rootInput = el('rootPath') as HTMLInputElement;
+const grantRootButton = el('grantRoot') as HTMLButtonElement;
+const clearRootsButton = el('clearRoots') as HTMLButtonElement;
 const bashPolicy = el('bashPolicy') as HTMLSelectElement;
 let pending: ApprovalEvent | null = null;
 const approvalReplies = new ApprovalReplyCoordinator();
@@ -19,6 +22,8 @@ let configuredRoots: string[] = [];
 const policyWrites = new PolicyWriteCoordinator();
 let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
+// Prevent overlapping owner root grant/revocation IPC writes from this WebView.
+const rootWrites = new RootWriteCoordinator();
 bashPolicy.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
@@ -97,13 +102,26 @@ async function respond(approved: boolean): Promise<void> {
 }
 
 async function updateRoots(roots: string[]): Promise<void> {
+  // Native validation can take longer for one directory than another.
+  // Never let two user actions from this window race to commit grants.
+  if (rootWrites.inFlight) return;
+  grantRootButton.disabled = true;
+  clearRootsButton.disabled = true;
+  el('settingsNotice').textContent = 'Updating directory permissions...';
   try {
-    await connectorBridge.setAllowedRoots(roots);
+    const accepted = await rootWrites.tryWrite(roots, (nextRoots) =>
+      connectorBridge.setAllowedRoots(nextRoots));
+    if (!accepted) return;
     rootInput.value = '';
     el('settingsNotice').textContent = 'Directory permissions updated.';
     await refresh();
-  } catch (error) {
-    el('settingsNotice').textContent = 'Cannot change roots: ' + String(error);
+  } catch {
+    // IPC errors may carry paths; do not reflect private native details.
+    el('settingsNotice').textContent =
+      'Directory permissions could not be changed. Previous confirmed permissions remain in effect.';
+  } finally {
+    grantRootButton.disabled = false;
+    clearRootsButton.disabled = false;
   }
 }
 
@@ -117,11 +135,11 @@ el('previewPeer').addEventListener('click', () => {
 });
 allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
-el('grantRoot').addEventListener('click', () => {
+grantRootButton.addEventListener('click', () => {
   const root = rootInput.value.trim();
   if (root) void updateRoots([...configuredRoots, root]);
 });
-el('clearRoots').addEventListener('click', () => void updateRoots([]));
+clearRootsButton.addEventListener('click', () => void updateRoots([]));
 async function saveBashPolicy(): Promise<void> {
   const requested = bashPolicy.value as ShellPolicy;
   if (confirmedBashPolicy === null || policyWrites.inFlight) {
