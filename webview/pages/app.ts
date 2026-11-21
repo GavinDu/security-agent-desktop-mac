@@ -31,7 +31,8 @@ const rootSnapshots = new RootSnapshotCoordinator();
 let peerPreviewEpoch = 0;
 bashPolicy.disabled = true;
 grantRootButton.disabled = true;
-clearRootsButton.disabled = true;
+// Clearing all roots is safe even when the current root snapshot is unknown.
+clearRootsButton.disabled = false;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
 
@@ -83,8 +84,8 @@ async function refresh(): Promise<void> {
     // root set for a later read/modify/write Grant action.
     if (rootSnapshots.failRefresh(rootEpoch)) {
       grantRootButton.disabled = true;
-      clearRootsButton.disabled = true;
-      el('roots').textContent = 'Directory permissions unavailable. Retry refresh.';
+      clearRootsButton.disabled = !rootSnapshots.canRevoke;
+      el('roots').textContent = 'Directory permissions unavailable. Retry refresh or Clear Roots.';
     }
   }
 }
@@ -124,7 +125,7 @@ async function respond(approved: boolean): Promise<void> {
 async function updateRoots(roots: string[]): Promise<void> {
   // RootSnapshotCoordinator rejects stale reads and overlapping readback,
   // while RootWriteCoordinator serializes the actual trusted IPC mutation.
-  if (rootWrites.inFlight || !rootSnapshots.startMutation()) return;
+  if (rootWrites.inFlight || !rootSnapshots.startMutation(roots.length === 0)) return;
   grantRootButton.disabled = true;
   clearRootsButton.disabled = true;
   el('settingsNotice').textContent = 'Updating directory permissions...';
@@ -147,7 +148,7 @@ async function updateRoots(roots: string[]): Promise<void> {
     // or not. A failed readback keeps both controls disabled.
     await refresh();
     grantRootButton.disabled = !rootSnapshots.canWrite;
-    clearRootsButton.disabled = !rootSnapshots.canWrite;
+    clearRootsButton.disabled = !rootSnapshots.canRevoke;
     if (persisted) {
       el('settingsNotice').textContent = rootSnapshots.canWrite
         ? 'Directory permissions updated.'

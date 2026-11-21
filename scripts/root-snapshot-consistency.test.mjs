@@ -35,6 +35,11 @@ test('latest-read-wins and readback failure disable stale grant actions (#158)',
   assert.equal(root.failRefresh(failed), true);
   assert.equal(root.canWrite, false);
   assert.equal(root.startMutation(), false);
+  // A fail-closed Grant must not prevent emergency revocation of all roots.
+  assert.equal(root.canRevoke, true);
+  assert.equal(root.startMutation(true), true);
+  assert.equal(root.canRevoke, false);
+  root.finishMutation();
   assert.deepEqual(root.snapshot(), []);
   assert.equal(root.applyRefresh(root.beginRefresh(), ['/restored']), true);
   assert.equal(root.canWrite, true);
@@ -60,8 +65,10 @@ test('trusted UI only takes new Grant roots from currently acknowledged state (#
   assert.match(refresh, /rootSnapshots.beginRefresh\(\)/);
   assert.match(refresh, /rootSnapshots.applyRefresh\(rootEpoch, settings.allowed_roots\)/);
   assert.match(refresh, /rootSnapshots.failRefresh\(rootEpoch\)/);
-  assert.match(update, /if \(rootWrites.inFlight \|\| !rootSnapshots.startMutation\(\)\) return;/);
+  assert.match(update, /if \(rootWrites.inFlight \|\| !rootSnapshots.startMutation\(roots.length === 0\)\) return;/);
   assert.match(update, /await rootWrites.tryWrite\(roots,/);
+  assert.match(update, /clearRootsButton.disabled = !rootSnapshots.canRevoke;/);
+  assert.match(refresh, /clearRootsButton.disabled = !rootSnapshots.canRevoke;/);
   assert.match(update, /finally \{\s*rootSnapshots.finishMutation\(\);[\s\S]*?await refresh\(\)/);
   assert.match(ui, /if \(root && rootSnapshots.canWrite\) void updateRoots\(\[\.\.\.configuredRoots, root\]\)/);
   assert.doesNotMatch(update, /String\(error\)|JSON.stringify\(error\)|console\./);

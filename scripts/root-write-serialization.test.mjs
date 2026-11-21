@@ -64,7 +64,7 @@ test('trusted desktop disables both controls before await and restores only afte
   const section = ui.slice(ui.indexOf('async function updateRoots('), ui.indexOf("el('refresh').addEventListener"));
   assert.match(ui, /import \{ RootWriteCoordinator \} from '\.\.\/bridges\/root-write';/);
   assert.match(ui, /const rootWrites = new RootWriteCoordinator\(\)/);
-  const guard = section.indexOf('if (rootWrites.inFlight || !rootSnapshots.startMutation()) return;');
+  const guard = section.indexOf('if (rootWrites.inFlight || !rootSnapshots.startMutation(roots.length === 0)) return;');
   const disableGrant = section.indexOf('grantRootButton.disabled = true;');
   const disableClear = section.indexOf('clearRootsButton.disabled = true;');
   const awaitWrite = section.indexOf('await rootWrites.tryWrite(roots,');

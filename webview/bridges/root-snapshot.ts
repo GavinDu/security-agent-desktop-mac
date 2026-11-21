@@ -9,6 +9,12 @@ export class RootSnapshotCoordinator {
     return this.confirmed && !this.mutationPending;
   }
 
+  // Clearing all roots is safe without a verified snapshot; it cannot add
+  // back any old path. Still serialize it behind an in-flight mutation.
+  get canRevoke(): boolean {
+    return !this.mutationPending;
+  }
+
   snapshot(): string[] {
     // Return a defensive copy; callers cannot mutate acknowledged roots.
     return this.canWrite ? [...this.roots] : [];
@@ -33,8 +39,8 @@ export class RootSnapshotCoordinator {
     return true;
   }
 
-  startMutation(): boolean {
-    if (!this.canWrite) return false;
+  startMutation(revokingAll = false): boolean {
+    if (!this.canRevoke || (!revokingAll && !this.canWrite)) return false;
     this.mutationPending = true;
     this.confirmed = false;
     this.generation++; // revoke all outstanding refresh tokens

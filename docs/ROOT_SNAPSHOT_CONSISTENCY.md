@@ -11,8 +11,10 @@ does not protect read-modify-write against stale WebView input snapshots.
 `RootSnapshotCoordinator` owns monotonically advancing refresh generations.
 It invalidates outstanding snapshots before and after each IPC mutation,
 accepts only the latest completed backend read when no mutation is active,
-and fails closed on the latest readback error: disabled buttons cannot submit
-a Grant with stale roots. Readback always occurs after native mutation settles,
+and fails closed on the latest readback error: Grant is disabled until an
+authoritative snapshot is available. Clear Roots remains available when no
+mutation is pending, because empty-set revocation cannot resurrect a stale
+grant and should not be blocked by failed readback. Readback always occurs after native mutation settles,
 whether it succeeded or failed. No UI success claim is made when persistence
 was acknowledged but readback is unavailable. Bash tool policy/catalog rendering
 continues to use its independent `policyEpoch` guard.
