@@ -14,8 +14,8 @@ export class RootWriteCoordinator {
   ): Promise<boolean> {
     if (this.active) return false;
     this.active = true;
-    const roots = [...requestedRoots];
     try {
+      const roots = [...requestedRoots];
       await persist(roots);
       return true;
     } finally {
