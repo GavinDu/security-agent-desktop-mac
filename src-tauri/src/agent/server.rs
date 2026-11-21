@@ -627,13 +627,9 @@ mod tests {
             if authenticated {
                 builder = builder.header("authorization", "Bearer source-rate-test-token");
             }
-            let mut req = builder
-                .body(Body::from(r#"{"message":"hello"}"#))
-                .unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                source.parse().unwrap(),
-                40400,
-            )));
+            let mut req = builder.body(Body::from(r#"{"message":"hello"}"#)).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 40400)));
             req
         };
 
