@@ -133,7 +133,10 @@ async fn list_tools(
 ) -> Json<Value> {
     let mut tools = state.registry.list();
     tools.retain(|tool| {
-        !tunnel_shell_forbidden(source, tool["function"]["name"].as_str().unwrap_or_default())
+        !tunnel_shell_forbidden(
+            source,
+            tool["function"]["name"].as_str().unwrap_or_default(),
+        )
     });
     Json(json!({"tools":tools}))
 }
@@ -355,9 +358,11 @@ mod tests {
         let json: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert!(json["tools"].as_array().unwrap().iter().any(|tool| {
-            tool["function"]["name"] == "bash__run"
-        }));
+        assert!(json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["function"]["name"] == "bash__run" }));
     }
 
     #[tokio::test]
