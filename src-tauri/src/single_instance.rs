@@ -18,7 +18,10 @@ impl InstanceGuard {
     // capabilities. A future launchd VPN service is a separate process and
     // must not accidentally elevate this interactive application.
     #[cfg(target_os = "macos")]
-    fn validate_unprivileged_user(real_uid: libc::uid_t, effective_uid: libc::uid_t) -> Result<(), String> {
+    fn validate_unprivileged_user(
+        real_uid: libc::uid_t,
+        effective_uid: libc::uid_t,
+    ) -> Result<(), String> {
         if real_uid == 0 || effective_uid == 0 || real_uid != effective_uid {
             return Err("Desktop requires an unprivileged macOS user identity".into());
         }
