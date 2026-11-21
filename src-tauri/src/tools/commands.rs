@@ -82,6 +82,30 @@ fn persist_root_grants(
     Ok(())
 }
 
+/// Serialize every authorized native caller before validating filesystem
+/// roots.  Validation can open many directory FDs; move it to the blocking
+/// pool while retaining this per-AgentState gate through save/publish.
+///
+/// Dropping the async request during blocking validation cannot commit a grant:
+/// only this future performs persist_root_grants after the worker returns.
+async fn commit_serialized_roots<V, P>(
+    state: &Arc<AgentState>,
+    roots: Vec<String>,
+    validate: V,
+    persist: P,
+) -> Result<(), String>
+where
+    V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
+    P: FnOnce(&AgentSettings) -> Result<(), String>,
+{
+    let _mutation = state.root_mutations.lock().await;
+    let resolved = tokio::task::spawn_blocking(move || validate(roots))
+        .await
+        .map_err(|_| "Cannot validate approved roots".to_owned())??;
+    let mut settings = state.settings.lock().await;
+    persist_root_grants(&mut settings, &state.registry, resolved, persist)
+}
+
 #[tauri::command]
 pub async fn set_allowed_roots(
     window: WebviewWindow,
@@ -89,14 +113,13 @@ pub async fn set_allowed_roots(
     roots: Vec<String>,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
-    let resolved = ToolRegistry::canonical_roots(&roots)?;
-    let mut settings = state.settings.lock().await;
-    persist_root_grants(
-        &mut settings,
-        &state.registry,
-        resolved,
+    commit_serialized_roots(
+        &state.0,
+        roots,
+        |requested| ToolRegistry::canonical_roots(&requested),
         AgentSettings::save,
     )
+    .await
 }
 
 // Staged policy publication: never tell the desktop that a tool is
