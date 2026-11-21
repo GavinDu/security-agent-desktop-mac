@@ -32,5 +32,5 @@ test('trusted desktop refreshes committed tool catalog, never publishes stale di
   assert.match(save, /let persisted = false;/);
   assert.match(save, /if \(!saved\) throw new Error\('Policy write in progress'\);/);
   assert.match(save, /el\('settingsNotice'\)\.textContent = 'Shell policy updated\.';\s*persisted = true;/);
-  assert.match(save, /finally \{\s*policyEpoch \+= 1;\s*bashPolicy\.disabled = false;\s*\}\s*if \(persisted\) await refresh\(\);/);
+  assert.match(save, /finally \{\s*policyEpoch \+= 1;\s*bashPolicy\.disabled = false;\s*\}\s*(?:\/\/[^\n]*\n\s*)*if \(persisted\) await refresh\(\);/);
 });
