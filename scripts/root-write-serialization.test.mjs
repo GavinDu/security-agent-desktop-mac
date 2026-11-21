@@ -47,6 +47,19 @@ test('failed native persistence frees UI write gate without claiming success (#1
   assert.equal(await coordinator.tryWrite([], async () => {}), true);
 });
 
+test('bad requested root collection cannot strand the single-flight lock (#154)', async () => {
+  const coordinator = new RootWriteCoordinator();
+  const impossible = new Proxy([], {
+    get(target, key) {
+      if (key === Symbol.iterator) throw new Error('snapshot failed');
+      return Reflect.get(target, key);
+    },
+  });
+  await assert.rejects(coordinator.tryWrite(impossible, async () => {}), /snapshot failed/);
+  assert.equal(coordinator.inFlight, false);
+  assert.equal(await coordinator.tryWrite([], async () => {}), true);
+});
+
 test('trusted desktop disables both controls before await and restores only after final acknowledgement (#154)', () => {
   const section = ui.slice(ui.indexOf('async function updateRoots('), ui.indexOf("el('refresh').addEventListener"));
   assert.match(ui, /import \{ RootWriteCoordinator \} from '\.\.\/bridges\/root-write';/);
