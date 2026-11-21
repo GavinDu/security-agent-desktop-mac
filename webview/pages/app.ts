@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event';
 import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
+import { RootWriteCoordinator } from '../bridges/root-write';
 
 const el = (id: string): HTMLElement => {
   const element = document.getElementById(id);
@@ -22,7 +23,7 @@ const policyWrites = new PolicyWriteCoordinator();
 let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
 // Prevent overlapping owner root grant/revocation IPC writes from this WebView.
-let rootsWriteInFlight = false;
+const rootWrites = new RootWriteCoordinator();
 bashPolicy.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
@@ -101,13 +102,14 @@ async function respond(approved: boolean): Promise<void> {
 async function updateRoots(roots: string[]): Promise<void> {
   // Native validation can take longer for one directory than another.
   // Never let two user actions from this window race to commit grants.
-  if (rootsWriteInFlight) return;
-  rootsWriteInFlight = true;
+  if (rootWrites.inFlight) return;
   grantRootButton.disabled = true;
   clearRootsButton.disabled = true;
   el('settingsNotice').textContent = 'Updating directory permissions...';
   try {
-    await connectorBridge.setAllowedRoots(roots);
+    const accepted = await rootWrites.tryWrite(roots, (nextRoots) =>
+      connectorBridge.setAllowedRoots(nextRoots));
+    if (!accepted) return;
     rootInput.value = '';
     el('settingsNotice').textContent = 'Directory permissions updated.';
     await refresh();
@@ -116,7 +118,6 @@ async function updateRoots(roots: string[]): Promise<void> {
     el('settingsNotice').textContent =
       'Directory permissions could not be changed. Previous confirmed permissions remain in effect.';
   } finally {
-    rootsWriteInFlight = false;
     grantRootButton.disabled = false;
     clearRootsButton.disabled = false;
   }
