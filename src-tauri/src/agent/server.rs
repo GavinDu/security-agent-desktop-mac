@@ -113,11 +113,12 @@ async fn authorize(
     next.run(request).await
 }
 
-/// Fail fast for authenticated concurrent tool/chat dispatch. This is not
-/// transport-layer connection protection, body byte accounting or per-IP rate
-/// limiting (which remain in the broad P0 security issue #36).
+/// Fail fast for authenticated tool/chat dispatch: 60 requests per minute
+/// per actual TCP peer plus 16 shared concurrent permits. Unauthorized
+/// requests are rejected in the outer bearer/source middleware first.
 async fn limit_tool_dispatch(
     State(state): State<Arc<AgentState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -125,6 +126,16 @@ async fn limit_tool_dispatch(
         request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
     if !is_tool_post {
         return next.run(request).await;
+    }
+
+    // The outer authorize middleware already checked source and bearer.
+    // ConnectInfo is server-supplied, never forwarded from an HTTP header.
+    if !state.source_rate_limiter.allow(source.ip()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"Source request rate limit reached"})),
+        )
+            .into_response();
     }
 
     // Same semaphore for both routes and all requests. The owned permit is
@@ -592,5 +603,120 @@ mod tests {
         .expect("listener did not recover after its port became available");
         runner.abort();
         let _ = runner.await;
+    }
+
+    #[tokio::test]
+    async fn per_tcp_source_authenticated_post_rate_limit_is_shared_and_not_spoofable() {
+        use crate::agent::rate_limit::REQUESTS_PER_WINDOW;
+
+        let state = AgentState::new(
+            "source-rate-test-token".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+
+        let request = |source: &str, path: &str, authenticated: bool| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                // The client cannot choose the source rate-limit key.
+                .header("x-forwarded-for", "10.8.0.99");
+            if authenticated {
+                builder = builder.header("authorization", "Bearer source-rate-test-token");
+            }
+            let mut req = builder.body(Body::from(r#"{"message":"hello"}"#)).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 40400)));
+            req
+        };
+
+        // Source/bearer authorization remains outside both rate and concurrency.
+        for _ in 0..3 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("10.8.0.2", "/chat", false))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("192.168.1.4", "/chat", true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        for n in 0..REQUESTS_PER_WINDOW {
+            let route = if n % 2 == 0 { "/chat" } else { "/tools" };
+            let response = app
+                .clone()
+                .oneshot(request("10.8.0.2", route, true))
+                .await
+                .unwrap();
+            // Chat's deterministic no-provider response and tools' malformed
+            // body are both counted, but neither launches a command.
+            let expected = if route == "/chat" {
+                StatusCode::NOT_IMPLEMENTED
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            assert_eq!(response.status(), expected, "n={n}, route={route}");
+        }
+
+        for route in ["/chat", "/tools"] {
+            let response = app
+                .clone()
+                .oneshot(request("10.8.0.2", route, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "Source request rate limit reached");
+            assert!(!value.to_string().contains("source-rate-test-token"));
+            assert!(!value.to_string().contains("10.8.0.2"));
+        }
+
+        // The forged X-Forwarded-For header didn't share or reset either
+        // budget; a different real tunnel peer still has its own allowance.
+        assert_eq!(
+            app.clone()
+                .oneshot(request("10.8.0.3", "/chat", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+
+        let mut listing = Request::builder()
+            .uri("/tools")
+            .header("authorization", "Bearer source-rate-test-token")
+            .body(Body::empty())
+            .unwrap();
+        listing.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            40401,
+        )));
+        assert_eq!(
+            app.clone().oneshot(listing).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let mut health = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        health.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            40402,
+        )));
+        assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
     }
 }
