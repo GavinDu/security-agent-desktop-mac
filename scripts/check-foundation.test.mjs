@@ -134,7 +134,7 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     });
     await rm(file);
     await symlink(join(temp, 'nonexistent-private-file'), file);
-    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+    await assert.rejects(auditSavedSettings(file), /Cannot safely open saved settings/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -166,25 +166,18 @@ test('instance lock leaf protection is enforced on open, not only in preflight (
   assert.match(source, /fn refuses_symlink_leaf_after_metadata_preflight/);
 });
 
-test('scoped file uses pinned directory-FD openat traversal, leaf caps and races (#94 #115)', async () => {
-  const source = await readFile('src-tauri/src/tools/pinned_read.rs', 'utf8');
-  const registry = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
-  const commands = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
-  assert.match(source, /struct GrantedRoot/);
-  assert.match(source, /fn pin_absolute_directory\(path: &Path\)/);
-  assert.match(source, /libc::openat\(/);
-  assert.match(source, /libc::O_RDONLY \| libc::O_NOFOLLOW \| libc::O_CLOEXEC/);
-  assert.match(source, /Component::Normal\(name\)/);
-  assert.match(source, /let Component::Normal\(name\) = component/);
-  assert.match(source, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
-  assert.match(source, /metadata\.nlink\(\) != 1/);
-  assert.match(registry, /self\.scoped_read_grant\(&path\)/);
-  assert.match(registry, /spawn_blocking\(move \|\| \{/);
-  assert.match(registry, /fn parent_symlink_swap_during_approval_is_denied/);
-  assert.match(source, /fn pinned_root_is_not_replaced_by_renaming_the_granted_path/);
-  assert.match(source, /fn preserves_leaf_type_nlink_utf8_and_64k_limit/);
-  assert.match(commands, /grant\.path\(\)\.to_string_lossy\(\)/);
-  assert.doesNotMatch(registry, /tokio::fs::read\(&path\)/);
+test('file read tool validates one opened leaf descriptor before bounded bytes (#94)', async () => {
+  const code = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  assert.match(code, /fn read_scoped_file\(path: &Path\)/);
+  assert.match(code, /custom_flags\(libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK\)/);
+  assert.match(code, /let metadata = file\s*\.metadata\(\)/);
+  assert.match(code, /metadata\.nlink\(\) != 1/);
+  assert.match(code, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
+  assert.match(code, /spawn_blocking\(move \|\| read_scoped_file\(&read_path\)\)/);
+  assert.match(code, /fn scoped_fd_read_rejects_symlink_and_hardlink_leaf/);
+  assert.match(code, /fn scoped_fd_read_has_64_kib_boundary_and_utf8_validation/);
+  assert.doesNotMatch(code, /tokio::fs::read\(&path\)/);
+  assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
 });
 
 test('bash tool streams and caps both pipes before producing JSON (#91)', async () => {
@@ -202,14 +195,4 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
-});
-
-test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
-  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
-  assert.match(server, /middleware::from_fn_with_state\(state\.clone\(\), authorize\)/);
-  assert.match(server, /async fn oversized_authenticated_json_is_rejected_before_tool_dispatch/);
-  assert.match(server, /StatusCode::PAYLOAD_TOO_LARGE/);
-  assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
-  assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
 });

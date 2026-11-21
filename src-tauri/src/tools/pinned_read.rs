@@ -170,6 +170,10 @@ mod tests {
         let link = root.path().join("link");
         std::os::unix::fs::symlink(&leaf, &link).unwrap();
         assert!(fixture(root.path(), "link").is_err());
+        // Re-establish a valid UTF-8 file before the hard-link assertion;
+        // otherwise invalid UTF-8 would make this test a false positive.
+        std::fs::write(&leaf, b"valid leaf").unwrap();
+        assert_eq!(fixture(root.path(), "file.txt").unwrap(), "valid leaf");
         std::fs::hard_link(&leaf, root.path().join("hardlink")).unwrap();
         assert!(fixture(root.path(), "file.txt").is_err());
         assert!(fixture(root.path(), ".").is_err());
