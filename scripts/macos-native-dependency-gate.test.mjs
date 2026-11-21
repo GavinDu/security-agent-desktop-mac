@@ -40,7 +40,11 @@ test('native verification and DMG artifact remain mandatory rather than bypassed
     assert.ok(native.includes(command), 'missing native security gate ' + command);
   }
   assert.match(native, /- name: Record native macOS queue wait \(telemetry only\)\s+continue-on-error: true/);
-  assert.ok(native.indexOf('cargo test --locked') < native.indexOf('npm run build'));
-  assert.ok(native.indexOf('npm run build') < native.indexOf('bash scripts/verify-macos-bundle.sh'));
+  // Match the standalone Tauri build step, not the earlier WebView
+  // prerequisite "npm run build:webview".
+  const dmgBuild = native.indexOf('\n        run: npm run build\n');
+  assert.ok(dmgBuild > 0, 'required standalone Tauri DMG build step');
+  assert.ok(native.indexOf('cargo test --locked') < dmgBuild);
+  assert.ok(dmgBuild < native.indexOf('bash scripts/verify-macos-bundle.sh'));
   assert.ok(native.indexOf('bash scripts/verify-macos-bundle.sh') < native.indexOf('actions/upload-artifact@v4'));
 });
