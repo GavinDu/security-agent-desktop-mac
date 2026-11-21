@@ -67,7 +67,10 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 match serve(listener, state.clone()).await {
                     Ok(()) => state.mark_listener_stopped().await,
                     Err(error) => {
-                        eprintln!("Local agent listener stopped unexpectedly: {}", safe_listener_log_reason(error.kind()));
+                        eprintln!(
+                            "Local agent listener stopped unexpectedly: {}",
+                            safe_listener_log_reason(error.kind())
+                        );
                         state.mark_listener_failed(&error).await;
                     }
                 }
@@ -76,7 +79,10 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
                 // A persistent port conflict should not flood app logs every
                 // five seconds; a different class of failure is recorded once.
                 if prior_bind_error != Some(error.kind()) {
-                    eprintln!("Local agent listener failed to bind: {}", safe_listener_log_reason(error.kind()));
+                    eprintln!(
+                        "Local agent listener failed to bind: {}",
+                        safe_listener_log_reason(error.kind())
+                    );
                 }
                 prior_bind_error = Some(error.kind());
                 state.mark_listener_failed(&error).await;
@@ -274,10 +280,22 @@ mod tests {
             assert!(!reason.contains("/Users"));
             assert!(!reason.contains("Keychains"));
         }
-        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::AddrInUse), "address in use");
-        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::AddrNotAvailable), "interface unavailable");
-        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::PermissionDenied), "permission denied");
-        assert_eq!(safe_listener_log_reason(std::io::ErrorKind::Other), "I/O failure");
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::AddrInUse),
+            "address in use"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::AddrNotAvailable),
+            "interface unavailable"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::PermissionDenied),
+            "permission denied"
+        );
+        assert_eq!(
+            safe_listener_log_reason(std::io::ErrorKind::Other),
+            "I/O failure"
+        );
     }
 
     use crate::settings::AgentSettings;
