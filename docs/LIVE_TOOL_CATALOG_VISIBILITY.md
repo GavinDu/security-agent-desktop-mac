@@ -22,6 +22,14 @@ limits, source/bearer checks, root grants, and execution-time approval
 enforcement are unchanged. Remote tunnel HTTP also strips shell independent
 of the local policy, as before.
 
+The trusted desktop policy editor re-reads the authoritative tool catalog
+and committed settings after a successful policy write, and gates the tools
+render against the same `policyEpoch` that already protects acknowledged
+policy display. An in-flight older refresh cannot republish the disabled
+tool after a newer successful write. On failed persistence the editor keeps
+the last confirmed mode and intentionally does **not** advertise a speculative
+catalog or trigger a success refresh.
+
 Rust tests cover default, individually disabled, all disabled, immediate
 re-enable and execution-time denial; live HTTP tests cover dynamic listing
 and unauthorized 401 without a native UI/Keychain. Node source regressions
