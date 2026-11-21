@@ -20,12 +20,28 @@ test('peer preview failure is static and stale response/rejection cannot overwri
   assert.match(source, /let peerPreviewEpoch = 0/);
   assert.match(peer, /const epoch = \+\+peerPreviewEpoch/);
   assert.match(peer, /connectorBridge\.previewWireGuardPeer\(publicKey, tunnelIp\)/);
-  assert.match(peer, /\.then\(\(config\) => \{\s*if \(epoch === peerPreviewEpoch\) el\('peerPreview'\)\.textContent = config/);
-  assert.match(peer, /\.catch\(\(\) => \{\s*if \(epoch === peerPreviewEpoch\) \{/);
+  assert.match(peer, /const current = \(\) => epoch === peerPreviewEpoch &&/);
+  assert.match(peer, /peerKeyInput\.value\.trim\(\) === publicKey &&/);
+  assert.match(peer, /peerIpInput\.value\.trim\(\) === tunnelIp/);
+  assert.match(peer, /\.then\(\(config\) => \{\s*if \(current\(\)\) peerPreview\.textContent = config/);
+  assert.match(peer, /\.catch\(\(\) => \{\s*if \(current\(\)\) \{/);
   assert.match(peer, /Peer preview unavailable\. Check the public key and tunnel address\./);
   assert.doesNotMatch(peer, /String\s*\(\s*error\s*\)|JSON\.stringify\s*\(\s*error\s*\)|console\./);
-  assert.match(peer, /el\('peerPreview'\)\.textContent/);
+  assert.match(peer, /peerPreview\.textContent/);
   assert.doesNotMatch(peer, /innerHTML|outerHTML|insertAdjacentHTML/);
+});
+
+test('changing either peer input invalidates pending and displayed previews (#152)', () => {
+  const invalidation = source.slice(
+    source.indexOf('function invalidatePeerPreview()'),
+    source.indexOf("el('previewPeer').addEventListener"),
+  );
+  assert.match(invalidation, /peerPreviewEpoch \+= 1/);
+  assert.match(invalidation, /peerPreview\.textContent = 'Peer preview cleared\./);
+  assert.match(invalidation, /peerKeyInput\.addEventListener\('input', invalidatePeerPreview\)/);
+  assert.match(invalidation, /peerIpInput\.addEventListener\('input', invalidatePeerPreview\)/);
+  assert.match(peer, /peerKeyInput\.value\.trim\(\) === publicKey/);
+  assert.match(peer, /peerIpInput\.value\.trim\(\) === tunnelIp/);
 });
 
 test('no arbitrary Tauri failures are echoed to these trusted UI surfaces (#152)', () => {
