@@ -423,10 +423,12 @@ mod tests {
         let pending = tokio::spawn({
             let registry = registry.clone();
             async move {
-                registry.invoke(ToolCall {
-                    name: "bash__run".into(),
-                    arguments: json!({"cwd":cwd, "command":command}),
-                }).await
+                registry
+                    .invoke(ToolCall {
+                        name: "bash__run".into(),
+                        arguments: json!({"cwd":cwd, "command":command}),
+                    })
+                    .await
             }
         });
         let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
@@ -434,7 +436,10 @@ mod tests {
             .unwrap()
             .unwrap();
         registry.set_roots(Vec::new());
-        assert!(gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true).await);
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
         assert!(pending.await.unwrap().is_err());
         assert!(!marker.exists());
     }
@@ -455,10 +460,12 @@ mod tests {
         let pending = tokio::spawn({
             let registry = registry.clone();
             async move {
-                registry.invoke(ToolCall {
-                    name: "filesystem__read_file".into(),
-                    arguments: json!({"path":document}),
-                }).await
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path":document}),
+                    })
+                    .await
             }
         });
         let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
@@ -466,7 +473,10 @@ mod tests {
             .unwrap()
             .unwrap();
         gate.set_policy("filesystem__read_file", Policy::Disable);
-        assert!(gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true).await);
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
         let outcome = pending.await.unwrap().unwrap_err();
         assert_eq!(outcome, "Tool disabled by policy");
     }
@@ -491,10 +501,12 @@ mod tests {
         let pending = tokio::spawn({
             let registry = registry.clone();
             async move {
-                registry.invoke(ToolCall {
-                    name: "filesystem__read_file".into(),
-                    arguments: json!({"path":name}),
-                }).await
+                registry
+                    .invoke(ToolCall {
+                        name: "filesystem__read_file".into(),
+                        arguments: json!({"path":name}),
+                    })
+                    .await
             }
         });
         let event = tokio::time::timeout(Duration::from_secs(3), listener.recv())
@@ -503,7 +515,10 @@ mod tests {
             .unwrap();
         std::fs::rename(&original, root.path().join("moved.txt")).unwrap();
         std::os::unix::fs::symlink(&replacement, &original).unwrap();
-        assert!(gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true).await);
+        assert!(
+            gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
         let outcome = pending.await.unwrap().unwrap_err();
         assert_eq!(outcome, "Approved path changed during authorization");
     }
