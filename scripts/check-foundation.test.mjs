@@ -156,10 +156,19 @@ test('mounted unsigned DMG verifier fails closed on failed entitlement extractio
 test('instance lock leaf protection is enforced on open, not only in preflight (#79)', async () => {
   const source = await readFile('src-tauri/src/single_instance.rs', 'utf8');
   const preflight = source.indexOf('fs::symlink_metadata(path)');
-  const flags = source.indexOf('.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)');
-  const open = source.indexOf('.open(path)');
-  assert.ok(preflight >= 0 && flags > preflight && open > flags,
-    'kernel no-follow flags must be present on the descriptor open');
+  const call = source.indexOf('Self::open_lock_in_pinned_directory(parent, path)?');
+  const locked = source.indexOf('file.try_lock()');
+  const directory = source.indexOf('libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC');
+  const openat = source.indexOf('libc::openat(');
+  assert.ok(preflight >= 0 && call > preflight && locked > call,
+    'acquire must validate and pin a directory before taking the advisory lock');
+  assert.ok(directory > locked && openat > directory,
+    'helper must open a no-follow directory descriptor before resolving the lock leaf');
+  assert.match(source, /directory\.as_raw_fd\(\)/);
+  assert.match(source, /metadata\.uid\(\)/);
+  assert.match(source, /metadata\.mode\(\) & 0o022/);
+  assert.match(source, /fn refuses_symlinked_containing_directory_without_creating_lock/);
+  assert.match(source, /fn refuses_group_writable_containing_directory_before_lock_creation/);
   assert.match(source, /\.nlink\(\)\s*!= 1/);
   assert.match(source, /file\.try_lock\(\)/);
   assert.match(source, /fn refuses_private_hardlink_to_another_file/);
@@ -198,4 +207,15 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
+});
+
+test('failed persisted root-grant change leaves live registry and UI in sync (#117)', async () => {
+  const source = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
+  assert.match(source, /fn persist_root_grants\(/);
+  assert.match(source, /let mut staged = settings\.clone\(\)/);
+  assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
+  assert.match(source, /registry\.set_roots\(roots\);\s*\*settings = staged/);
+  assert.match(source, /persist_root_grants\(\s*&mut settings,\s*&state\.registry,\s*resolved,\s*AgentSettings::save,\s*\)/);
+  assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
+  assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
 });

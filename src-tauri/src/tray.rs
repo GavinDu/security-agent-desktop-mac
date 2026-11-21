@@ -16,15 +16,19 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
         )
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
+            "show" => show_main(app),
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
     Ok(())
+}
+
+/// Show only the existing, privileged main WebView. Used by the tray and
+/// native macOS reopen event. Launch arguments never become IPC commands.
+pub(crate) fn show_main(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }

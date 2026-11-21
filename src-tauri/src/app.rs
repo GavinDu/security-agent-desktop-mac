@@ -79,6 +79,17 @@ pub fn run() {
             tauri::async_runtime::spawn(agent::server::serve_with_retries(server_state));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Security Agent Tauri launch failed");
+        .build(tauri::generate_context!())
+        .expect("Security Agent Tauri launch failed")
+        .run(|app, event| {
+            // macOS sends NSApplicationDelegate applicationShouldHandleReopen
+            // when Finder/Dock reactivates the already running app. Reuse the
+            // same trusted main WebView; never create a new privileged window.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show_main(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }

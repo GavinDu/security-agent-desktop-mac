@@ -1,7 +1,7 @@
 use crate::{agent::AgentState, tools::registry::ToolCall};
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Request, State},
-    http::{header, StatusCode},
+    http::{header, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,9 +19,15 @@ pub fn router(state: Arc<AgentState>) -> Router {
         .route("/tools", get(list_tools).post(invoke_tool))
         .route("/chat", post(chat))
         .route("/pairing", get(pairing))
-        // Bound JSON request extraction before it reaches tool dispatch.
-        // Keep independent auth/source checks on every request.
+        // Bound JSON extractors before dispatch; source/bearer checks are
+        // still outermost, and authenticated work is subject to admission.
         .layer(DefaultBodyLimit::max(64 * 1024))
+        // Axum layers are entered in reverse order: authenticate first,
+        // then attempt admission, before any JSON/tool dispatch happens.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limit_tool_dispatch,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
 }
@@ -107,15 +113,75 @@ async fn authorize(
     next.run(request).await
 }
 
+/// Fail fast for authenticated concurrent tool/chat dispatch. This is not
+/// transport-layer connection protection, body byte accounting or per-IP rate
+/// limiting (which remain in the broad P0 security issue #36).
+async fn limit_tool_dispatch(
+    State(state): State<Arc<AgentState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let is_tool_post =
+        request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
+    if !is_tool_post {
+        return next.run(request).await;
+    }
+
+    // Same semaphore for both routes and all requests. The owned permit is
+    // held until the response completes, including an awaited approval flow;
+    // cancellation drops it automatically without leaking capacity.
+    let Ok(_permit) = state.dispatch_permits.clone().try_acquire_owned() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":"Concurrent tool request limit reached"})),
+        )
+            .into_response();
+    };
+    next.run(request).await
+}
+
 async fn health(State(state): State<Arc<AgentState>>) -> Json<Value> {
     Json(json!({"ok":true,"binding":state.bind.to_string()}))
 }
 
-async fn list_tools(State(state): State<Arc<AgentState>>) -> Json<Value> {
-    Json(json!({"tools":state.registry.list()}))
+// POSIX process-group cleanup cannot contain a descendant that escapes its
+// session (S02.3/#108). Until a separately verified supervisor exists, do
+// not expose an arbitrary shell across the WireGuard-facing HTTP boundary.
+// Source identity is the server-supplied ConnectInfo, never an HTTP header.
+fn tunnel_shell_forbidden(source: SocketAddr, tool_name: &str) -> bool {
+    tool_name == "bash__run" && !source.ip().is_loopback()
 }
 
-async fn invoke_tool(State(state): State<Arc<AgentState>>, Json(call): Json<ToolCall>) -> Response {
+fn remote_shell_denied() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error":"Remote shell requires an isolated macOS supervisor"})),
+    )
+        .into_response()
+}
+
+async fn list_tools(
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AgentState>>,
+) -> Json<Value> {
+    let mut tools = state.registry.list();
+    tools.retain(|tool| {
+        !tunnel_shell_forbidden(
+            source,
+            tool["function"]["name"].as_str().unwrap_or_default(),
+        )
+    });
+    Json(json!({"tools":tools}))
+}
+
+async fn invoke_tool(
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AgentState>>,
+    Json(call): Json<ToolCall>,
+) -> Response {
+    if tunnel_shell_forbidden(source, &call.name) {
+        return remote_shell_denied();
+    }
     match state.registry.invoke(call).await {
         Ok(data) => (StatusCode::OK, Json(json!({"result":data}))).into_response(),
         Err(message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message}))).into_response(),
@@ -131,8 +197,15 @@ struct ChatRequest {
 
 /// Deterministic tool-dispatch envelope, *not* a claimed LLM inference loop.
 /// An inference provider/agent planner will be added in a later milestone.
-async fn chat(State(state): State<Arc<AgentState>>, Json(request): Json<ChatRequest>) -> Response {
+async fn chat(
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AgentState>>,
+    Json(request): Json<ChatRequest>,
+) -> Response {
     if let Some(call) = request.tool_call {
+        if tunnel_shell_forbidden(source, &call.name) {
+            return remote_shell_denied();
+        }
         let name = call.name.clone();
         return match state.registry.invoke(call).await {
             Ok(output) => (
@@ -216,6 +289,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_post_routes_share_fail_fast_dispatch_permits() {
+        use crate::agent::MAX_CONCURRENT_TOOL_REQUESTS;
+        let state = AgentState::new(
+            "some-long-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let make = |source: &'static str, uri: &'static str, authorized: bool| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Content-Type", "application/json");
+            if authorized {
+                request = request.header("Authorization", "Bearer some-long-test-token");
+            }
+            let mut req = request.body(Body::from(r#"{"message":"hello"}"#)).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 42123)));
+            req
+        };
+
+        // Simulate all running, approved but outstanding tool requests. No
+        // daemon, shell command, HTTP socket, or physical Keychain is needed.
+        let occupied = state
+            .dispatch_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TOOL_REQUESTS as u32)
+            .await
+            .unwrap();
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        // Outer source and bearer middleware must reject first even while
+        // the inner tool dispatch limit is exhausted.
+        assert_eq!(
+            app.clone()
+                .oneshot(make("127.0.0.1", "/tools", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make("192.168.1.2", "/chat", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for path in ["/tools", "/chat"] {
+            let response = app
+                .clone()
+                .oneshot(make("127.0.0.1", path, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "Concurrent tool request limit reached");
+        }
+
+        // Health is deliberately not in the tool budget.
+        let mut health = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        health.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "127.0.0.1".parse().unwrap(),
+            42124,
+        )));
+        assert_eq!(
+            app.clone().oneshot(health).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        drop(occupied);
+        assert_eq!(
+            state.dispatch_permits.available_permits(),
+            MAX_CONCURRENT_TOOL_REQUESTS
+        );
+        assert_eq!(
+            app.oneshot(make("127.0.0.1", "/chat", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        assert_eq!(
+            state.dispatch_permits.available_permits(),
+            MAX_CONCURRENT_TOOL_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn tunnel_http_never_advertises_or_invokes_uncontained_shell() {
+        let state = AgentState::new(
+            "test-remote-shell-token".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+
+        // The outer middleware authorizes the real TCP peer before handlers,
+        // and explicitly ignores this forged forwarding header.
+        let mut listing = Request::builder()
+            .uri("/tools")
+            .header("authorization", "Bearer test-remote-shell-token")
+            .header("x-forwarded-for", "127.0.0.1")
+            .body(Body::empty())
+            .unwrap();
+        listing.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            41000,
+        )));
+        let response = app.clone().oneshot(listing).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let names: Vec<_> = json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"filesystem__read_file"));
+        assert!(!names.contains(&"bash__run"));
+
+        for (route, body) in [
+            (
+                "/tools",
+                json!({
+                    "name":"bash__run",
+                    "arguments":{"command":"touch should-not-execute","cwd":"/"}
+                }),
+            ),
+            (
+                "/chat",
+                json!({
+                    "message":"run this",
+                    "tool_call":{"name":"bash__run","arguments":{"command":"touch should-not-execute","cwd":"/"}}
+                }),
+            ),
+        ] {
+            for authenticated in [false, true] {
+                let mut builder = Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "127.0.0.1");
+                if authenticated {
+                    builder = builder.header("authorization", "Bearer test-remote-shell-token");
+                }
+                let mut req = builder.body(Body::from(body.to_string())).unwrap();
+                req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+                    "10.8.0.2".parse().unwrap(),
+                    41001,
+                )));
+                let result = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    result.status(),
+                    if authenticated {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    },
+                    "route={route}, authenticated={authenticated}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_http_keeps_operator_approved_shell_catalog() {
+        let state = AgentState::new(
+            "test-loopback-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+        let mut request = Request::builder()
+            .uri("/tools")
+            .header("authorization", "Bearer test-loopback-token")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "127.0.0.1".parse().unwrap(),
+            41002,
+        )));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(json["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["function"]["name"] == "bash__run" }));
+    }
+
+    #[tokio::test]
     async fn oversized_authenticated_json_is_rejected_before_tool_dispatch() {
         let state = AgentState::new(
             "test-token-for-body-limit".into(),
@@ -277,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn port_conflict_reports_failure_and_recovers_when_port_is_released() {
-        let blocking = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let blocking = TcpListener::bind("127.0.0.1:8080").await.unwrap();
         let bind = blocking.local_addr().unwrap();
         let state =
             AgentState::new("not-a-live-secret".into(), bind, AgentSettings::default()).unwrap();

@@ -61,36 +61,35 @@ test -n "$icon" || { echo "Missing bundled .icns icon" >&2; exit 1; }
 # This is an unsigned developer artifact, not a Developer ID release.
 # An unsigned binary cannot carry signature entitlements. macOS arm64 may
 # have an ad-hoc code signature, in which case it must have no entitlements.
-if signature_details=$(/usr/bin/codesign --display --verbose=2 "$app" 2>&1); then
-  if [[ "$signature_details" != *"Signature=adhoc"* ]]; then
-    echo "Unexpected distribution signature in unsigned CI installer" >&2
-    exit 1
-  fi
-  /usr/bin/codesign --verify --strict "$app" || {
-    echo "Ad-hoc signature failed strict verification" >&2
-    exit 1
-  }
-  entitlements_path=$(mktemp "${TMPDIR:-/tmp}/security-agent-entitlements.XXXXXX")
-  if ! /usr/bin/codesign --display --entitlements :- "$app" > "$entitlements_path" 2>/dev/null; then
-    echo "Cannot inspect ad-hoc signature entitlements; refusing to assume none" >&2
-    exit 1
-  fi
-  if [[ -s "$entitlements_path" ]]; then
-    python3 - "$entitlements_path" <<'PY'
+source "$(dirname "${BASH_SOURCE[0]}")/dmg-signature-policy.sh"
+# 'Unsigned developer DMG' does NOT allow an app without an ad-hoc seal.
+if ! signature_details=$(/usr/bin/codesign --display --verbose=2 "$app" 2>&1); then
+  echo "Developer app lacks a verifiable ad-hoc code signature" >&2
+  exit 1
+fi
+if ! require_exact_adhoc_signature_details "$signature_details"; then
+  echo "Developer app is not exclusively ad-hoc code signed" >&2
+  exit 1
+fi
+if ! /usr/bin/codesign --verify --strict "$app" >/dev/null 2>&1; then
+  echo "Ad-hoc signature failed strict verification" >&2
+  exit 1
+fi
+entitlements_path=$(mktemp "${TMPDIR:-/tmp}/security-agent-entitlements.XXXXXX")
+if ! /usr/bin/codesign --display --entitlements :- "$app" > "$entitlements_path" 2>/dev/null; then
+  echo "Cannot inspect ad-hoc signature entitlements; refusing to assume none" >&2
+  exit 1
+fi
+if [[ -s "$entitlements_path" ]]; then
+  python3 - "$entitlements_path" <<'PY'
 import plistlib
 import sys
 with open(sys.argv[1], "rb") as payload:
-    entitlements = plistlib.load(payload)
+  entitlements = plistlib.load(payload)
 if not isinstance(entitlements, dict) or entitlements:
-    raise SystemExit("Unsigned developer build must not have entitlements")
+  raise SystemExit("Unsigned developer build must not have entitlements")
 PY
-  fi
-  echo "Code-signature check: ad-hoc only, no signature entitlements"
-elif [[ "$signature_details" == *"code object is not signed at all"* ]]; then
-  echo "Code-signature check: unsigned, no signature entitlements"
-else
-  echo "Unable to classify code-signature state of developer build" >&2
-  exit 1
 fi
+echo "Code-signature check: required ad-hoc only, no signature entitlements"
 
 echo "Verified installed application inside DMG: bundle=$bundle_id, executable=$executable, arch=arm64"
