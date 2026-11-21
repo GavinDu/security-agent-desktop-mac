@@ -114,7 +114,7 @@ pub async fn set_allowed_roots(
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
     commit_serialized_roots(
-        &state.0,
+        &*state,
         roots,
         |requested| ToolRegistry::canonical_roots(&requested),
         AgentSettings::save,
