@@ -25,7 +25,7 @@ test('Ask admission has a bounded pending-ID cap before notification (#139)', as
 
 test('bounded approval admission preserves authoritative desktop and UUID response semantics (#139)', async () => {
   const source = await readFile('src-tauri/src/tools/approvals.rs', 'utf8');
-  assert.match(source, /if self\.events/);
+  assert.match(source, /if self\s*\.events/);
   assert.match(source, /No desktop approval listener is connected/);
   assert.match(source, /Some\(tx\) => tx\.send\(allow\)\.is_ok\(\)/);
   assert.match(source, /Err\(_\) => false/);
