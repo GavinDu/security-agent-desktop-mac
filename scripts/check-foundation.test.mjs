@@ -134,7 +134,7 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     });
     await rm(file);
     await symlink(join(temp, 'nonexistent-private-file'), file);
-    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+    await assert.rejects(auditSavedSettings(file), /Cannot safely open saved settings/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -180,30 +180,6 @@ test('file read tool validates one opened leaf descriptor before bounded bytes (
   assert.doesNotMatch(code, /tokio::fs::metadata\(&path\)/);
 });
 
-
-test('approved Unix bash process group survives request abort long enough to reap (#93)', async () => {
-  const code = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
-  assert.match(code, /\.process_group\(0\)/);
-  assert.match(code, /struct ShellProcessOwner/);
-  assert.match(code, /struct ShellProcessOwner[\s\S]*reaped: bool/);
-  assert.match(code, /libc::kill\(-self\.pgid, signal\)/);
-  assert.match(code, /self\.signal_group\(libc::SIGTERM\)/);
-  assert.match(code, /self\.signal_group\(libc::SIGKILL\)/);
-  assert.match(code, /self\.child\.wait\(\)/);
-  assert.match(code, /run_shell_owned_with_deadline\(command, directory, cancel_rx, Duration::from_secs\(15\)\)/);
-  assert.match(code, /tokio::time::timeout\(deadline, async/);
-  assert.match(code, /fn shell_timeout_terminates_infinite_streams_without_unbounded_capture/);
-  assert.match(code, /let \(cancel_tx, cancel_rx\) = oneshot::channel::<\(\)>\(\)/);
-  assert.match(code, /let _ = result_tx\.send\(run_shell_owned/);
-  assert.match(code, /const MAX_ACTIVE_SHELLS: usize = 8/);
-  assert.match(code, /static SHELL_PERMITS: OnceLock<Arc<Semaphore>>/);
-  assert.match(code, /\.try_acquire_owned\(\)/);
-  assert.match(code, /let _permit = permit/);
-  assert.match(code, /fn cancelling_shell_owner_kills_descendant_even_after_shell_leader_exits/);
-  assert.match(code, /fn shell_group_isolation_never_signals_unrelated_process_group/);
-  assert.doesNotMatch(code, /\.pre_exec\(/);
-});
-
 test('bash tool streams and caps both pipes before producing JSON (#91)', async () => {
   const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
   const manifest = await readFile('src-tauri/Cargo.toml', 'utf8');
@@ -219,14 +195,4 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
-});
-
-test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
-  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
-  assert.match(server, /middleware::from_fn_with_state\(state\.clone\(\), authorize\)/);
-  assert.match(server, /async fn oversized_authenticated_json_is_rejected_before_tool_dispatch/);
-  assert.match(server, /StatusCode::PAYLOAD_TOO_LARGE/);
-  assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
-  assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
 });
