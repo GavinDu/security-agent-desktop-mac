@@ -156,11 +156,14 @@ test('mounted unsigned DMG verifier fails closed on failed entitlement extractio
 test('instance lock leaf protection is enforced on open, not only in preflight (#79)', async () => {
   const source = await readFile('src-tauri/src/single_instance.rs', 'utf8');
   const preflight = source.indexOf('fs::symlink_metadata(path)');
+  const call = source.indexOf('Self::open_lock_in_pinned_directory(parent, path)?');
+  const locked = source.indexOf('file.try_lock()');
   const directory = source.indexOf('libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC');
   const openat = source.indexOf('libc::openat(');
-  const locked = source.indexOf('file.try_lock()');
-  assert.ok(preflight >= 0 && directory > preflight && openat > directory && locked > openat,
-    'the lock leaf must be opened relative to a pinned no-follow directory FD before try_lock');
+  assert.ok(preflight >= 0 && call > preflight && locked > call,
+    'acquire must validate and pin a directory before taking the advisory lock');
+  assert.ok(directory > locked && openat > directory,
+    'helper must open a no-follow directory descriptor before resolving the lock leaf');
   assert.match(source, /directory\.as_raw_fd\(\)/);
   assert.match(source, /metadata\.uid\(\)/);
   assert.match(source, /metadata\.mode\(\) & 0o022/);
