@@ -71,6 +71,9 @@ jobs:
       - name: Run Rust unit tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
   macos:
+    # Keep scarce native runners for commits that already passed the three
+    # required source checks; skipped native jobs never authorize a merge.
+    needs: [frontend, rustfmt, rust-linux]
     runs-on: macos-15
     timeout-minutes: 50
     permissions:
