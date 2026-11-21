@@ -27,3 +27,7 @@ Each output pipe drains concurrently, retaining at most 8 KiB. If the process cl
 - Native CI on hosted macOS is not equivalent to physical Mac Mini, Dock/Finder/WebKit or Keychain persistence tests.
 
 Architectural reference only: [Proton Lumo Desktop](https://github.com/ProtonLumo/lumo-desktop) uses the `process-wrap` crate, but no GPL desktop application implementation was copied. This small scoped owner uses Tokio and libc already in the manifest to avoid adding an unreviewed dependency.
+
+## Bounded owner capacity
+
+Independent of the shared HTTP dispatch cap (#100 / PR #101), a process-global 8-permit `Arc<Semaphore>` limits live Unix shell lifecycle workers. The owned permit is moved into the worker and released **only after group termination/reap**, including when its HTTP request is aborted. A ninth concurrent command fails closed before a subprocess is launched; this is not a per-device rate limiter or a guarantee against unauthorized clients. The API-wide admission controls still belong to #100/#36.

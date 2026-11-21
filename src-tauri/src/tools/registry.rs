@@ -6,17 +6,21 @@ use std::{
     fs::OpenOptions,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
-    sync::oneshot,
+    sync::{oneshot, Semaphore},
 };
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
+#[cfg(unix)]
+const MAX_ACTIVE_SHELLS: usize = 8;
+#[cfg(unix)]
+static SHELL_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 // Drain both pipes concurrently, retaining no more than MAX_SHELL_OUTPUT
 // bytes per stream. Extra output is discarded rather than buffered; pipe
@@ -151,9 +155,17 @@ impl Drop for ShellProcessOwner {
 // worker, which owns the child/group through cleanup and wait/reap.
 #[cfg(unix)]
 async fn run_approved_shell(command: String, directory: PathBuf) -> Result<Value, String> {
+    // This owner-only limit is required even before the separate shared API
+    // dispatch gate (#100) merges. Never spawn unbounded cleanup workers.
+    let permit = SHELL_PERMITS
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_ACTIVE_SHELLS)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "Approved shell worker capacity exceeded")?;
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (result_tx, result_rx) = oneshot::channel();
     tokio::spawn(async move {
+        let _permit = permit; // Released only after complete group cleanup.
         let _ = result_tx.send(run_shell_owned(command, directory, cancel_rx).await);
     });
     let result = result_rx
