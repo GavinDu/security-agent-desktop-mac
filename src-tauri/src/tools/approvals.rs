@@ -198,7 +198,9 @@ mod tests {
         // No 33rd preview is ever broadcast, and the excess caller is not
         // enqueued to wait for capacity or a timeout.
         assert_eq!(
-            gate.require("bash__run", "excess request").await.unwrap_err(),
+            gate.require("bash__run", "excess request")
+                .await
+                .unwrap_err(),
             "Too many pending tool approvals"
         );
         assert!(matches!(
@@ -209,12 +211,17 @@ mod tests {
 
         workers[0].abort();
         let _ = (&mut workers[0]).await;
-        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS - 1);
+        assert_eq!(
+            gate.pending.lock().unwrap().len(),
+            MAX_PENDING_APPROVALS - 1
+        );
         assert!(!gate.resolve(ids[0], true).await);
 
         let worker_gate = gate.clone();
         let replacement = tokio::spawn(async move {
-            worker_gate.require("bash__run", "replacement request").await
+            worker_gate
+                .require("bash__run", "replacement request")
+                .await
         });
         let replacement_id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
         assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
