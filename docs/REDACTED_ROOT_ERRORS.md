@@ -39,3 +39,7 @@ Close only the code-only #98 once all four exact-head GitHub Actions jobs
 pass, including native macOS 15 locked Rust tests, strict mounted
 ad-hoc development DMG validation and artifact upload. Physical Mac
 Keychain/WKWebView acceptance and production notarization are separate.
+
+## Reconciliation with verified pinned-directory FD implementation (#115)
+
+PR #116 was merged first and moved root canonicalization into `tools/pinned_read.rs`. This patch now sets static public errors in that module and keeps all `openat` descriptor anchoring, no-follow traversal and bounded reads intact. The Rust test uses pinned `GrantedRoot` objects rather than obsolete path-only grant values. Error classification uses a preflight file-type check for diagnostics only; the authoritative pinned-FD traversal still validates the directory kernel-side. Never conflate this error redaction with a complete shell sandbox or caller cancellation.
