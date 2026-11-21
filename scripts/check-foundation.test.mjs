@@ -156,10 +156,16 @@ test('mounted unsigned DMG verifier fails closed on failed entitlement extractio
 test('instance lock leaf protection is enforced on open, not only in preflight (#79)', async () => {
   const source = await readFile('src-tauri/src/single_instance.rs', 'utf8');
   const preflight = source.indexOf('fs::symlink_metadata(path)');
-  const flags = source.indexOf('.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)');
-  const open = source.indexOf('.open(path)');
-  assert.ok(preflight >= 0 && flags > preflight && open > flags,
-    'kernel no-follow flags must be present on the descriptor open');
+  const directory = source.indexOf('libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC');
+  const openat = source.indexOf('libc::openat(');
+  const locked = source.indexOf('file.try_lock()');
+  assert.ok(preflight >= 0 && directory > preflight && openat > directory && locked > openat,
+    'the lock leaf must be opened relative to a pinned no-follow directory FD before try_lock');
+  assert.match(source, /directory\.as_raw_fd\(\)/);
+  assert.match(source, /metadata\.uid\(\)/);
+  assert.match(source, /metadata\.mode\(\) & 0o022/);
+  assert.match(source, /fn refuses_symlinked_containing_directory_without_creating_lock/);
+  assert.match(source, /fn refuses_group_writable_containing_directory_before_lock_creation/);
   assert.match(source, /\.nlink\(\)\s*!= 1/);
   assert.match(source, /file\.try_lock\(\)/);
   assert.match(source, /fn refuses_private_hardlink_to_another_file/);
