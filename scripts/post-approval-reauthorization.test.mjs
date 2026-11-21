@@ -18,6 +18,10 @@ test('post-approval policy and grant changes deny stale shell/file dispatch (#12
   const fileSpawn = source.indexOf('tokio::task::spawn_blocking', fileRecheck);
   assert.ok(requireEnd > 0 && fileRecheck > requireEnd && fileSpawn > fileRecheck);
   const shellRecheck = source.indexOf('self.reauthorize_after_approval("bash__run", &directory)');
-  const shellSpawn = source.indexOf('Command::new("/bin/sh")', shellRecheck);
-  assert.ok(shellRecheck > 0 && shellSpawn > shellRecheck);
+  // The shell now starts inside an independently owned cancellation-safe
+  // process-group worker; assert the authorization check precedes dispatch.
+  const shellDispatch = source.indexOf('run_approved_shell(input.command, directory).await', shellRecheck);
+  const shellLauncher = source.indexOf('Command::new("/bin/sh")');
+  assert.ok(shellRecheck > 0 && shellDispatch > shellRecheck);
+  assert.ok(shellLauncher > 0, 'worker must own the actual /bin/sh launch');
 });
