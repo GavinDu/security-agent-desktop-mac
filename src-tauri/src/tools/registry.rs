@@ -422,7 +422,10 @@ mod tests {
             .allowed_path(outside.path())
             .expect_err("ungranted directory denied");
         assert_eq!(denied, "Path outside granted roots");
-        assert_eq!(reg.allowed_path(&real_file).unwrap(), real_file);
+        assert_eq!(
+            reg.allowed_path(&real_file).unwrap(),
+            real_file.canonicalize().unwrap(),
+        );
     }
 
     #[test]
