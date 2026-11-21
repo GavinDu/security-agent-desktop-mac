@@ -37,6 +37,8 @@ test('native async fixture proves first validated write cannot be overtaken by l
   assert.match(source, /async fn cancelled_native_validation_worker_cannot_publish_a_stale_grant\(\)/);
   assert.match(source, /let \(started_tx, started_rx\) = tokio::sync::oneshot::channel\(\)/);
   assert.match(source, /let \(continue_tx, continue_rx\) = std::sync::mpsc::channel\(\)/);
+  assert.match(source, /let \(second_queued_tx, second_queued_rx\) = tokio::sync::oneshot::channel\(\)/);
+  assert.match(source, /second_queued_rx.await.unwrap\(\)/);
   assert.match(source, /tokio::time::timeout\(Duration::from_millis\(75\), &mut second_started_rx\)/);
   assert.match(source, /assert!\(state\.settings\.lock\(\)\.await\.allowed_roots\.is_empty\(\)\)/);
 });
