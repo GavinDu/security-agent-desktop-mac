@@ -2,9 +2,12 @@
 //! Not an authorization or IPC channel. Keep lockfile after exit: unlinking
 //! a locked inode would permit a second independent lock and split-brain.
 use std::{
-    fs::{self, File, OpenOptions, TryLockError},
+    fs::{self, File, TryLockError},
     path::Path,
 };
+
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 
 pub struct InstanceGuard {
     _lock: File,
@@ -97,10 +100,7 @@ impl InstanceGuard {
     fn open_lock_in_pinned_directory(parent: &Path, path: &Path) -> Result<File, String> {
         use std::ffi::CString;
         use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::{
-            ffi::OsStrExt,
-            fs::MetadataExt,
-        };
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 
         let dir_name = CString::new(parent.as_os_str().as_bytes())
             .map_err(|_| "Invalid desktop instance lock directory")?;
