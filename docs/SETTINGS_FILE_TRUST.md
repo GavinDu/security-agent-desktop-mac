@@ -52,3 +52,14 @@ exact-head CI jobs pass**, including native macOS 15 locked Rust tests,
 the strict mounted ad-hoc developer DMG verification, and artifact
 upload. Original #55 and #12 require actual Apple Silicon Mac evidence;
 signed Developer ID / notarization remains #47.
+
+## Nonblocking read-only open for swapped-in named pipes — #106
+
+The Unix/macOS load path also uses `O_NONBLOCK`. A local attacker who can
+replace the settings leaf with a FIFO otherwise causes read-only `open()` to
+wait for a writer before the loader can inspect `fstat` or apply its regular-file
+requirement. The new native Unix fixture builds a FIFO with `mkfifo`, proves
+that load rejects it, and the Node source regression pins the complete flags.
+Regular files retain normal bounded read behavior and strict 0600/nlink checks.
+This is **not** FD-relative parent-directory trust or an on-device smoke test.
+Issue #106 is a separate independently closable P0 ticket under the latest Epic #10.

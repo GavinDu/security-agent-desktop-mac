@@ -34,7 +34,9 @@ impl AgentSettings {
             use std::os::unix::fs::OpenOptionsExt;
             // Reject a leaf symlink at the actual kernel open, rather than
             // checking its path before open (a check/use race).
-            opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            // O_NONBLOCK prevents a swapped-in FIFO from hanging startup
+            // before the kernel descriptor can be rejected as non-regular.
+            opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
         }
 
         let mut file = match opts.open(path) {
@@ -181,6 +183,22 @@ mod tests {
         assert!(AgentSettings::load_at(&original).is_err());
         fs::set_permissions(&original, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(AgentSettings::load_at(&original).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_loader_rejects_fifo_without_blocking() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: CString owns a valid NUL-terminated path for this syscall.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        // Without O_NONBLOCK a read-only open hangs before fstat rejects FIFO.
+        assert_eq!(
+            AgentSettings::load_at(&path).unwrap_err(),
+            "Unsafe or oversized settings.json"
+        );
     }
 
     #[test]
