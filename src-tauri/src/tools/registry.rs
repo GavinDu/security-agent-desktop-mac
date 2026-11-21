@@ -151,7 +151,7 @@ impl Drop for ShellProcessOwner {
 // worker, which owns the child/group through cleanup and wait/reap.
 #[cfg(unix)]
 async fn run_approved_shell(command: String, directory: PathBuf) -> Result<Value, String> {
-    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (result_tx, result_rx) = oneshot::channel();
     tokio::spawn(async move {
         let _ = result_tx.send(run_shell_owned(command, directory, cancel_rx).await);

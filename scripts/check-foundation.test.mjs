@@ -191,7 +191,7 @@ test('approved Unix bash process group survives request abort long enough to rea
   assert.match(code, /self\.signal_group\(libc::SIGKILL\)/);
   assert.match(code, /self\.child\.wait\(\)/);
   assert.match(code, /tokio::time::timeout\(Duration::from_secs\(15\)/);
-  assert.match(code, /let \(cancel_tx, cancel_rx\) = oneshot::channel\(\)/);
+  assert.match(code, /let \(cancel_tx, cancel_rx\) = oneshot::channel::<\(\)>\(\)/);
   assert.match(code, /let _ = result_tx\.send\(run_shell_owned/);
   assert.match(code, /fn cancelling_shell_owner_kills_descendant_even_after_shell_leader_exits/);
   assert.match(code, /fn shell_group_isolation_never_signals_unrelated_process_group/);
