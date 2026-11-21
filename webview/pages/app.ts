@@ -19,6 +19,8 @@ let configuredRoots: string[] = [];
 const policyWrites = new PolicyWriteCoordinator();
 let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
+// Keep stale asynchronous peer-preview responses from replacing newer input.
+let peerPreviewEpoch = 0;
 bashPolicy.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
@@ -100,18 +102,32 @@ async function updateRoots(roots: string[]): Promise<void> {
     rootInput.value = '';
     el('settingsNotice').textContent = 'Directory permissions updated.';
     await refresh();
-  } catch (error) {
-    el('settingsNotice').textContent = 'Cannot change roots: ' + String(error);
+  } catch {
+    // Never reflect arbitrary native/IPC error data into a trusted window:
+    // paths and OS backend diagnostics can be private.
+    el('settingsNotice').textContent =
+      'Directory permissions were not changed. Check the directory and try again.';
   }
 }
 
 el('refresh').addEventListener('click', () => void refresh());
 el('previewPeer').addEventListener('click', () => {
+  const epoch = ++peerPreviewEpoch;
   const publicKey = (el('peerKey') as HTMLInputElement).value.trim();
   const tunnelIp = (el('peerIp') as HTMLInputElement).value.trim();
+  el('peerPreview').textContent = 'Validating peer configuration...';
   void connectorBridge.previewWireGuardPeer(publicKey, tunnelIp)
-    .then((config) => { el('peerPreview').textContent = config; })
-    .catch((error: unknown) => { el('peerPreview').textContent = 'Validation error: ' + String(error); });
+    .then((config) => {
+      if (epoch === peerPreviewEpoch) el('peerPreview').textContent = config;
+    })
+    .catch(() => {
+      if (epoch === peerPreviewEpoch) {
+        // Never display a rejected IPC error: it may carry paths, secrets
+        // or low-level backend diagnostics. No generated config is retained.
+        el('peerPreview').textContent =
+          'Peer preview unavailable. Check the public key and tunnel address.';
+      }
+    });
 });
 allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
