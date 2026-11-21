@@ -4,11 +4,12 @@ use crate::{
     settings::AgentSettings,
     tools::{
         approvals::Policy,
+        pinned_read::GrantedRoot,
         registry::{ToolCall, ToolRegistry},
     },
 };
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 use tauri::{State, WebviewWindow};
 use uuid::Uuid;
 
@@ -67,13 +68,13 @@ pub async fn respond_approval(
 fn persist_root_grants(
     settings: &mut AgentSettings,
     registry: &ToolRegistry,
-    roots: Vec<PathBuf>,
+    roots: Vec<GrantedRoot>,
     persist: impl FnOnce(&AgentSettings) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut staged = settings.clone();
     staged.allowed_roots = roots
         .iter()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|grant| grant.path().to_string_lossy().into_owned())
         .collect();
     persist(&staged).map_err(|_| "Cannot persist approved roots".to_owned())?;
     registry.set_roots(roots);

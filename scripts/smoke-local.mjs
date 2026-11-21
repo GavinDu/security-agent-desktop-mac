@@ -6,13 +6,11 @@
  * API token from the current user's macOS Keychain.
  */
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { auditSavedSettings } from './smoke-settings.mjs';
+import { readAgentApiToken } from './smoke-keychain.mjs';
 
-const run = promisify(execFile);
 const base = 'http://127.0.0.1:8080';
 const options = { redirect: 'error' };
 
@@ -37,18 +35,7 @@ async function main() {
   assert.equal((await request('/pairing')).status, 401, '/pairing must be authenticated');
 
   if (authenticated) {
-    assert.equal(process.platform, 'darwin', '--authenticated requires macOS Keychain');
-    let token;
-    try {
-      ({ stdout: token } = await run('security', [
-        'find-generic-password', '-s', 'com.gavindu.securityagent.desktop',
-        '-a', 'agent-api-token', '-w',
-      ], { maxBuffer: 2048, timeout: 4000 }));
-    } catch {
-      throw new Error('Application Keychain token unavailable for the active login.');
-    }
-    const apiToken = token.trim();
-    assert.ok(apiToken.length >= 32, 'Keychain API token is missing or invalid');
+    const apiToken = await readAgentApiToken();
     const tools = await request('/tools', apiToken);
     assert.equal(tools.status, 200);
     const catalog = await tools.json();
