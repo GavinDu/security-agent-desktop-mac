@@ -201,9 +201,11 @@ mod tests {
         });
         started_rx.await.unwrap();
 
+        let (second_queued_tx, second_queued_rx) = tokio::sync::oneshot::channel();
         let (second_started_tx, mut second_started_rx) = tokio::sync::oneshot::channel();
         let second_state = state.clone();
         let second = tokio::spawn(async move {
+            let _ = second_queued_tx.send(());
             commit_serialized_roots(
                 &second_state,
                 Vec::new(),
@@ -216,6 +218,9 @@ mod tests {
             .await
         });
 
+        // Establish that the later async command was actually scheduled
+        // before testing whether its blocking validation can overtake.
+        second_queued_rx.await.unwrap();
         // This signal is emitted inside the SECOND validation worker. It must
         // not start until the first native command has finished persisting.
         assert!(
