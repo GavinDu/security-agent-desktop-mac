@@ -17,18 +17,23 @@ of echoing backend diagnostics. The application does not interpolate
 error objects, print stack traces or include user-entered key material
 in failure strings. Success paths remain intact.
 
-The peer preview button now gives each request a monotonic local epoch:
-only the last requested preview may update the preview field, whether
-it resolves with a configuration or rejects. Earlier asynchronous
-responses cannot replace the latest value. A pending preview displays
-a neutral placeholder rather than a stale prior configuration.
+The peer preview button gives each request a monotonic local epoch.
+Both peer inputs also invalidate the epoch on every edit and clear the
+previously displayed preview. Successful responses and failures can update
+the UI only when the epoch is still current **and both current input values
+match the request snapshot**. This additional source-value comparison also
+guards programmatic changes that do not emit an input event. In-flight
+requests remain alive but cannot resurrect a stale configuration or native
+error. A pending preview displays a neutral placeholder rather than an
+older configuration.
 
 ## Adversarial review and verification limits
 
 - The fix does not change authorization, privileged Rust error handling,
   Keychain storage, TLS/TCP networking, or backend logging policies.
-- Static Node assertions pin both rejection paths and both asynchronous
-  epoch guards. TypeScript is compiled in frontend CI.
+- Static Node assertions pin both rejection paths, the epoch/source-value
+  guards, and the two input-change invalidation handlers. TypeScript is
+  compiled in frontend CI.
 - There is no dynamic WKWebView UI integration proof or independent
   Apple Silicon screenshot/Keychain test in this ticket.
 - The epoch is a UI ordering fence, not cancellation or key zeroization.
