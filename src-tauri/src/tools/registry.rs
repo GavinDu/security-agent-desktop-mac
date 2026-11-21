@@ -416,10 +416,9 @@ mod tests {
 
         // Both underlying tool argument structs already independently
         // enforce additionalProperties:false (no approval-like fields).
-        assert!(serde_json::from_value::<ReadInput>(
-            json!({"path":"/safe","approval":true})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ReadInput>(json!({"path":"/safe","approval":true})).is_err()
+        );
         assert!(serde_json::from_value::<RunInput>(
             json!({"command":"true","cwd":"/safe","admin":true})
         )
