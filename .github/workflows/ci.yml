@@ -46,7 +46,7 @@ jobs:
       - name: Foundation security/asset checks
         run: npm run test:foundation
       - name: Check macOS DMG verifier shell syntax
-        run: bash -n scripts/verify-macos-bundle.sh
+        run: bash -n scripts/verify-macos-bundle.sh scripts/dmg-inventory.sh
   rust-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 40

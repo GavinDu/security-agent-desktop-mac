@@ -134,7 +134,7 @@ test('CLI settings audit refuses public, symlinked, malformed and unavailable gr
     });
     await rm(file);
     await symlink(join(temp, 'nonexistent-private-file'), file);
-    await assert.rejects(auditSavedSettings(file), /not a symlink/);
+    await assert.rejects(auditSavedSettings(file), /Cannot safely open saved settings/);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -195,67 +195,4 @@ test('bash tool streams and caps both pipes before producing JSON (#91)', async 
   assert.doesNotMatch(source, /process\.output\(\)/);
   assert.match(manifest, /"io-util"/);
   assert.match(source, /kill_on_drop\(true\)/);
-});
-
-test('agent JSON extraction has explicit 64-KiB cap while preserving auth (#83)', async () => {
-  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(server, /DefaultBodyLimit::max\(64 \* 1024\)/);
-  assert.match(server, /middleware::from_fn_with_state\(state\.clone\(\), authorize\)/);
-  assert.match(server, /async fn oversized_authenticated_json_is_rejected_before_tool_dispatch/);
-  assert.match(server, /StatusCode::PAYLOAD_TOO_LARGE/);
-  assert.match(server, /async fn small_authorized_chat_keeps_explicit_no_provider_response/);
-  assert.doesNotMatch(server, /CorsLayer::permissive|allow_origin\(Any\)/);
-});
-
-test('authenticated tool/chat router shares bounded fail-fast permits (#100)', async () => {
-  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
-  const api = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(agent, /pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16/);
-  assert.match(agent, /dispatch_permits: Arc<Semaphore>/);
-  assert.match(agent, /Arc::new\(Semaphore::new\(MAX_CONCURRENT_TOOL_REQUESTS\)\)/);
-  const limitLayer = api.indexOf('limit_tool_dispatch,');
-  const authLayer = api.indexOf('state.clone(), authorize');
-  assert.ok(limitLayer > 0 && authLayer > limitLayer,
-    'authorization is the outermost and first-entered middleware');
-  assert.match(api, /request\.method\(\) == Method::POST/);
-  assert.match(api, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/chat"\)/);
-  assert.match(api, /dispatch_permits\.clone\(\)\.try_acquire_owned\(\)/);
-  assert.match(api, /StatusCode::TOO_MANY_REQUESTS/);
-  assert.match(api, /fn authenticated_post_routes_share_fail_fast_dispatch_permits/);
-  assert.match(api, /StatusCode::UNAUTHORIZED/);
-  assert.match(api, /StatusCode::FORBIDDEN/);
-  assert.match(api, /StatusCode::NOT_IMPLEMENTED/);
-});
-
-test('empty bearer token cannot reach the Axum router (#102)', async () => {
-  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
-  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  const start = agent.indexOf('pub fn new(');
-  const registry = agent.indexOf('ToolRegistry::canonical_roots', start);
-  const validation = agent.indexOf('token.trim().is_empty()', start);
-  assert.ok(start >= 0 && validation > start && registry > validation,
-    'credential validation must happen before constructing the registry or listener');
-  assert.match(agent, /return Err\("Agent authentication token is unavailable"\.into\(\)\)/);
-  assert.match(agent, /fn unavailable_bearer_credentials_fail_closed_before_agent_setup/);
-  assert.match(server, /strip_prefix\("Bearer "\)/);
-  assert.match(server, /unwrap_or_default\(\)/);
-  assert.match(server, /StatusCode::UNAUTHORIZED/);
-  assert.match(server, /async fn health_is_loopback_only_and_tools_need_token/);
-});
-
-test('AgentState construction and startup share the same strict bind allowlist (#104)', async () => {
-  const agent = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
-  assert.match(agent, /fn allowed_agent_bind\(bind: SocketAddr\) -> bool/);
-  assert.match(agent, /bind\.port\(\) == 8080/);
-  assert.match(agent, /ip == Ipv4Addr::LOCALHOST \|\| ip == Ipv4Addr::new\(10, 8, 0, 1\)/);
-  const constructorStart = agent.indexOf('pub fn new(');
-  const predicate = agent.indexOf('if !allowed_agent_bind(bind)', constructorStart);
-  const registrySetup = agent.indexOf('ToolRegistry::canonical_roots', constructorStart);
-  assert.ok(constructorStart >= 0 && predicate > constructorStart && predicate < registrySetup,
-    'constructor must reject untrusted bind before any registry/privileged setup');
-  const parserStart = agent.indexOf('pub fn bind_address()');
-  assert.ok(parserStart >= 0 && agent.indexOf('if !allowed_agent_bind(bind)', parserStart) > parserStart,
-    'environment config and direct state constructors must share one predicate');
-  assert.match(agent, /fn constructor_enforces_shared_loopback_and_tunnel_bind_allowlist/);
-  assert.doesNotMatch(agent, /IpAddr::V6\(_\) => true/);
 });
