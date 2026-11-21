@@ -25,7 +25,7 @@ test('all authorized native root commands acquire one mutation gate before block
 test('trusted sender origin is validated before native grants can acquire the gate (#156)', () => {
   const cmd = native.slice(native.indexOf('pub async fn set_allowed_roots('));
   assert.match(cmd, /navigation::ensure_privileged_webview\(&window\)\?;/);
-  assert.match(cmd, /commit_serialized_roots\(\s*&state\.0,\s*roots,/);
+  assert.match(cmd, /commit_serialized_roots\(\s*&\*state,\s*roots,/);
   assert.match(cmd, /\|requested\| ToolRegistry::canonical_roots\(&requested\)/);
   assert.match(cmd, /AgentSettings::save/);
   assert.doesNotMatch(cmd, /let resolved = ToolRegistry::canonical_roots\(&roots\)/);
