@@ -34,6 +34,7 @@ test('trusted sender origin is validated before native grants can acquire the ga
 test('native async fixture proves first validated write cannot be overtaken by later revocation (#156)', () => {
   assert.match(source, /async fn native_root_calls_commit_in_validation_entry_order_even_if_first_is_slow\(\)/);
   assert.match(source, /async fn invalid_validation_releases_native_mutation_guard_without_publication\(\)/);
+  assert.match(source, /async fn cancelled_native_validation_worker_cannot_publish_a_stale_grant\(\)/);
   assert.match(source, /let \(started_tx, started_rx\) = tokio::sync::oneshot::channel\(\)/);
   assert.match(source, /let \(continue_tx, continue_rx\) = std::sync::mpsc::channel\(\)/);
   assert.match(source, /tokio::time::timeout\(Duration::from_millis\(75\), &mut second_started_rx\)/);
