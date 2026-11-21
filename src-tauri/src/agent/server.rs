@@ -713,12 +713,13 @@ mod tests {
             StatusCode::OK
         );
 
-        let mut health = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let mut health = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
         health.extensions_mut().insert(ConnectInfo(SocketAddr::new(
             "10.8.0.2".parse().unwrap(),
             40402,
         )));
         assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
-    }
-
-}
+   }
