@@ -561,7 +561,13 @@ mod tests {
         assert_eq!(valid.tool_call.unwrap().name, "filesystem__read_file");
 
         for forbidden in [
-            "role", "system", "admin", "approval", "token", "messages", "tool_calls",
+            "role",
+            "system",
+            "admin",
+            "approval",
+            "token",
+            "messages",
+            "tool_calls",
         ] {
             let mut injected = json!({"message": "hello"});
             injected
@@ -573,10 +579,9 @@ mod tests {
                 "unknown top-level {forbidden} must be rejected, not ignored"
             );
         }
-        assert!(serde_json::from_value::<ChatRequest>(
-            json!({"message": {"role": "system"}})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<ChatRequest>(json!({"message": {"role": "system"}})).is_err()
+        );
     }
 
     #[tokio::test]
@@ -594,10 +599,7 @@ mod tests {
                 .uri("/chat")
                 .header("content-type", "application/json");
             if authenticated {
-                builder = builder.header(
-                    "authorization",
-                    "Bearer strict-chat-envelope-test-token",
-                );
+                builder = builder.header("authorization", "Bearer strict-chat-envelope-test-token");
             }
             let mut req = builder.body(Body::from(body.to_string())).unwrap();
             req.extensions_mut()
