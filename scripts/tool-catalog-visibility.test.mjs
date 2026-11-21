@@ -1,0 +1,25 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const registry = readFileSync('src-tauri/src/tools/registry.rs', 'utf8');
+const server = readFileSync('src-tauri/src/agent/server.rs', 'utf8');
+const commands = readFileSync('src-tauri/src/tools/commands.rs', 'utf8');
+
+test('one live approval policy controls shared Tauri and HTTP catalog visibility (#150)', () => {
+  assert.match(registry, /pub fn list\(&self\) -> Vec<Value> \{/);
+  assert.match(registry, /\.filter\(\|tool\| \{[\s\S]*?self\.gate\.policy\(name\) != Policy::Disable/);
+  assert.match(commands, /pub async fn list_tools\([\s\S]*?state\.registry\.list\(\)/);
+  assert.match(server, /async fn list_tools\([\s\S]*?state\.registry\.list\(\)/);
+  assert.match(server, /tools\.retain\(\|tool\|/);
+});
+
+test('catalog is not treated as authorization; Disabled still gates invoke (#150)', () => {
+  assert.match(registry, /fn disabled_tools_are_hidden_and_remain_denied_at_invocation\(\)/);
+  assert.match(server, /fn shared_http_catalog_tracks_live_disabled_policy_without_restart\(\)/);
+  assert.match(registry, /self\.gate\s*\.require\("filesystem__read_file"/);
+  assert.match(registry, /self\.gate\s*\.require\([\s\S]*?"bash__run"/);
+  assert.match(server, /request\.uri\(\)\.path\(\) != "\/health"/);
+  assert.match(commands, /navigation::ensure_privileged_webview\(&window\)\?;/);
+  assert.match(server, /ConnectInfo\(source\)/);
+});
