@@ -72,7 +72,7 @@ pub async fn set_allowed_roots(
     let mut settings = state.settings.lock().await;
     settings.allowed_roots = resolved
         .iter()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|grant| grant.path().to_string_lossy().into_owned())
         .collect();
     settings.save()?;
     state.registry.set_roots(resolved);
