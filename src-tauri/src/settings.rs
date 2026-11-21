@@ -337,6 +337,96 @@ mod tests {
         assert!(AgentSettings::load_at(&path).is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn load_and_save_refuse_symlinked_settings_directory_without_touching_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let leaf = real.join("settings.json");
+        AgentSettings::default().save_at(&leaf).unwrap();
+        let before = fs::read(&leaf).unwrap();
+
+        let alias = temp.path().join("app-support");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let swapped = alias.join("settings.json");
+        assert_eq!(
+            AgentSettings::load_at(&swapped).unwrap_err(),
+            "Cannot safely open settings directory"
+        );
+        let mut changed = AgentSettings::default();
+        changed.policies.insert("bash__run".into(), Policy::Auto);
+        assert_eq!(
+            changed.save_at(&swapped).unwrap_err(),
+            "Cannot safely open settings directory"
+        );
+        assert_eq!(fs::read(&leaf).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_reject_group_writable_parent_before_read_or_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("app-support");
+        fs::create_dir(&parent).unwrap();
+        let leaf = parent.join("settings.json");
+        AgentSettings::default().save_at(&leaf).unwrap();
+        let old = fs::read(&leaf).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o770)).unwrap();
+        assert_eq!(
+            AgentSettings::load_at(&leaf).unwrap_err(),
+            "Cannot safely open settings directory"
+        );
+        assert_eq!(
+            AgentSettings::default().save_at(&leaf).unwrap_err(),
+            "Cannot safely open settings directory"
+        );
+        assert_eq!(fs::read(&leaf).unwrap(), old);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_parent_descriptor_keeps_atomic_write_out_of_swapped_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original");
+        let moved = temp.path().join("moved");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("settings.json"), b"outside-sentinel").unwrap();
+
+        let dir = checked_settings_directory(&original).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&outside, &original).unwrap();
+
+        let leaf = CString::new("settings.json").unwrap();
+        let temporary = CString::new(".settings-fixture.tmp").unwrap();
+        let mut file = open_settings_at(
+            &dir,
+            &temporary,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL
+                | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+        .unwrap();
+        file.write_all(b"safe-settings").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            unsafe {
+                libc::renameat(
+                    dir.as_raw_fd(),
+                    temporary.as_ptr(),
+                    dir.as_raw_fd(),
+                    leaf.as_ptr(),
+                )
+            },
+            0
+        );
+        assert_eq!(fs::read(moved.join("settings.json")).unwrap(), b"safe-settings");
+        assert_eq!(fs::read(outside.join("settings.json")).unwrap(), b"outside-sentinel");
+    }
+
     #[test]
     fn malformed_or_unknown_json_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
