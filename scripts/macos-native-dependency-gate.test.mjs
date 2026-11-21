@@ -7,7 +7,7 @@ test('native macOS job depends on all three required successful source gates (#1
   const split = code.split(/^  macos:$/m);
   assert.equal(split.length, 2, 'exactly one named native job is required');
   const before = split[0];
-  const native = split[1];
+  const native = split[1].split(/^  required-gates:$/m)[0];
   for (const name of ['frontend', 'rustfmt', 'rust-linux']) {
     assert.match(before, new RegExp('^  ' + name + ':', 'm'));
   }
@@ -21,7 +21,7 @@ test('native macOS job depends on all three required successful source gates (#1
 
 test('native verification and DMG artifact remain mandatory rather than bypassed (#143)', async () => {
   const ci = await readFile('.github/workflows/ci.yml', 'utf8');
-  const native = ci.split(/^  macos:$/m)[1];
+  const native = ci.split(/^  macos:$/m)[1].split(/^  required-gates:$/m)[0];
   const required = [
     'Assert checked-out Git revision',
     'npm ci --no-audit --no-fund',
