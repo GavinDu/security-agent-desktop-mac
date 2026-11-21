@@ -18,3 +18,10 @@ test('native macOS reopen only focuses the already trusted main WebView (#72)', 
   const token = app.indexOf('secrets::get_or_create_api_token()');
   assert.ok(lock > 0 && token > lock, 'no Keychain or agent setup before instance guard');
 });
+
+test('native reopen documentation retains Keychain physical smoke protocol (#72/#81)', async () => {
+  const manual = await readFile('docs/FOUNDATION_ACCEPTANCE.md', 'utf8');
+  assert.match(manual, /## Native macOS reopen focus — independent #72 code increment/);
+  assert.match(manual, /## Keychain smoke CLI trust and physical acceptance — #81/);
+  assert.match(manual, /physical Mac Mini|physical Apple/);
+});
