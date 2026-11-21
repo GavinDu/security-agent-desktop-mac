@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Assert checked-out Git revision
+        run: bash scripts/check-ci-checkout.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -30,6 +32,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Assert checked-out Git revision
+        run: bash scripts/check-ci-checkout.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -48,6 +52,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - name: Assert checked-out Git revision
+        run: bash scripts/check-ci-checkout.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -72,6 +78,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Assert checked-out Git revision
+        run: bash scripts/check-ci-checkout.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
