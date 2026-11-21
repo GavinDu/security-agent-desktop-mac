@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event';
 import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
+import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 
 const el = (id: string): HTMLElement => {
   const element = document.getElementById(id);
@@ -12,6 +13,11 @@ const rootInput = el('rootPath') as HTMLInputElement;
 const bashPolicy = el('bashPolicy') as HTMLSelectElement;
 let pending: ApprovalEvent | null = null;
 let configuredRoots: string[] = [];
+// Never display a speculative change as an acknowledged permission state.
+const policyWrites = new PolicyWriteCoordinator();
+let confirmedBashPolicy: ShellPolicy | null = null;
+let policyEpoch = 0;
+bashPolicy.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
 
@@ -33,6 +39,7 @@ async function refreshStatus(): Promise<void> {
 }
 
 async function refresh(): Promise<void> {
+  const epoch = policyEpoch;
   try {
     const [status, tools, settings] = await Promise.all([
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
@@ -41,10 +48,15 @@ async function refresh(): Promise<void> {
     el('tools').textContent = JSON.stringify(tools, null, 2);
     configuredRoots = settings.allowed_roots;
     el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
-    bashPolicy.value = settings.policies['bash__run'] || 'ask';
+    // A refresh begun before a policy save must not publish stale state.
+    if (epoch === policyEpoch && !policyWrites.inFlight) {
+      confirmedBashPolicy = settings.policies['bash__run'] || 'ask';
+      bashPolicy.value = confirmedBashPolicy;
+      bashPolicy.disabled = false;
+    }
   } catch (error) {
     el('status').textContent = 'Unavailable';
-    el('binding').textContent = String(error);
+    el('binding').textContent = 'Local agent settings could not be retrieved.';
   }
 }
 
@@ -90,16 +102,41 @@ el('grantRoot').addEventListener('click', () => {
   if (root) void updateRoots([...configuredRoots, root]);
 });
 el('clearRoots').addEventListener('click', () => void updateRoots([]));
-bashPolicy.addEventListener('change', () => {
-  const policy = bashPolicy.value as 'auto' | 'ask' | 'disable';
-  if (policy === 'auto' && !window.confirm('Auto-approve lets remote tools run arbitrary shell commands. Enable anyway?')) {
-    bashPolicy.value = 'ask';
+async function saveBashPolicy(): Promise<void> {
+  const requested = bashPolicy.value as ShellPolicy;
+  if (confirmedBashPolicy === null || policyWrites.inFlight) {
+    bashPolicy.value = confirmedBashPolicy ?? 'ask';
     return;
   }
-  void connectorBridge.setPolicy('bash__run', policy)
-    .then(() => { el('settingsNotice').textContent = 'Shell policy updated.'; })
-    .catch((error: unknown) => { el('settingsNotice').textContent = String(error); void refresh(); });
-});
+  // Show only the last acknowledged mode while the write is pending.
+  bashPolicy.value = confirmedBashPolicy;
+  if (requested === confirmedBashPolicy) return;
+  if (requested === 'auto' &&
+      !window.confirm('Auto-approve lets remote tools run arbitrary shell commands. Enable anyway?')) {
+    return;
+  }
+
+  policyEpoch += 1;
+  bashPolicy.disabled = true;
+  el('settingsNotice').textContent = 'Updating shell policy...';
+  try {
+    const saved = await policyWrites.tryWrite(requested,
+      (policy) => connectorBridge.setPolicy('bash__run', policy));
+    if (!saved) throw new Error('Policy write in progress');
+    confirmedBashPolicy = requested;
+    bashPolicy.value = requested;
+    el('settingsNotice').textContent = 'Shell policy updated.';
+  } catch {
+    // Never interpret a failed Tauri invoke as successful policy revocation.
+    bashPolicy.value = confirmedBashPolicy;
+    el('settingsNotice').textContent =
+      'Shell policy update failed; previous confirmed setting retained.';
+  } finally {
+    policyEpoch += 1;
+    bashPolicy.disabled = false;
+  }
+}
+bashPolicy.addEventListener('change', () => void saveBashPolicy());
 void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {
   pending = event.payload;
   el('approval-text').textContent = pending.tool + ': ' + pending.preview;
