@@ -200,6 +200,7 @@ async fn invoke_tool(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ChatRequest {
     #[serde(default)]
     message: String,
@@ -540,6 +541,106 @@ mod tests {
                 "oversized JSON unexpectedly accepted on {path}"
             );
         }
+    }
+
+    #[test]
+    fn chat_request_accepts_only_documented_internal_top_level_fields() {
+        let minimal: ChatRequest = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(minimal.message, "");
+        assert!(minimal.tool_call.is_none());
+
+        let valid: ChatRequest = serde_json::from_value(json!({
+            "message": "read approved file",
+            "tool_call": {
+                "name": "filesystem__read_file",
+                "arguments": {"path": "/user/approved.txt"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(valid.message, "read approved file");
+        assert_eq!(valid.tool_call.unwrap().name, "filesystem__read_file");
+
+        for forbidden in [
+            "role",
+            "system",
+            "admin",
+            "approval",
+            "token",
+            "messages",
+            "tool_calls",
+        ] {
+            let mut injected = json!({"message": "hello"});
+            injected
+                .as_object_mut()
+                .unwrap()
+                .insert(forbidden.to_owned(), json!(true));
+            assert!(
+                serde_json::from_value::<ChatRequest>(injected).is_err(),
+                "unknown top-level {forbidden} must be rejected, not ignored"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ChatRequest>(json!({"message": {"role": "system"}})).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_json_extractor_denies_unknown_claims_after_source_and_bearer_checks() {
+        let state = AgentState::new(
+            "strict-chat-envelope-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state);
+        let request = |ip: &str, authenticated: bool, body: Value| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header("content-type", "application/json");
+            if authenticated {
+                builder = builder.header("authorization", "Bearer strict-chat-envelope-test-token");
+            }
+            let mut req = builder.body(Body::from(body.to_string())).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(ip.parse().unwrap(), 41999)));
+            req
+        };
+
+        let malformed = json!({"message": "hello", "admin": true});
+        assert_eq!(
+            app.clone()
+                .oneshot(request("127.0.0.1", true, malformed.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        // The outer source/bearer policy is authoritative and executes
+        // before parsing/validation of this untrusted JSON body.
+        assert_eq!(
+            app.clone()
+                .oneshot(request("127.0.0.1", false, malformed.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request("192.168.1.2", true, malformed))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.oneshot(request("127.0.0.1", true, json!({"message":"hello"})))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
     }
 
     #[tokio::test]
