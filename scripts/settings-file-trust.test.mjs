@@ -5,9 +5,13 @@ import { readFile } from 'node:fs/promises';
 test('persisted root grants require a bounded no-follow settings file descriptor (#87)', async () => {
   const settings = await readFile('src-tauri/src/settings.rs', 'utf8');
   const limit = settings.indexOf('const MAX_SETTINGS_BYTES: u64 = 256 * 1024');
-  const nofollow = settings.indexOf('opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)');
-  const open = settings.indexOf('let mut file = match opts.open(path)');
-  assert.ok(limit > 0 && nofollow > limit && open > nofollow);
+  const load = settings.slice(settings.indexOf('fn load_at('), settings.indexOf('pub fn save('));
+  const parent = load.indexOf('checked_settings_directory(parent)');
+  const open = load.indexOf('match open_settings_at(');
+  const nofollow = load.indexOf('libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK');
+  assert.ok(limit > 0 && parent > 0 && open > parent && nofollow > open,
+    'the verified directory FD must be pinned before nofollow nonblocking leaf openat');
+  assert.match(settings, /libc::openat\(directory\.as_raw_fd\(\), leaf\.as_ptr\(\), flags, mode\)/);
   assert.match(settings, /metadata\.nlink\(\)\s*!=\s*1/);
   assert.match(settings, /metadata\.permissions\(\)\.mode\(\)\s*&\s*0o777\s*!=\s*0o600/);
   assert.match(settings, /file\.take\(MAX_SETTINGS_BYTES \+ 1\)/);
@@ -19,7 +23,8 @@ test('persisted root grants require a bounded no-follow settings file descriptor
 
 test('settings loading must reject a swapped-in FIFO without a blocking open (#106)', async () => {
   const source = await readFile('src-tauri/src/settings.rs', 'utf8');
-  assert.match(source, /opts\.custom_flags\(libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK\)/);
+  assert.match(source, /libc::O_RDONLY \| libc::O_NOFOLLOW \| libc::O_CLOEXEC \| libc::O_NONBLOCK/);
+  assert.match(source, /libc::openat\(directory\.as_raw_fd\(\), leaf\.as_ptr\(\), flags, mode\)/);
   assert.match(source, /fn settings_loader_rejects_fifo_without_blocking/);
   assert.match(source, /libc::mkfifo\(c_path\.as_ptr\(\), 0o600\)/);
   assert.match(source, /Unsafe or oversized settings\.json/);
