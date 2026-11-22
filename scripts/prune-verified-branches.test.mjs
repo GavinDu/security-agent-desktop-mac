@@ -69,3 +69,116 @@ test('an untrusted runner context cannot reach the GitHub API', async () => {
   await assert.rejects(pruneVerifiedBranches({ GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/feature', GITHUB_TOKEN: 'test' }), /restricted to this repository/);
   await assert.rejects(pruneVerifiedBranches({ GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main' }), /Missing narrowly scoped/);
 });
+
+
+function mockGitHub(initial, { open = [], refDrift = {}, prOverrides = {} } = {}) {
+  const current = new Map([['main', { name: 'main', protected: true, commit: { sha: 'a'.repeat(40) } }],
+    ...initial.map(candidate => [candidate.name, branch(candidate)])]);
+  const original = new Map(initial.map(candidate => [candidate.pr, candidate]));
+  const deleted = [];
+  const calls = [];
+  const api = async (seenRepo, token, path, method = 'GET') => {
+    assert.equal(seenRepo, repo);
+    assert.equal(token, 'test-only-no-credentials');
+    calls.push({ path, method });
+    if (path === '/branches?per_page=100') return [...current.values()];
+    if (path === '/pulls?state=open&per_page=100') return open;
+    if (path.startsWith('/pulls/')) {
+      const n = Number(path.slice('/pulls/'.length));
+      const candidate = original.get(n);
+      const inFlight = [
+        { name: 'security/158-stale-root-snapshot-fence', pr: 161 },
+        { name: 'security/156-native-root-mutation-order', pr: 163 },
+      ].find(item => item.pr === n);
+      if (!candidate && !inFlight) throw new Error('unexpected pull request fetch');
+      const mock = candidate || {
+        name: inFlight.name, pr: n, sha: current.get(inFlight.name)?.commit.sha,
+      };
+      return { ...pr(mock), ...prOverrides[n] };
+    }
+    const getRef = '/git/ref/heads/';
+    const deleteRef = '/git/refs/heads/';
+    if (path.startsWith(getRef)) {
+      const name = path.slice(getRef.length);
+      return { object: { sha: refDrift[name] || current.get(name)?.commit.sha } };
+    }
+    if (path.startsWith(deleteRef) && method === 'DELETE') {
+      const name = path.slice(deleteRef.length);
+      assert.ok(current.has(name), 'cannot delete missing branch');
+      current.delete(name);
+      deleted.push(name);
+      return null;
+    }
+    throw new Error('unexpected REST action ' + method + ' ' + path);
+  };
+  return { api, current, deleted, calls };
+}
+
+test('full janitor integration deletes only two audited current refs with real REST paths', async () => {
+  const mock = mockGitHub([merged, superseded]);
+  const result = await pruneVerifiedBranches({
+    GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_TOKEN: 'test-only-no-credentials',
+  }, mock.api);
+  assert.deepEqual(result, { deleted: 2, skipped: 46, featureCount: 0 });
+  assert.deepEqual(mock.deleted, [merged.name, superseded.name]);
+  for (const candidate of [merged, superseded]) {
+    assert.ok(mock.calls.some(call =>
+      call.path === '/git/ref/heads/' + candidate.name && call.method === 'GET'));
+    assert.ok(mock.calls.some(call =>
+      call.path === '/git/refs/heads/' + candidate.name && call.method === 'DELETE'));
+  }
+  assert.ok(mock.current.has('main'), 'the main ref must survive');
+});
+
+test('changed ref or live PR never causes deletion, even with matching historic PR', async () => {
+  const changed = { ...merged, sha: '0'.repeat(40) };
+  const openPR = { head: { ref: superseded.name, repo: { full_name: repo } } };
+  const mock = mockGitHub([changed, superseded], { open: [openPR],
+    prOverrides: { [merged.pr]: { head: { ...pr(merged).head, sha: 'f'.repeat(40) } } },
+  });
+  const result = await pruneVerifiedBranches({
+    GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_TOKEN: 'test-only-no-credentials',
+  }, mock.api);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.featureCount, 2);
+  assert.deepEqual(mock.deleted, []);
+});
+
+test('last-moment ref drift fails closed and never issues DELETE', async () => {
+  const mock = mockGitHub([merged], { refDrift: { [merged.name]: 'c'.repeat(40) } });
+  const result = await pruneVerifiedBranches({
+    GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_TOKEN: 'test-only-no-credentials',
+  }, mock.api);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.featureCount, 1);
+  assert.equal(mock.calls.filter(c => c.method === 'DELETE').length, 0);
+});
+
+test('a closed-but-unmerged PR is never deleted if consolidated evidence is absent', async () => {
+  const mock = mockGitHub([superseded]);
+  const result = await pruneVerifiedBranches({
+    GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_TOKEN: 'test-only-no-credentials',
+  }, mock.api, async () => '');
+  assert.equal(result.deleted, 0);
+  assert.equal(result.featureCount, 1);
+  assert.deepEqual(mock.deleted, []);
+});
+
+test('two tracked active PR source refs retire only after merged status is proven', async () => {
+  const tracked = [
+    { name: 'security/158-stale-root-snapshot-fence', pr: 161, sha: '1'.repeat(40) },
+    { name: 'security/156-native-root-mutation-order', pr: 163, sha: '2'.repeat(40) },
+  ];
+  const mock = mockGitHub(tracked, {
+    prOverrides: {
+      161: { merged_at: null },
+      163: { merged_at: '2026-11-22T20:00:00Z' },
+    },
+  });
+  const result = await pruneVerifiedBranches({
+    GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_TOKEN: 'test-only-no-credentials',
+  }, mock.api);
+  assert.equal(result.deleted, 1);
+  assert.equal(result.featureCount, 1);
+  assert.deepEqual(mock.deleted, [tracked[1].name]);
+});
