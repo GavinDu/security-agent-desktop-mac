@@ -106,3 +106,29 @@ test('scans each workflow rather than trusting only the canonical ci.yml', async
     content: 'name: Bad\njobs:\n  publish:\n    steps:\n      - run: gh release create latest\n' });
   assert.throws(() => check(base), /Release\/publish/);
 });
+
+test('only exact main-only branch retirement may temporarily write refs (#162)', async () => {
+  const base = await baseline();
+  const legitimate = await source('.github/workflows/prune-verified-branches.yml');
+  base.workflows.push({ name: 'prune-verified-branches.yml', content: legitimate });
+  assert.deepEqual(check(base),
+    { distribution: 'ad-hoc-development-only', publicReleaseEnabled: false });
+  const mutations = [
+    f => { f.workflows[1].name = 'arbitrary-write.yml'; },
+    f => { f.workflows[1].content = f.workflows[1].content.replace('branches: [main]', 'branches: [all]'); },
+    f => { f.workflows[1].content = f.workflows[1].content.replace("github.ref == 'refs/heads/main'", "github.ref == 'refs/heads/other'"); },
+    f => { f.workflows[1].content = f.workflows[1].content.replace('run: node scripts/prune-verified-branches.mjs', 'run: node arbitrary-execution.mjs'); },
+    f => { f.workflows[1].content = f.workflows[1].content.replace('GITHUB_TOKEN: ${{ github.token }}', 'GITHUB_TOKEN: arbitrary-token'); },
+    f => { f.workflows[1].content += '\n  pull_request_target:\n'; },
+    f => { f.workflows[1].content += '\n  actions: write\n'; },
+    f => { f.workflows[1].content += '\n  packages: write\n'; },
+    f => { f.workflows[1].content += '\n  release:\n    types: [published]\n'; },
+    f => { f.workflows[1].content += '\n  - run: gh release create v1.0\n'; },
+  ];
+  for (const mutate of mutations) {
+    const fixture = structuredClone(base);
+    mutate(fixture);
+    assert.throws(() => check(fixture), /Release\/publish/,
+      'the special-purpose ref janitor must not broaden release privileges');
+  }
+});
