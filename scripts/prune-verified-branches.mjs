@@ -400,7 +400,7 @@ async function request(repo, token, path, method = 'GET') {
   return response.status === 204 ? null : response.json();
 }
 
-export async function pruneVerifiedBranches(env = process.env) {
+export async function pruneVerifiedBranches(env = process.env, api = request, read = readFile) {
   const repo = env.GITHUB_REPOSITORY;
   if (repo !== 'GavinDu/security-agent-desktop-mac' || env.GITHUB_REF !== 'refs/heads/main') {
     throw new Error('Ref cleanup is restricted to this repository on main');
@@ -408,8 +408,8 @@ export async function pruneVerifiedBranches(env = process.env) {
   const token = env.GITHUB_TOKEN;
   if (!token) throw new Error('Missing narrowly scoped GitHub Actions token');
 
-  const branches = await request(repo, token, '/branches?per_page=100');
-  const openPRs = await request(repo, token, '/pulls?state=open&per_page=100');
+  const branches = await api(repo, token, '/branches?per_page=100');
+  const openPRs = await api(repo, token, '/pulls?state=open&per_page=100');
   if (branches.length === 100 || openPRs.length === 100) {
     throw new Error('Ref or PR pagination needed; refusing incomplete cleanup snapshot');
   }
@@ -423,19 +423,19 @@ export async function pruneVerifiedBranches(env = process.env) {
       skipped++;
       continue;
     }
-    const pr = await request(repo, token, '/pulls/' + candidate.pr);
-    const evidence = await verifySupersededEvidence(candidate);
+    const pr = await api(repo, token, '/pulls/' + candidate.pr);
+    const evidence = await verifySupersededEvidence(candidate, read);
     if (!eligibleForDeletion(candidate, branch, pr, activeBranches, evidence)) {
       skipped++;
       continue;
     }
     // Freshly recheck the remote ref immediately before deleting it.
-    const live = await request(repo, token, '/git/ref/heads/' + candidate.name);
+    const live = await api(repo, token, '/git/ref/heads/' + candidate.name);
     if (live.object?.sha !== candidate.sha) {
       skipped++;
       continue;
     }
-    await request(repo, token, '/git/refs/heads/' + candidate.name, 'DELETE');
+    await api(repo, token, '/git/refs/heads/' + candidate.name, 'DELETE');
     deleted++;
     console.log('Pruned verified branch: ' + candidate.name + ' (PR #' + candidate.pr + ')');
   }
@@ -445,16 +445,16 @@ export async function pruneVerifiedBranches(env = process.env) {
   for (const tracked of trackedActivePRs) {
     const branch = byName.get(tracked.name);
     if (!branch || branch.protected || activeBranches.has(tracked.name)) continue;
-    const pr = await request(repo, token, '/pulls/' + tracked.pr);
+    const pr = await api(repo, token, '/pulls/' + tracked.pr);
     const candidate = { ...tracked, sha: branch.commit.sha, status: 'merged' };
     if (!eligibleForDeletion(candidate, branch, pr, activeBranches, true)) continue;
-    const live = await request(repo, token, '/git/ref/heads/' + tracked.name);
+    const live = await api(repo, token, '/git/ref/heads/' + tracked.name);
     if (live.object?.sha !== candidate.sha) continue;
-    await request(repo, token, '/git/refs/heads/' + tracked.name, 'DELETE');
+    await api(repo, token, '/git/refs/heads/' + tracked.name, 'DELETE');
     deleted++;
     console.log('Pruned verified merged active branch: ' + tracked.name + ' (PR #' + tracked.pr + ')');
   }
-  const remaining = await request(repo, token, '/branches?per_page=100');
+  const remaining = await api(repo, token, '/branches?per_page=100');
   if (remaining.length === 100) throw new Error('Cannot verify full post-cleanup branch inventory');
   const featureCount = remaining.filter(branch => branch.name !== 'main').length;
   console.log('Branch audit: deleted=' + deleted + ' skipped=' + skipped + ' feature_branches=' + featureCount);
