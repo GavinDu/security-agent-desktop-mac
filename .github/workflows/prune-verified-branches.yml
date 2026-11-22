@@ -1,0 +1,35 @@
+name: Retire verified resolved feature branches
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Explicitly scoped, short-lived GitHub Actions token. No developer PAT.
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: desktop-verified-branch-retirement
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    if: ${{ github.repository == 'GavinDu/security-agent-desktop-mac' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Assert source SHA
+        run: bash scripts/check-ci-checkout.sh
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Prove no open branches or unmerged changes can be deleted
+        run: node --test scripts/prune-verified-branches.test.mjs
+      - name: Prune exact merged or proven superseded historical heads
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/prune-verified-branches.mjs
