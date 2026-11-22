@@ -22,7 +22,10 @@ pub(crate) struct RootGrantRevision {
 
 impl RootGrantRevision {
     pub(crate) fn new() -> Self {
-        Self { incarnation: Uuid::new_v4(), sequence: 0 }
+        Self {
+            incarnation: Uuid::new_v4(),
+            sequence: 0,
+        }
     }
 
     pub(crate) fn token(&self) -> String {
@@ -48,7 +51,6 @@ impl RootGrantRevision {
         self.sequence += 1;
     }
 }
-
 
 /// Maximum number of simultaneously admitted authenticated tool requests.
 pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16;
@@ -166,6 +168,24 @@ pub fn bind_address() -> Result<SocketAddr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn root_revision_is_unique_per_incarnation_and_explicitly_fails_on_wrap() {
+        let left = RootGrantRevision::new();
+        let right = RootGrantRevision::new();
+        assert_ne!(left.token(), right.token());
+        assert!(left.ensure_current(&left.token()).is_ok());
+        assert_eq!(
+            left.ensure_current(&right.token()).unwrap_err(),
+            "Directory permissions changed; refresh and retry"
+        );
+        let mut exhausted = RootGrantRevision::new();
+        exhausted.sequence = u64::MAX;
+        assert_eq!(
+            exhausted.ensure_can_advance().unwrap_err(),
+            "Directory permission revision exhausted"
+        );
+    }
+
     #[test]
     fn unavailable_bearer_credentials_fail_closed_before_agent_setup() {
         let bind = "127.0.0.1:8080".parse().unwrap();
