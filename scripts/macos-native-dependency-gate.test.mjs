@@ -12,7 +12,10 @@ test('native macOS job depends on all three required successful source gates (#1
     assert.match(before, new RegExp('^  ' + name + ':', 'm'));
   }
   assert.match(native, /^    needs: \[frontend, rustfmt, rust-linux\]$/m);
-  assert.match(native, /^    runs-on: macos-15$/m);
+  assert.match(native, /^    runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}$/m);
+  assert.match(native, /SELECTED_MACOS_RUNNER: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/);
+  assert.match(native, /run: node scripts\/check-macos-runner\.mjs/);
+  assert.ok(native.indexOf('node scripts/check-macos-runner.mjs') < native.indexOf('cargo test --locked'));
   assert.match(native, /^    timeout-minutes: 50$/m);
   assert.doesNotMatch(native, /^    if:.*always\(/m);
   assert.doesNotMatch(native, /^    continue-on-error:/m);
@@ -32,7 +35,7 @@ test('native verification and DMG artifact remain mandatory rather than bypassed
     'cargo test --locked --manifest-path src-tauri/Cargo.toml',
     'npm run build',
     'bash scripts/verify-macos-bundle.sh',
-    'actions/upload-artifact@v4',
+    'actions/upload-artifact@v6',
     'name: unsigned-security-agent-mac',
     'if-no-files-found: error',
   ];
@@ -46,5 +49,5 @@ test('native verification and DMG artifact remain mandatory rather than bypassed
   assert.ok(dmgBuild > 0, 'required standalone Tauri DMG build step');
   assert.ok(native.indexOf('cargo test --locked') < dmgBuild);
   assert.ok(dmgBuild < native.indexOf('bash scripts/verify-macos-bundle.sh'));
-  assert.ok(native.indexOf('bash scripts/verify-macos-bundle.sh') < native.indexOf('actions/upload-artifact@v4'));
+  assert.ok(native.indexOf('bash scripts/verify-macos-bundle.sh') < native.indexOf('actions/upload-artifact@v6'));
 });

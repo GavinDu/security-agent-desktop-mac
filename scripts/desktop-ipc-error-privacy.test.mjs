@@ -12,7 +12,7 @@ test('root grant failures use fixed text, never render raw rejected IPC details 
   // Root writes now pass through the already-merged #154 single-flight coordinator.
   assert.match(roots, /await rootWrites\.tryWrite\(roots,/);
   assert.match(roots, /connectorBridge\.setAllowedRoots\(nextRoots\)/);
-  assert.match(roots, /catch \{[\s\S]*?Directory permissions could not be changed\./);
+  assert.match(roots, /catch \{[\s\S]*?Directory permission update was not acknowledged\./);
   assert.doesNotMatch(roots, /String\s*\(\s*error\s*\)|JSON\.stringify\s*\(\s*error\s*\)|console\./);
   assert.match(roots, /el\('settingsNotice'\)\.textContent/);
   assert.match(roots, /await refresh\(\)/);

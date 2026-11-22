@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert checked-out Git revision
         run: bash scripts/check-ci-checkout.sh
       - uses: dtolnay/rust-toolchain@stable
@@ -31,12 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert checked-out Git revision
         run: bash scripts/check-ci-checkout.sh
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          package-manager-cache: false
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Typecheck
@@ -51,12 +52,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert checked-out Git revision
         run: bash scripts/check-ci-checkout.sh
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Tauri Linux development libraries
         run: |
@@ -74,18 +76,26 @@ jobs:
     # Keep scarce native runners for commits that already passed the three
     # required source checks; skipped native jobs never authorize a merge.
     needs: [frontend, rustfmt, rust-linux]
-    runs-on: macos-15
+    # GitHub currently maps macos-latest to macOS 26 on Apple Silicon.
+    # A repository Actions variable lets operators move between supported
+    # native ARM pools without changing source or weakening the merge gate.
+    runs-on: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}
     timeout-minutes: 50
     permissions:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert checked-out Git revision
         run: bash scripts/check-ci-checkout.sh
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
+          package-manager-cache: false
+      - name: Verify native runner is an approved Apple Silicon macOS 15+ host
+        env:
+          SELECTED_MACOS_RUNNER: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}
+        run: node scripts/check-macos-runner.mjs
       - name: Record native macOS queue wait (telemetry only)
         continue-on-error: true
         env:
@@ -114,7 +124,7 @@ jobs:
       - name: Verify the mounted DMG application, bundle identity and Apple Silicon binary
         run: bash scripts/verify-macos-bundle.sh
       - name: Upload unsigned DMG
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unsigned-security-agent-mac
           path: src-tauri/target/release/bundle/dmg/*.dmg
@@ -129,7 +139,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert checked-out Git revision
         run: bash scripts/check-ci-checkout.sh
       - name: Require actual success from all source and native jobs

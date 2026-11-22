@@ -48,3 +48,14 @@ older configuration.
 ## Integration with P0 foundation fixes
 
 Reconciled onto merged `main` after successor Epic #10 P0 #150 and #154, using an explicit two-parent merge commit. Preserve the `RootWriteCoordinator` guard and fixed root-write failure text from #154, the atomic tool catalog/policy refresh from #150, and the input-invalidated VPN preview from this issue #152. The Node root privacy source test now matches the actual single-flight IPC call rather than the obsolete direct call. This merge changes only the trusted WebView and its privacy regression; native policy enforcement remains unchanged. Run full exact-head native macOS CI and strict mounted development DMG checks before merging PR #153; the two-parent reconciliation commit itself is not acceptance evidence.
+
+## Combined integration with P0 #158
+
+PR #159 merges the privacy-preview work from this branch with the independent
+root-snapshot generation guard (#158), keeping #150 policy catalog sync,
+#154 trusted UI single-flight, and #156 native root mutation ordering.
+The privacy test checks the new fixed root failure message after #158's
+backend readback flow; neither UI result may print native IPC error data.
+The two-parent integration commit requires a fresh exact-head full CI,
+including macOS 15 native Rust tests and strict mounted developer DMG artifact.
+Neither source review nor branch ancestry replaces that evidence.

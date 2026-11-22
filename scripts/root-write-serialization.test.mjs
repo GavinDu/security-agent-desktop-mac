@@ -64,14 +64,14 @@ test('trusted desktop disables both controls before await and restores only afte
   const section = ui.slice(ui.indexOf('async function updateRoots('), ui.indexOf("el('refresh').addEventListener"));
   assert.match(ui, /import \{ RootWriteCoordinator \} from '\.\.\/bridges\/root-write';/);
   assert.match(ui, /const rootWrites = new RootWriteCoordinator\(\)/);
-  const guard = section.indexOf('if (rootWrites.inFlight) return;');
+  const guard = section.indexOf('if (rootWrites.inFlight || !rootSnapshots.startMutation(roots.length === 0)) return;');
   const disableGrant = section.indexOf('grantRootButton.disabled = true;');
   const disableClear = section.indexOf('clearRootsButton.disabled = true;');
   const awaitWrite = section.indexOf('await rootWrites.tryWrite(roots,');
   assert.ok(guard >= 0 && disableGrant > guard && disableClear > guard && awaitWrite > disableClear);
   assert.match(section, /if \(!accepted\) return;/);
   assert.match(section, /if \(!accepted\) return;[\s\S]*?await refresh\(\)/);
-  assert.match(section, /finally \{\s*grantRootButton.disabled = false;\s*clearRootsButton.disabled = false;/);
+  assert.match(section, /finally \{\s*rootSnapshots.finishMutation\(\);[\s\S]*?await refresh\(\);[\s\S]*?grantRootButton.disabled = !rootSnapshots.canWrite;[\s\S]*?clearRootsButton.disabled = !rootSnapshots.canRevoke;/);
   assert.doesNotMatch(section, /String\(error\)|console\.|JSON\.stringify\(error\)/);
   assert.match(ui, /grantRootButton.addEventListener\('click'/);
   assert.match(ui, /clearRootsButton.addEventListener\('click'/);
