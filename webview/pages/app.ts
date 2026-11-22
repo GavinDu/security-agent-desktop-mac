@@ -66,7 +66,7 @@ async function refresh(): Promise<void> {
     ]);
     renderStatus(status);
     // Only the newest authoritative readback may define the next grant array.
-    if (rootSnapshots.applyRefresh(rootEpoch, settings.allowed_roots)) {
+    if (rootSnapshots.applyRefresh(rootEpoch, settings.allowed_roots, settings.root_revision)) {
       configuredRoots = rootSnapshots.snapshot();
       el('roots').textContent = configuredRoots.length ? configuredRoots.join('\n') : 'No directories granted.';
       grantRootButton.disabled = false;
@@ -129,6 +129,8 @@ async function respond(approved: boolean): Promise<void> {
 async function updateRoots(roots: string[]): Promise<void> {
   // RootSnapshotCoordinator rejects stale reads and overlapping readback,
   // while RootWriteCoordinator serializes the actual trusted IPC mutation.
+  const revision = roots.length === 0 ? null : rootSnapshots.snapshotRevision();
+  if (roots.length > 0 && revision === null) return;
   if (rootWrites.inFlight || !rootSnapshots.startMutation(roots.length === 0)) return;
   grantRootButton.disabled = true;
   clearRootsButton.disabled = true;
@@ -136,7 +138,8 @@ async function updateRoots(roots: string[]): Promise<void> {
   let persisted = false;
   try {
     const accepted = await rootWrites.tryWrite(roots, (nextRoots) =>
-      connectorBridge.setAllowedRoots(nextRoots));
+      revision === null ? connectorBridge.clearAllowedRoots()
+        : connectorBridge.setAllowedRoots(nextRoots, revision));
     if (!accepted) return;
     persisted = true;
     rootInput.value = '';

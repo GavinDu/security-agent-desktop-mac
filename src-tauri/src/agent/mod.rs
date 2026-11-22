@@ -10,6 +10,47 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
+use uuid::Uuid;
+
+/// Session-scoped revision is checked under the same mutex as native root writes.
+/// A fresh incarnation prevents a restarted agent accepting an old counter (ABA).
+#[derive(Debug)]
+pub(crate) struct RootGrantRevision {
+    incarnation: Uuid,
+    sequence: u64,
+}
+
+impl RootGrantRevision {
+    pub(crate) fn new() -> Self {
+        Self {
+            incarnation: Uuid::new_v4(),
+            sequence: 0,
+        }
+    }
+
+    pub(crate) fn token(&self) -> String {
+        format!("{}:{}", self.incarnation, self.sequence)
+    }
+
+    pub(crate) fn ensure_current(&self, supplied: &str) -> Result<(), String> {
+        if self.token() != supplied {
+            return Err("Directory permissions changed; refresh and retry".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_can_advance(&self) -> Result<(), String> {
+        if self.sequence == u64::MAX {
+            return Err("Directory permission revision exhausted".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn advance(&mut self) {
+        // Call only after ensure_can_advance and successful durable publication.
+        self.sequence += 1;
+    }
+}
 
 /// Maximum number of simultaneously admitted authenticated tool requests.
 pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16;
@@ -23,7 +64,7 @@ pub struct AgentState {
     pub dispatch_permits: Arc<Semaphore>,
     pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
     /// Serialize every native root-grant mutation before filesystem validation.
-    pub(crate) root_mutations: Mutex<()>,
+    pub(crate) root_mutations: Mutex<RootGrantRevision>,
     pub settings: Mutex<AgentSettings>,
     listener_error: RwLock<Option<String>>,
 }
@@ -53,7 +94,7 @@ impl AgentState {
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             source_rate_limiter: rate_limit::SourceRateLimiter::default(),
-            root_mutations: Mutex::new(()),
+            root_mutations: Mutex::new(RootGrantRevision::new()),
             settings: Mutex::new(settings),
             listener_error: RwLock::new(None),
         }))
@@ -127,6 +168,24 @@ pub fn bind_address() -> Result<SocketAddr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn root_revision_is_unique_per_incarnation_and_explicitly_fails_on_wrap() {
+        let left = RootGrantRevision::new();
+        let right = RootGrantRevision::new();
+        assert_ne!(left.token(), right.token());
+        assert!(left.ensure_current(&left.token()).is_ok());
+        assert_eq!(
+            left.ensure_current(&right.token()).unwrap_err(),
+            "Directory permissions changed; refresh and retry"
+        );
+        let mut exhausted = RootGrantRevision::new();
+        exhausted.sequence = u64::MAX;
+        assert_eq!(
+            exhausted.ensure_can_advance().unwrap_err(),
+            "Directory permission revision exhausted"
+        );
+    }
+
     #[test]
     fn unavailable_bearer_credentials_fail_closed_before_agent_setup() {
         let bind = "127.0.0.1:8080".parse().unwrap();

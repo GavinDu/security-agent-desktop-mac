@@ -8,18 +8,33 @@ use crate::{
         registry::{ToolCall, ToolRegistry},
     },
 };
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::{State, WebviewWindow};
 use uuid::Uuid;
 
+#[derive(Serialize)]
+pub struct AgentSettingsSnapshot {
+    #[serde(flatten)]
+    settings: AgentSettings,
+    root_revision: String,
+}
+
 #[tauri::command]
 pub async fn get_agent_settings(
     window: WebviewWindow,
     state: State<'_, Arc<AgentState>>,
-) -> Result<AgentSettings, String> {
+) -> Result<AgentSettingsSnapshot, String> {
     navigation::ensure_privileged_webview(&window)?;
-    Ok(state.settings.lock().await.clone())
+    // The same mutex protects root mutations AND their revision. Taking it
+    // before the settings lock yields a coherent snapshot with no mixed epoch.
+    let revision = state.root_mutations.lock().await;
+    let settings = state.settings.lock().await.clone();
+    Ok(AgentSettingsSnapshot {
+        settings,
+        root_revision: revision.token(),
+    })
 }
 
 #[tauri::command]
@@ -91,6 +106,7 @@ fn persist_root_grants(
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
     roots: Vec<String>,
+    expected_root_revision: Option<String>,
     validate: V,
     persist: P,
 ) -> Result<(), String>
@@ -98,12 +114,24 @@ where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
     P: FnOnce(&AgentSettings) -> Result<(), String>,
 {
-    let _mutation = state.root_mutations.lock().await;
+    let mut revision = state.root_mutations.lock().await;
+    if !roots.is_empty() || expected_root_revision.is_some() {
+        revision.ensure_current(
+            expected_root_revision
+                .as_deref()
+                .ok_or("Directory permission revision required")?,
+        )?;
+    }
+    // Only the dedicated empty-set revocation call may omit a revision.
+    revision.ensure_can_advance()?;
     let resolved = tokio::task::spawn_blocking(move || validate(roots))
         .await
         .map_err(|_| "Cannot validate approved roots".to_owned())??;
     let mut settings = state.settings.lock().await;
-    persist_root_grants(&mut settings, &state.registry, resolved, persist)
+    persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
+    // No await point between durable publish and revision advancement.
+    revision.advance();
+    Ok(())
 }
 
 #[tauri::command]
@@ -111,11 +139,31 @@ pub async fn set_allowed_roots(
     window: WebviewWindow,
     state: State<'_, Arc<AgentState>>,
     roots: Vec<String>,
+    expected_root_revision: String,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
     commit_serialized_roots(
         &*state,
         roots,
+        Some(expected_root_revision),
+        |requested| ToolRegistry::canonical_roots(&requested),
+        AgentSettings::save,
+    )
+    .await
+}
+
+/// Revocation-only escape hatch when trusted UI readback fails. Never accepts
+/// roots or a stale caller-composed grant set; it can only remove permissions.
+#[tauri::command]
+pub async fn clear_allowed_roots(
+    window: WebviewWindow,
+    state: State<'_, Arc<AgentState>>,
+) -> Result<(), String> {
+    navigation::ensure_privileged_webview(&window)?;
+    commit_serialized_roots(
+        &*state,
+        Vec::new(),
+        None,
         |requested| ToolRegistry::canonical_roots(&requested),
         AgentSettings::save,
     )
@@ -181,6 +229,7 @@ mod tests {
         )
         .unwrap();
 
+        let initial_revision = state.root_mutations.lock().await.token();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (continue_tx, continue_rx) = std::sync::mpsc::channel();
         let first_state = state.clone();
@@ -188,6 +237,7 @@ mod tests {
             commit_serialized_roots(
                 &first_state,
                 vec![first_grant],
+                Some(initial_revision),
                 move |requested| {
                     let _ = started_tx.send(());
                     continue_rx
@@ -209,6 +259,7 @@ mod tests {
             commit_serialized_roots(
                 &second_state,
                 Vec::new(),
+                None,
                 move |requested| {
                     let _ = second_started_tx.send(());
                     ToolRegistry::canonical_roots(&requested)
@@ -256,6 +307,7 @@ mod tests {
             AgentSettings::default(),
         )
         .unwrap();
+        let initial_revision = state.root_mutations.lock().await.token();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let first_state = state.clone();
@@ -263,6 +315,7 @@ mod tests {
             commit_serialized_roots(
                 &first_state,
                 vec![path],
+                Some(initial_revision),
                 move |requested| {
                     let _ = started_tx.send(());
                     release_rx
@@ -285,6 +338,7 @@ mod tests {
             commit_serialized_roots(
                 &state,
                 Vec::new(),
+                None,
                 |requested| ToolRegistry::canonical_roots(&requested),
                 |_| Ok(()),
             ),
@@ -306,26 +360,119 @@ mod tests {
         )
         .unwrap();
 
+        let expected = state.root_mutations.lock().await.token();
         let failure = commit_serialized_roots(
             &state,
             vec!["/not-an-authorized-dir".into()],
+            Some(expected.clone()),
             |_| Err("Invalid granted root".into()),
             |_| panic!("persistence must not run after failed validation"),
         )
         .await
         .unwrap_err();
         assert_eq!(failure, "Invalid granted root");
+        assert_eq!(state.root_mutations.lock().await.token(), expected);
         assert!(state.settings.lock().await.allowed_roots.is_empty());
 
         commit_serialized_roots(
             &state,
             Vec::new(),
+            None,
             |requested| ToolRegistry::canonical_roots(&requested),
             |_| Ok(()),
         )
         .await
         .unwrap();
         assert!(state.settings.lock().await.allowed_roots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_native_client_cannot_restore_a_revoked_root() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path.clone()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let old_revision = state.root_mutations.lock().await.token();
+        // Client A revokes while client B is still holding the old snapshot.
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |requested| ToolRegistry::canonical_roots(&requested),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let current = state.root_mutations.lock().await.token();
+        assert_ne!(old_revision, current);
+        let failed = commit_serialized_roots(
+            &state,
+            vec![path],
+            Some(old_revision),
+            |_| panic!("stale client must be rejected before filesystem validation"),
+            |_| panic!("stale client must never persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed, "Directory permissions changed; refresh and retry");
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert_eq!(state.root_mutations.lock().await.token(), current);
+    }
+
+    #[tokio::test]
+    async fn persist_failure_and_wrong_incarnation_do_not_advance_root_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let revision = state.root_mutations.lock().await.token();
+        let failed = commit_serialized_roots(
+            &state,
+            vec![path.clone()],
+            Some(revision.clone()),
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Err("sensitive settings filesystem path".into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed, "Cannot persist approved roots");
+        assert_eq!(revision, state.root_mutations.lock().await.token());
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+
+        let restarted = AgentState::new(
+            "test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let new_revision = restarted.root_mutations.lock().await.token();
+        assert_ne!(
+            revision, new_revision,
+            "new session must not reuse stale revision"
+        );
+        let failure = commit_serialized_roots(
+            &restarted,
+            vec![path],
+            Some(revision),
+            |_| panic!("old session must fail before validation"),
+            |_| panic!("old session must fail before persistence"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, "Directory permissions changed; refresh and retry");
+        assert_eq!(new_revision, restarted.root_mutations.lock().await.token());
+        assert!(restarted.settings.lock().await.allowed_roots.is_empty());
     }
 
     #[tokio::test]

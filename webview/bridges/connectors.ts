@@ -13,6 +13,7 @@ export interface ApprovalEvent { id: string; tool: string; preview: string }
 
 export interface AgentSettings {
   allowed_roots: string[];
+  root_revision: string;
   policies: Record<string, 'auto' | 'ask' | 'disable'>;
 }
 export interface ConnectorBridge {
@@ -20,7 +21,8 @@ export interface ConnectorBridge {
   list(): Promise<ToolSpec[]>;
   invoke(call: ToolCall): Promise<unknown>;
   setPolicy(tool: string, policy: 'auto' | 'ask' | 'disable'): Promise<void>;
-  setAllowedRoots(roots: string[]): Promise<void>;
+  setAllowedRoots(roots: string[], expectedRootRevision: string): Promise<void>;
+  clearAllowedRoots(): Promise<void>;
   respondApproval(id: string, allow: boolean): Promise<boolean>;
   status(): Promise<{ binding: string; vpn_active: boolean; online: boolean; error: string | null }>;
   previewWireGuardPeer(publicKey: string, tunnelIp: string): Promise<string>;
@@ -31,7 +33,8 @@ export const connectorBridge: ConnectorBridge = {
   settings: () => invoke('get_agent_settings'),
   invoke: (call) => invoke('invoke_tool', { call }),
   setPolicy: (tool, policy) => invoke('set_tool_policy', { tool, policy }),
-  setAllowedRoots: (roots) => invoke('set_allowed_roots', { roots }),
+  setAllowedRoots: (roots, expectedRootRevision) => invoke('set_allowed_roots', { roots, expectedRootRevision }),
+  clearAllowedRoots: () => invoke('clear_allowed_roots'),
   respondApproval: (id, allow) => invoke('respond_approval', { id, allow }),
   status: () => invoke('get_agent_status'),
   previewWireGuardPeer: (publicKey, tunnelIp) => invoke('preview_wireguard_peer', { publicKey, tunnelIp }),

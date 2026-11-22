@@ -64,7 +64,7 @@ test('WebView distribution is entirely locally bundled', async () => {
 
 test('each privileged Tauri command checks caller window identity and URL before execution', async () => {
   for (const [file, expected] of [
-    ['src-tauri/src/tools/commands.rs', 7],
+    ['src-tauri/src/tools/commands.rs', 8],
     ['src-tauri/src/vpn/commands.rs', 1],
   ]) {
     const code = await readFile(file, 'utf8');

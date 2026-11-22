@@ -17,6 +17,7 @@ pub fn run() {
             tools::commands::respond_approval,
             tools::commands::set_tool_policy,
             tools::commands::set_allowed_roots,
+            tools::commands::clear_allowed_roots,
             crate::vpn::commands::preview_wireguard_peer,
         ])
         .on_window_event(|window, event| {
