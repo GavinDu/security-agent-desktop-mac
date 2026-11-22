@@ -355,6 +355,13 @@ export const supersededEvidence = {
   }
 };
 
+// Once both in-flight PRs merge, their source refs become independently
+// deletable with the GitHub-verified exact PR head. Until then, preserve them.
+export const trackedActivePRs = [
+  { name: 'security/158-stale-root-snapshot-fence', pr: 161 },
+  { name: 'security/156-native-root-mutation-order', pr: 163 },
+];
+
 export function eligibleForDeletion(candidate, branch, pr, activeBranches, evidenceSatisfied) {
   if (!candidate || candidate.name === 'main' || !/^[a-z0-9][a-z0-9/_-]+$/.test(candidate.name)) return false;
   if (!branch || branch.protected || branch.name !== candidate.name) return false;
@@ -431,6 +438,21 @@ export async function pruneVerifiedBranches(env = process.env) {
     await request(repo, token, '/git/refs/heads/' + candidate.name, 'DELETE');
     deleted++;
     console.log('Pruned verified branch: ' + candidate.name + ' (PR #' + candidate.pr + ')');
+  }
+  // Follow-up passes also clean up the two current PR heads once merged.
+  // Never infer successful merge from a closed PR alone, and never delete
+  // a branch whose head differs from its actual merged PR commit.
+  for (const tracked of trackedActivePRs) {
+    const branch = byName.get(tracked.name);
+    if (!branch || branch.protected || activeBranches.has(tracked.name)) continue;
+    const pr = await request(repo, token, '/pulls/' + tracked.pr);
+    const candidate = { ...tracked, sha: branch.commit.sha, status: 'merged' };
+    if (!eligibleForDeletion(candidate, branch, pr, activeBranches, true)) continue;
+    const live = await request(repo, token, '/git/ref/heads/' + tracked.name);
+    if (live.object?.sha !== candidate.sha) continue;
+    await request(repo, token, '/git/refs/heads/' + tracked.name, 'DELETE');
+    deleted++;
+    console.log('Pruned verified merged active branch: ' + tracked.name + ' (PR #' + tracked.pr + ')');
   }
   const remaining = await request(repo, token, '/branches?per_page=100');
   if (remaining.length === 100) throw new Error('Cannot verify full post-cleanup branch inventory');
