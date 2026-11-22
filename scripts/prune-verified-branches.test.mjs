@@ -94,7 +94,7 @@ function mockGitHub(initial, { open = [], refDrift = {}, prOverrides = {} } = {}
       const mock = candidate || {
         name: inFlight.name, pr: n, sha: current.get(inFlight.name)?.commit.sha,
       };
-      return { ...pr(mock), ...prOverrides[n] };
+      return { ...pr(mock, mock.status === 'superseded' ? null : '2026-11-21T00:00:00Z'), ...prOverrides[n] };
     }
     const getRef = '/git/ref/heads/';
     const deleteRef = '/git/refs/heads/';
