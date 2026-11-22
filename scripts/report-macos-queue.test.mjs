@@ -101,7 +101,7 @@ test('reporter runs only in approved macOS 15+ ARM64 job; native verification re
   assert.match(native, /continue-on-error: true[\s\S]*node scripts\/report-macos-queue\.mjs/);
   assert.match(native, /cargo test --locked/);
   assert.match(native, /bash scripts\/verify-macos-bundle\.sh/);
-  assert.match(native, /actions\/upload-artifact@v4/);
+  assert.match(native, /actions\/upload-artifact@v6/);
   assert.ok(native.indexOf('node scripts/report-macos-queue.mjs') <
     native.indexOf('cargo test --locked'), 'report must run before native checks');
 });

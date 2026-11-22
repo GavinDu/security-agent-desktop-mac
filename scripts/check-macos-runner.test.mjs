@@ -40,5 +40,5 @@ test('CI validates actual runtime before Rust/DMG with no bypass', async () => {
   assert.ok(native.indexOf('node scripts/check-macos-runner.mjs') <
     native.indexOf('cargo test --locked'));
   assert.match(native, /bash scripts\/verify-macos-bundle\.sh/);
-  assert.match(native, /actions\/upload-artifact@v4/);
+  assert.match(native, /actions\/upload-artifact@v6/);
 });
