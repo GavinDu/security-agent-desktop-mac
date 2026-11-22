@@ -386,7 +386,6 @@ mod tests {
         assert!(state.settings.lock().await.allowed_roots.is_empty());
     }
 
-
     #[tokio::test]
     async fn stale_native_client_cannot_restore_a_revoked_root() {
         let root = tempfile::tempdir().unwrap();
@@ -458,7 +457,10 @@ mod tests {
         )
         .unwrap();
         let new_revision = restarted.root_mutations.lock().await.token();
-        assert_ne!(revision, new_revision, "new session must not reuse stale revision");
+        assert_ne!(
+            revision, new_revision,
+            "new session must not reuse stale revision"
+        );
         let failure = commit_serialized_roots(
             &restarted,
             vec![path],
