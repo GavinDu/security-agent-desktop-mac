@@ -52,13 +52,21 @@ export function auditDevelopmentDistribution(config, capabilities, workflows, ca
       }
     }
   }
+  // The action's own Node runtime is independent of the app's Node 22.
+  // Deny legacy Node 20 action majors in every workflow, not just the CI job.
+  const node20Action = /\buses:\s*actions\/(?:checkout|setup-node)@v[1-4]\b|\buses:\s*actions\/upload-artifact@v[1-5]\b/;
+  for (const entry of workflows) {
+    if (node20Action.test(entry.content)) {
+      throw new Error('Deprecated Node20 workflow action is forbidden');
+    }
+  }
   const native = workflows.find((entry) => entry.name === 'ci.yml');
   if (!native ||
       !/^    runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}$/m.test(native.content) ||
       !/SELECTED_MACOS_RUNNER: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/.test(native.content) ||
       !/run: node scripts\/check-macos-runner\.mjs/.test(native.content) ||
       !/bash scripts\/verify-macos-bundle\.sh/.test(native.content) ||
-      !/actions\/upload-artifact@v4/.test(native.content) ||
+      !/actions\/upload-artifact@v6/.test(native.content) ||
       !/name:\s*unsigned-security-agent-mac/.test(native.content)) {
     throw new Error('Required strict macOS developer artifact gate is missing');
   }

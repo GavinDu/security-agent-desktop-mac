@@ -72,7 +72,7 @@ test('strict mounted DMG verification, upload and workflow discovery are require
     "SELECTED_MACOS_RUNNER: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}",
     'run: node scripts/check-macos-runner.mjs',
     'bash scripts/verify-macos-bundle.sh',
-    'actions/upload-artifact@v4', 'name: unsigned-security-agent-mac',
+    'actions/upload-artifact@v6', 'name: unsigned-security-agent-mac',
   ]) {
     const f = structuredClone(base);
     f.workflows[0].content = f.workflows[0].content.replace(target, 'REMOVED');
@@ -81,6 +81,23 @@ test('strict mounted DMG verification, upload and workflow discovery are require
   assert.throws(() => check({ ...base, workflows: [] }), /No workflow/);
   assert.throws(() => check({ ...base, workflows: [{ name: 'ci.yml', content: null }] }),
     /Cannot audit/);
+});
+
+test('Node 20 actions are rejected independently of the app Node 22 version', async () => {
+  const base = await baseline();
+  const workflow = base.workflows[0].content;
+  assert.equal((workflow.match(/actions\/checkout@v6/g) || []).length, 5);
+  assert.equal((workflow.match(/actions\/setup-node@v6/g) || []).length, 3);
+  assert.equal((workflow.match(/actions\/upload-artifact@v6/g) || []).length, 1);
+  assert.equal((workflow.match(/package-manager-cache: false/g) || []).length, 3);
+  for (const legacy of [
+    'actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4',
+    'actions/upload-artifact@v5',
+  ]) {
+    const fixture = structuredClone(base);
+    fixture.workflows[0].content += '\n      - uses: ' + legacy + '\n';
+    assert.throws(() => check(fixture), /Deprecated Node20/);
+  }
 });
 
 test('scans each workflow rather than trusting only the canonical ci.yml', async () => {

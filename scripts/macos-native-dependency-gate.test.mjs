@@ -35,7 +35,7 @@ test('native verification and DMG artifact remain mandatory rather than bypassed
     'cargo test --locked --manifest-path src-tauri/Cargo.toml',
     'npm run build',
     'bash scripts/verify-macos-bundle.sh',
-    'actions/upload-artifact@v4',
+    'actions/upload-artifact@v6',
     'name: unsigned-security-agent-mac',
     'if-no-files-found: error',
   ];
@@ -49,5 +49,5 @@ test('native verification and DMG artifact remain mandatory rather than bypassed
   assert.ok(dmgBuild > 0, 'required standalone Tauri DMG build step');
   assert.ok(native.indexOf('cargo test --locked') < dmgBuild);
   assert.ok(dmgBuild < native.indexOf('bash scripts/verify-macos-bundle.sh'));
-  assert.ok(native.indexOf('bash scripts/verify-macos-bundle.sh') < native.indexOf('actions/upload-artifact@v4'));
+  assert.ok(native.indexOf('bash scripts/verify-macos-bundle.sh') < native.indexOf('actions/upload-artifact@v6'));
 });
