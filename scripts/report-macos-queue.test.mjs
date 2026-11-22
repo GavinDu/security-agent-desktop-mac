@@ -27,7 +27,7 @@ test('reports per-job queue time on an exact attempt, not test execution duratio
   const summary = renderQueueSummary(result, { runId: '44747917651', attempt: '2', headSha: sha, checkoutSha: syntheticMergeSha });
   assert.match(summary, /128\.6 minutes/);
   assert.match(summary, /attempt 2/);
-  assert.match(summary, /macos-15/);
+  assert.match(summary, /macOS 15\+ ARM64/);
   assert.ok(!summary.includes('Bearer'));
 });
 
@@ -88,12 +88,13 @@ test('bad identity or API permission failures never produce fake success', async
     /environment is unavailable/);
 });
 
-test('reporter runs only in macOS 15 job; native verification remains required', async () => {
+test('reporter runs only in approved macOS 15+ ARM64 job; native verification remains required', async () => {
   const ci = await readFile('.github/workflows/ci.yml', 'utf8');
   const [beforeMacos, native] = ci.split(/^  macos:$/m);
   assert.ok(native, 'macOS job must exist');
   assert.doesNotMatch(beforeMacos, /node scripts\/report-macos-queue\.mjs/);
-  assert.match(native, /runs-on: macos-15/);
+  assert.match(native, /runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/);
+  assert.match(native, /run: node scripts\/check-macos-runner\.mjs/);
   assert.match(native, /actions: read/);
   assert.ok(native.includes('SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}'));
 

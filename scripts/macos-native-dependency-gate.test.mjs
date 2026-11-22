@@ -12,7 +12,10 @@ test('native macOS job depends on all three required successful source gates (#1
     assert.match(before, new RegExp('^  ' + name + ':', 'm'));
   }
   assert.match(native, /^    needs: \[frontend, rustfmt, rust-linux\]$/m);
-  assert.match(native, /^    runs-on: macos-15$/m);
+  assert.match(native, /^    runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}$/m);
+  assert.match(native, /SELECTED_MACOS_RUNNER: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/);
+  assert.match(native, /run: node scripts\/check-macos-runner\.mjs/);
+  assert.ok(native.indexOf('node scripts/check-macos-runner.mjs') < native.indexOf('cargo test --locked'));
   assert.match(native, /^    timeout-minutes: 50$/m);
   assert.doesNotMatch(native, /^    if:.*always\(/m);
   assert.doesNotMatch(native, /^    continue-on-error:/m);

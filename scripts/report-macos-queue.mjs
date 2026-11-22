@@ -47,7 +47,7 @@ export function renderQueueSummary(metric, { runId, attempt, headSha, checkoutSh
     'On pull requests, the checkout SHA can be a synthetic merge commit, not the',
     'source PR head. Review both SHA identities before attributing native results.',
     'Queue wait does not establish a capacity or billing root cause. The',
-    'macos-15 Rust tests, mounted-DMG verification and artifact upload remain mandatory.',
+    'macOS 15+ ARM64 Rust tests, mounted-DMG verification and artifact upload remain mandatory.',
     '',
   ].join('\n');
 }

@@ -101,3 +101,43 @@ repository, exercise absent/invalid/wrong SHA, and verify that a
 different `SOURCE_HEAD_SHA` does not incorrectly invalidate a PR
 test-merge checkout. No auth token, workspace path or user data is
 included in success/failure output.
+
+## macOS 15+ Apple Silicon runner selection (November 21, 2026)
+
+The native job now defaults to `macos-latest` (currently **macOS 26 ARM64**)
+instead of pinning `macos-15`, to avoid only one fixed image pool while
+retaining native ARM64 build verification. GitHub Actions does **not** support
+OR-selection among runner labels: a `runs-on` array means AND. Nor does the
+GitHub-hosted runner API offer a reliable "first idle" reservation operation.
+
+To switch native pools without a source commit, set the repository Actions
+**variable** `MACOS_RUNNER_LABEL` to one of:
+
+- `macos-latest` (default, macOS 26 ARM64)
+- `macos-26` (explicit macOS 26 ARM64)
+- `macos-15` (macOS 15 ARM64)
+- `xcode-27` (Apple Silicon Xcode 27 image; actual OS still verified >= 15)
+
+Unset the variable to restore `macos-latest`. For a queued run, initiate a
+new workflow attempt after switching the variable and inspect the selected
+runner in the job logs; editing the setting cannot relocate an already queued
+job automatically. The runner check only allows the labels above, and uses
+the runner's OS/architecture and `/usr/bin/sw_vers -productVersion` to
+fail if the actual host is not **macOS >= 15 on ARM64**. Intel labels are
+intentionally forbidden because this workflow builds and verifies an ARM64
+application DMG, not a cross-compiled or universal artifact.
+
+The three Linux source jobs still gate entry to native macOS. The `macos`
+job remains a mandatory dependency of always-running `required-gates`, and
+its locked native Rust tests, strict mounted DMG ad-hoc signature and
+entitlement validation, and uploaded artifact are unchanged. A failed or
+skipped check cannot be accepted as a successful native gate. The selector
+does not guarantee zero queue time or automatically race multiple runner
+pools. Avoid parallel 15/26 builds merely to race runners: both would
+consume scarce macOS capacity and `required-gates` would still need a
+well-defined single strict result. If true automatic scheduling is
+required later, use a separately designed ephemeral macOS fleet with
+isolation and fail-closed provenance, not a permissive CI bypass.
+
+Evidence: GitHub's hosted-runner label table, actions/runner-images README,
+macOS 26 GA announcement, and GitHub's macos-latest 2026 migration.

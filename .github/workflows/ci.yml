@@ -74,7 +74,10 @@ jobs:
     # Keep scarce native runners for commits that already passed the three
     # required source checks; skipped native jobs never authorize a merge.
     needs: [frontend, rustfmt, rust-linux]
-    runs-on: macos-15
+    # GitHub currently maps macos-latest to macOS 26 on Apple Silicon.
+    # A repository Actions variable lets operators move between supported
+    # native ARM pools without changing source or weakening the merge gate.
+    runs-on: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}
     timeout-minutes: 50
     permissions:
       contents: read
@@ -86,6 +89,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Verify native runner is an approved Apple Silicon macOS 15+ host
+        env:
+          SELECTED_MACOS_RUNNER: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}
+        run: node scripts/check-macos-runner.mjs
       - name: Record native macOS queue wait (telemetry only)
         continue-on-error: true
         env:
