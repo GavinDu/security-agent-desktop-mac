@@ -24,6 +24,8 @@ let confirmedBashPolicy: ShellPolicy | null = null;
 let policyEpoch = 0;
 // Prevent overlapping owner root grant/revocation IPC writes from this WebView.
 const rootWrites = new RootWriteCoordinator();
+// Never display a preview for a superseded public key or tunnel address.
+let peerPreviewEpoch = 0;
 bashPolicy.disabled = true;
 
 type AgentStatus = Awaited<ReturnType<typeof connectorBridge.status>>;
@@ -126,12 +128,39 @@ async function updateRoots(roots: string[]): Promise<void> {
 }
 
 el('refresh').addEventListener('click', () => void refresh());
+const peerKeyInput = el('peerKey') as HTMLInputElement;
+const peerIpInput = el('peerIp') as HTMLInputElement;
+const peerPreview = el('peerPreview');
+// Editing either field invalidates a completed or in-flight preview. Epoch
+// guards also reject responses arriving after a newer Preview click.
+function invalidatePeerPreview(): void {
+  peerPreviewEpoch += 1;
+  peerPreview.textContent = 'Peer preview cleared. Validate the current inputs.';
+}
+peerKeyInput.addEventListener('input', invalidatePeerPreview);
+peerIpInput.addEventListener('input', invalidatePeerPreview);
 el('previewPeer').addEventListener('click', () => {
-  const publicKey = (el('peerKey') as HTMLInputElement).value.trim();
-  const tunnelIp = (el('peerIp') as HTMLInputElement).value.trim();
+  const epoch = ++peerPreviewEpoch;
+  const publicKey = peerKeyInput.value.trim();
+  const tunnelIp = peerIpInput.value.trim();
+  // Recheck the source values too: DOM values may change programmatically
+  // without firing an input event, and must not resurrect an old config.
+  const current = () => epoch === peerPreviewEpoch &&
+    peerKeyInput.value.trim() === publicKey &&
+    peerIpInput.value.trim() === tunnelIp;
+  peerPreview.textContent = 'Validating peer configuration...';
   void connectorBridge.previewWireGuardPeer(publicKey, tunnelIp)
-    .then((config) => { el('peerPreview').textContent = config; })
-    .catch((error: unknown) => { el('peerPreview').textContent = 'Validation error: ' + String(error); });
+    .then((config) => {
+      if (current()) peerPreview.textContent = config;
+    })
+    .catch(() => {
+      if (current()) {
+        // Never display a rejected IPC error: it may carry paths, secrets
+        // or low-level backend diagnostics. No generated config is retained.
+        peerPreview.textContent =
+          'Peer preview unavailable. Check the public key and tunnel address.';
+      }
+    });
 });
 allow.addEventListener('click', () => void respond(true));
 deny.addEventListener('click', () => void respond(false));
