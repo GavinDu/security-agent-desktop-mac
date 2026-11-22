@@ -10,8 +10,8 @@ const native = source.slice(
 );
 
 test('all authorized native root commands acquire one mutation gate before blocking validation (#156)', () => {
-  assert.match(state, /root_mutations:\s*Mutex<\(\)>/);
-  assert.match(state, /root_mutations:\s*Mutex::new\(\(\)\)/);
+  assert.match(state, /root_mutations:\s*Mutex<RootGrantRevision>/);
+  assert.match(state, /root_mutations:\s*Mutex::new\(RootGrantRevision::new\(\)\)/);
   const locked = native.indexOf('state.root_mutations.lock().await');
   const blocked = native.indexOf('tokio::task::spawn_blocking(');
   const settings = native.indexOf('state.settings.lock().await');
