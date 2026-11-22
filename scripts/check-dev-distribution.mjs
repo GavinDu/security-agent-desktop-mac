@@ -5,13 +5,34 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
+// The only write-capable workflow permitted is exact-head *ref deletion*
+// for owner-requested repository hygiene (#162). No release, publishing,
+// deployment, package or privilege-bearing normal CI job is exempt.
+const elevatedPermissions = /\b(?:contents|packages)\s*:\s*write\b/i;
+
+function isGuardedBranchRetirementWorkflow(entry) {
+  const c = entry.content;
+  return entry.name === 'prune-verified-branches.yml' &&
+    /^name: Retire verified resolved feature branches$/m.test(c) &&
+    /^on:\n  push:\n    branches: \[main\]\n  workflow_dispatch:/m.test(c) &&
+    /^permissions:\n  contents: write\n  pull-requests: read\s*$/m.test(c) &&
+    (c.match(/^\s*contents:\s*write\s*$/gm) || []).length === 1 &&
+    /^    if: \$\{\{ github\.repository == 'GavinDu\/security-agent-desktop-mac' && github\.ref == 'refs\/heads\/main' \}\}$/m.test(c) &&
+    /run: bash scripts\/check-ci-checkout\.sh/.test(c) &&
+    /run: node --test scripts\/prune-verified-branches\.test\.mjs/.test(c) &&
+    /run: node scripts\/prune-verified-branches\.mjs/.test(c) &&
+    /GITHUB_TOKEN: \$\{\{ github\.token \}\}/.test(c) &&
+    !/\b(?:pull_request_target|workflow_run|schedule|repository_dispatch)\b/.test(c) &&
+    !/^\s*(?:actions|checks|deployments|issues|packages|pages|statuses|attestations|pull-requests|id-token|models)\s*:\s*write\b/m.test(c);
+}
+
 const deniedReleaseOperations = [
   /^\s*release\s*:/m,
   /\b(?:softprops\/action-gh-release|actions\/create-release|ncipollo\/release-action)\b/i,
   /\bgh\s+release\s+(?:create|upload|edit)\b/i,
   /\b(?:npm|cargo)\s+publish\b/i,
   /\b(?:tauri-apps\/tauri-action)\b/i,
-  /\b(?:contents|packages)\s*:\s*write\b/i,
+  elevatedPermissions,
   /\b(?:goreleaser|electron-builder)\s+(?:release|publish)\b/i,
 ];
 
@@ -48,6 +69,9 @@ export function auditDevelopmentDistribution(config, capabilities, workflows, ca
     }
     for (const pattern of deniedReleaseOperations) {
       if (pattern.test(entry.content)) {
+        if (pattern === elevatedPermissions && isGuardedBranchRetirementWorkflow(entry)) {
+          continue; // narrowly scoped branch-ref retirement, never distribution
+        }
         throw new Error('Release/publish operation is forbidden in developer-only CI');
       }
     }
