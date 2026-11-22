@@ -9,7 +9,8 @@ might combine the old array with a newly typed root. Native grant serialization
 does not protect read-modify-write against stale WebView input snapshots.
 
 `RootSnapshotCoordinator` owns monotonically advancing refresh generations.
-It invalidates outstanding snapshots before and after each IPC mutation,
+It invalidates outstanding snapshots on the **start** of every readback
+(not just on completion), and before and after each IPC mutation,
 accepts only the latest completed backend read when no mutation is active,
 and fails closed on the latest readback error: Grant is disabled until an
 authoritative snapshot is available. Clear Roots remains available when no

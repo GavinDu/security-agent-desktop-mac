@@ -21,7 +21,10 @@ export class RootSnapshotCoordinator {
   }
 
   beginRefresh(): number {
-    // Latest refresh wins, including concurrent readbacks.
+    // A new readback makes the earlier snapshot stale immediately. Disable
+    // additive grants until the latest authoritative read acknowledges roots.
+    // Empty-set revocation remains possible during the refresh.
+    this.confirmed = false;
     return ++this.generation;
   }
 

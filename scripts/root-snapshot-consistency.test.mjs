@@ -14,7 +14,9 @@ test('delayed pre-clear read cannot overwrite newer confirmed empty roots (#158)
   const root = new RootSnapshotCoordinator();
   assert.equal(root.applyRefresh(root.beginRefresh(), ['/previous']), true);
   const oldRefresh = root.beginRefresh();
-  assert.equal(root.startMutation(), true);
+  assert.equal(root.canWrite, false);
+  assert.equal(root.startMutation(), false);
+  assert.equal(root.startMutation(true), true);
   assert.equal(root.canWrite, false);
   root.finishMutation();
   const currentRefresh = root.beginRefresh();
@@ -32,6 +34,7 @@ test('latest-read-wins and readback failure disable stale grant actions (#158)',
   assert.equal(root.applyRefresh(old, ['/obsolete']), false);
   assert.deepEqual(root.snapshot(), ['/verified']);
   const failed = root.beginRefresh();
+  assert.equal(root.canWrite, false);
   assert.equal(root.failRefresh(failed), true);
   assert.equal(root.canWrite, false);
   assert.equal(root.startMutation(), false);
@@ -43,6 +46,22 @@ test('latest-read-wins and readback failure disable stale grant actions (#158)',
   assert.deepEqual(root.snapshot(), []);
   assert.equal(root.applyRefresh(root.beginRefresh(), ['/restored']), true);
   assert.equal(root.canWrite, true);
+});
+
+test('refresh invalidates stale additive root grant immediately, but Clear remains possible (#158)', () => {
+  const root = new RootSnapshotCoordinator();
+  assert.equal(root.applyRefresh(root.beginRefresh(), ['/old']), true);
+  const slowRefresh = root.beginRefresh();
+  assert.equal(root.canWrite, false);
+  assert.deepEqual(root.snapshot(), []);
+  assert.equal(root.startMutation(), false);
+  assert.equal(root.canRevoke, true);
+  assert.equal(root.startMutation(true), true);
+  root.finishMutation();
+  assert.equal(root.applyRefresh(slowRefresh, ['/old']), false);
+  assert.equal(root.applyRefresh(root.beginRefresh(), []), true);
+  assert.equal(root.canWrite, true);
+  assert.deepEqual(root.snapshot(), []);
 });
 
 test('readback begun during pending mutation cannot publish, failures can recover (#158)', () => {
@@ -63,6 +82,7 @@ test('trusted UI only takes new Grant roots from currently acknowledged state (#
   const update = ui.slice(ui.indexOf('async function updateRoots('), ui.indexOf("el('refresh').addEventListener"));
   assert.match(ui, /import \{ RootSnapshotCoordinator \} from '\.\.\/bridges\/root-snapshot';/);
   assert.match(refresh, /rootSnapshots.beginRefresh\(\)/);
+  assert.match(refresh, /grantRootButton.disabled = true;[\s\S]*?clearRootsButton.disabled = !rootSnapshots.canRevoke;/);
   assert.match(refresh, /rootSnapshots.applyRefresh\(rootEpoch, settings.allowed_roots\)/);
   assert.match(refresh, /rootSnapshots.failRefresh\(rootEpoch\)/);
   assert.match(update, /if \(rootWrites.inFlight \|\| !rootSnapshots.startMutation\(roots.length === 0\)\) return;/);

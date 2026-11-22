@@ -56,6 +56,10 @@ async function refreshStatus(): Promise<void> {
 async function refresh(): Promise<void> {
   const epoch = policyEpoch;
   const rootEpoch = rootSnapshots.beginRefresh();
+  // Starting a new settings read invalidates an older root snapshot now,
+  // not only when the Promise resolves. Clear remains available.
+  grantRootButton.disabled = true;
+  clearRootsButton.disabled = !rootSnapshots.canRevoke;
   try {
     const [status, tools, settings] = await Promise.all([
       connectorBridge.status(), connectorBridge.list(), connectorBridge.settings()
