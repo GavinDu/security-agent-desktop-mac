@@ -11,7 +11,8 @@ const peer = source.slice(source.indexOf("el('previewPeer').addEventListener"), 
 test('root grant failures use fixed text, never render raw rejected IPC details (#152)', () => {
   // Root writes now pass through the already-merged #154 single-flight coordinator.
   assert.match(roots, /await rootWrites\.tryWrite\(roots,/);
-  assert.match(roots, /connectorBridge\.setAllowedRoots\(nextRoots\)/);
+  assert.match(roots, /connectorBridge\.setAllowedRoots\(nextRoots, revision\)/);
+  assert.match(roots, /connectorBridge\.clearAllowedRoots\(\)/);
   assert.match(roots, /catch \{[\s\S]*?Directory permission update was not acknowledged\./);
   assert.doesNotMatch(roots, /String\s*\(\s*error\s*\)|JSON\.stringify\s*\(\s*error\s*\)|console\./);
   assert.match(roots, /el\('settingsNotice'\)\.textContent/);
