@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   verifiedCandidates,
   supersededEvidence,
+  trackedActivePRs,
   eligibleForDeletion,
   verifySupersededEvidence,
   pruneVerifiedBranches,
@@ -23,6 +24,7 @@ const pr = (candidate, mergedAt = '2026-11-21T00:00:00Z') => ({
 });
 
 test('explicit inventory preserves main and both active work branches (#162)', () => {
+  assert.deepEqual(trackedActivePRs.map(entry => entry.pr), [161, 163]);
   assert.equal(verifiedCandidates.length, 48);
   assert.equal(new Set(verifiedCandidates.map(candidate => candidate.name)).size, 48);
   assert.ok(verifiedCandidates.every(candidate => /^[0-9a-f]{40}$/.test(candidate.sha)));
