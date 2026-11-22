@@ -53,7 +53,10 @@ export function auditDevelopmentDistribution(config, capabilities, workflows, ca
     }
   }
   const native = workflows.find((entry) => entry.name === 'ci.yml');
-  if (!native || !/runs-on:\s*macos-15\b/.test(native.content) ||
+  if (!native ||
+      !/^    runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}$/m.test(native.content) ||
+      !/SELECTED_MACOS_RUNNER: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/.test(native.content) ||
+      !/run: node scripts\/check-macos-runner\.mjs/.test(native.content) ||
       !/bash scripts\/verify-macos-bundle\.sh/.test(native.content) ||
       !/actions\/upload-artifact@v4/.test(native.content) ||
       !/name:\s*unsigned-security-agent-mac/.test(native.content)) {

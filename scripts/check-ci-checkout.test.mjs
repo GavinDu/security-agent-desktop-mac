@@ -59,7 +59,8 @@ test('five required CI jobs each check the GitHub checkout SHA before building',
   assert.match(guard, /\/usr\/bin\/git rev-parse --verify HEAD/);
   assert.match(guard, /\$GITHUB_SHA/);
   assert.doesNotMatch(guard, /SOURCE_HEAD_SHA|git checkout|git reset|git fetch/);
-  assert.match(workflow, /runs-on: macos-15/);
+  assert.match(workflow, /runs-on: \$\{\{ vars\.MACOS_RUNNER_LABEL \|\| 'macos-latest' \}\}/);
+  assert.match(workflow, /node scripts\/check-macos-runner\.mjs/);
   assert.match(workflow, /bash scripts\/verify-macos-bundle\.sh/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
 });

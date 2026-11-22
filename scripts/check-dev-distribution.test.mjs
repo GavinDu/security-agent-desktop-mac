@@ -68,7 +68,10 @@ test('reject release publication, high privilege Actions and alternate publish r
 test('strict mounted DMG verification, upload and workflow discovery are required', async () => {
   const base = await baseline();
   for (const target of [
-    'runs-on: macos-15', 'bash scripts/verify-macos-bundle.sh',
+    "runs-on: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}",
+    "SELECTED_MACOS_RUNNER: ${{ vars.MACOS_RUNNER_LABEL || 'macos-latest' }}",
+    'run: node scripts/check-macos-runner.mjs',
+    'bash scripts/verify-macos-bundle.sh',
     'actions/upload-artifact@v4', 'name: unsigned-security-agent-mac',
   ]) {
     const f = structuredClone(base);
