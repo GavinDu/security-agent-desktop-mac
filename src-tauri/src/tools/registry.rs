@@ -436,8 +436,7 @@ mod tests {
         let file = root.path().join("safe.txt");
         std::fs::write(&file, "must-not-read").unwrap();
         let registry = ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
-                .unwrap(),
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
         // Deliberately simulate a writer panic while its guard is held.
