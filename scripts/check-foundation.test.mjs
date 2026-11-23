@@ -215,11 +215,36 @@ test('failed persisted root-grant change leaves live registry and UI in sync (#1
   assert.match(source, /fn persist_root_grants\(/);
   assert.match(source, /let mut staged = settings\.clone\(\)/);
   assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
-  assert.match(source, /registry\.set_roots\(roots\);\s*\*settings = staged/);
+  assert.match(source, /registry\.commit_roots_transaction\(roots, \(\) => \{/);
+  assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)/);
+  assert.match(source, /\}\)\?;\s*\*settings = staged/);
+  assert.doesNotMatch(source, /persist\(&staged\)\.map_err\([^\n]+\)\?;\s*registry\.set_roots/);
   // The native serialized helper now carries the production save callback
   // through the root-mutation mutex; do not demand direct calls from the UI.
   assert.match(source, /persist_root_grants\(\s*&mut settings,\s*&state\.registry,\s*resolved,\s*persist\s*\)/);
   assert.match(source, /commit_serialized_roots\(\s*&\*state,\s*roots,[\s\S]*?AgentSettings::save,\s*\)/);
   assert.match(source, /fn failed_grant_write_preserves_live_authorization_and_in_memory_settings/);
   assert.match(source, /fn successful_grant_write_replaces_live_roots_without_partial_state/);
+});
+
+test('poisoned registry fails closed before disk persistence and never panics in read authorization (#171)', async () => {
+  const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  const commits = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
+  const mutation = source.slice(source.indexOf('pub(crate) fn commit_roots_transaction('),
+    source.indexOf('pub fn set_roots('));
+  const writer = mutation.indexOf('.write()');
+  const save = mutation.indexOf('persist()?');
+  const publish = mutation.indexOf('*current = roots');
+  assert.ok(writer >= 0 && save > writer && publish > save,
+    'healthy registry writer must be acquired before durable save and live publication');
+  assert.match(mutation, /map_err\(\|_\| "Directory permission registry unavailable"/);
+  assert.match(source, /fn poisoned_root_registry_fails_closed_without_panicking_or_saving/);
+  assert.match(commits, /fn poisoned_registry_writer_denies_root_save_before_any_disk_change/);
+  const lease = source.slice(source.indexOf('fn scoped_read_with_lease('),
+    source.indexOf('fn allowed_path('));
+  assert.match(lease, /\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
+  const auth = source.slice(source.indexOf('fn allowed_path('), source.indexOf('fn reauthorize_after_approval('));
+  assert.match(auth, /\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
+  assert.doesNotMatch(mutation, /expect\(|unwrap\(/);
+  assert.doesNotMatch(lease, /expect\("roots lock poisoned"\)/);
 });
