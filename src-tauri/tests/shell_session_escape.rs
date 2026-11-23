@@ -66,7 +66,10 @@ fn escaped_session_fixture_child() {
         .open(heartbeat)
         .expect("fixture heartbeat cannot be created");
 
-    loop {
+    // A hard-killed test runner cannot run the parent's Drop cleanup.
+    // Self-expire so even that failure cannot leave an endless test daemon.
+    let self_expiry = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < self_expiry {
         output.write_all(b"x").expect("heartbeat write failed");
         output.flush().expect("heartbeat flush failed");
         thread::sleep(Duration::from_millis(25));
