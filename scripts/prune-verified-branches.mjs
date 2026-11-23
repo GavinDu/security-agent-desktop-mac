@@ -360,6 +360,7 @@ export const supersededEvidence = {
 export const trackedActivePRs = [
   { name: 'security/158-stale-root-snapshot-fence', pr: 161 },
   { name: 'security/156-native-root-mutation-order', pr: 163 },
+  { name: 'security/164-pinned-read-revocation-lease', pr: 165 },
 ];
 
 export function eligibleForDeletion(candidate, branch, pr, activeBranches, evidenceSatisfied) {
