@@ -63,7 +63,7 @@ test('accepted root commit is moved off the Tokio executor, retaining the CAS gu
 });
 
 test('fair root writer intent queues after validated CAS before accepted blocking publication (#177)', () => {
-  assert.match(native, /let root_write_admission = tokio::time::timeout\\([\\s\\S]*?state\\.registry\\.reserve_root_publication\\(\\),[\\s\\S]*?\\)\\s*\\.await/);
+  assert.match(native, /let root_write_admission = tokio::time::timeout\([\s\S]*?state\.registry\.reserve_root_publication\(\),[\s\S]*?\)\s*\.await/);
   assert.match(native, /let _root_write_admission = root_write_admission/);
   assert.match(registry, /async fn queued_root_writer_precedes_later_admitted_file_read\(\)/);
   assert.match(registry, /async fn scoped_read_slots_bound_active_and_waiting_workers\(\)/);
