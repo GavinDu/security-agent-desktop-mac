@@ -105,6 +105,8 @@ fn persist_root_grants(
 // can still retain its old granted FD; never acknowledge Clear as committed
 // unless the accepted worker actually completes its durable publication.
 const ROOT_PUBLICATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
+// Validation can block on remote filesystems before writer admission begins.
+const ROOT_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
@@ -124,6 +126,7 @@ where
         validate,
         persist,
         ROOT_PUBLICATION_ADMISSION_TIMEOUT,
+        ROOT_VALIDATION_TIMEOUT,
     )
     .await
 }
@@ -143,6 +146,7 @@ async fn commit_serialized_roots_with_timeout<V, P>(
     validate: V,
     persist: P,
     max_admission_wait: Duration,
+    max_validation_wait: Duration,
 ) -> Result<(), String>
 where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
@@ -160,9 +164,29 @@ where
     }
     // Only the dedicated empty-set revocation call may omit a revision.
     revision.ensure_can_advance()?;
-    let resolved = tokio::task::spawn_blocking(move || validate(roots))
-        .await
-        .map_err(|_| "Cannot validate approved roots".to_owned())??;
+    // Reserve capacity BEFORE scheduling a potentially uninterruptible native
+    // directory validation. Empty Clear bypasses Grant capacity, preserving
+    // the owner's ability to revoke when remote-path validators are stuck.
+    let validation_permit = if roots.is_empty() {
+        None
+    } else {
+        Some(
+            Arc::clone(&state.root_validation_slots)
+                .try_acquire_owned()
+                .map_err(|_| "Directory validation capacity exceeded".to_owned())?,
+        )
+    };
+    let resolved = tokio::time::timeout(
+        max_validation_wait,
+        tokio::task::spawn_blocking(move || {
+            // A dropped JoinHandle must NOT free this slot while OS I/O runs.
+            let _validation_permit = validation_permit;
+            validate(roots)
+        }),
+    )
+    .await
+    .map_err(|_| "Directory permission validation not committed; retry".to_owned())?
+    .map_err(|_| "Cannot validate approved roots".to_owned())??;
 
     // Reserve fair writer intent after successful validation but BEFORE
     // accepting commit ownership. If the caller cancels while this awaits
@@ -303,6 +327,7 @@ mod tests {
                 Ok(())
             },
             Duration::from_millis(35),
+            ROOT_VALIDATION_TIMEOUT,
         )
         .await
         .unwrap_err();
@@ -335,6 +360,7 @@ mod tests {
                     Ok(())
                 },
                 Duration::from_secs(1),
+                ROOT_VALIDATION_TIMEOUT,
             ),
         )
         .await
@@ -343,6 +369,198 @@ mod tests {
         assert_eq!(persist_count.load(Ordering::SeqCst), 1);
         assert!(state.settings.lock().await.allowed_roots.is_empty());
         assert_ne!(state.root_mutations.lock().await.token(), original_revision);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_native_grant_validation_times_out_but_clear_remains_authoritative() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-validation-timeout-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path.clone()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let old_revision = state.root_mutations.lock().await.token();
+        let persist_count = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let blocked_state = Arc::clone(&state);
+        let blocked_persist = Arc::clone(&persist_count);
+        let attempted = tokio::spawn(async move {
+            commit_serialized_roots_with_timeout(
+                &blocked_state,
+                vec![path],
+                Some(old_revision),
+                move |roots| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Fixture validation expired".to_owned())?;
+                    ToolRegistry::canonical_roots(&roots)
+                },
+                move |_| {
+                    blocked_persist.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                Duration::from_secs(1),
+                Duration::from_millis(35),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempted.await.unwrap().unwrap_err(),
+            "Directory permission validation not committed; retry"
+        );
+        assert_eq!(persist_count.load(Ordering::SeqCst), 0);
+
+        // The timed-out validation is still a live blocking worker, but it
+        // cannot retain the root-revision mutex or publish an old grant.
+        assert_eq!(
+            state.root_validation_slots.available_permits(),
+            crate::agent::MAX_ROOT_VALIDATION_WORKERS - 1
+        );
+        let clear_persist = Arc::clone(&persist_count);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            commit_serialized_roots_with_timeout(
+                &state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                move |_| {
+                    clear_persist.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(persist_count.load(Ordering::SeqCst), 1);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        let new_revision = state.root_mutations.lock().await.token();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.root_validation_slots.available_permits()
+                != crate::agent::MAX_ROOT_VALIDATION_WORKERS
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert_eq!(state.root_mutations.lock().await.token(), new_revision);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abandoned_nonempty_root_validators_keep_worker_slots_until_exit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-validation-capacity-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let revision = state.root_mutations.lock().await.token();
+        let started_count = Arc::new(AtomicUsize::new(0));
+        let mut releases = Vec::new();
+
+        for _ in 0..crate::agent::MAX_ROOT_VALIDATION_WORKERS {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            releases.push(release_tx);
+            let state = Arc::clone(&state);
+            let path = path.clone();
+            let revision = revision.clone();
+            let starts = Arc::clone(&started_count);
+            let request = tokio::spawn(async move {
+                commit_serialized_roots_with_timeout(
+                    &state,
+                    vec![path],
+                    Some(revision),
+                    move |roots| {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                        let _ = started_tx.send(());
+                        release_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(|_| "Fixture validation expired".to_owned())?;
+                        ToolRegistry::canonical_roots(&roots)
+                    },
+                    |_| panic!("timed-out validator must never persist"),
+                    Duration::from_secs(1),
+                    Duration::from_millis(35),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                request.await.unwrap().unwrap_err(),
+                "Directory permission validation not committed; retry"
+            );
+        }
+        assert_eq!(started_count.load(Ordering::SeqCst), 4);
+        assert_eq!(state.root_validation_slots.available_permits(), 0);
+        let denied = commit_serialized_roots_with_timeout(
+            &state,
+            vec![path],
+            Some(revision),
+            |_| panic!("capacity exhaustion must prevent worker start"),
+            |_| panic!("capacity exhaustion must prevent persistence"),
+            Duration::from_secs(1),
+            Duration::from_millis(35),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory validation capacity exceeded");
+        assert_eq!(started_count.load(Ordering::SeqCst), 4);
+
+        // Empty Clear cannot be blocked by saturated grant-worker permits.
+        commit_serialized_roots_with_timeout(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Ok(()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let revoked_revision = state.root_mutations.lock().await.token();
+
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.root_validation_slots.available_permits()
+                != crate::agent::MAX_ROOT_VALIDATION_WORKERS
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.root_mutations.lock().await.token(), revoked_revision);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
     }
 
     #[tokio::test]
