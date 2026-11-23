@@ -89,13 +89,17 @@ fn bind_at(path: &Path) -> Result<UnixListener, String> {
     Ok(listener)
 }
 
+fn allowed_peer_uid(peer_uid: libc::uid_t, owner_uid: libc::uid_t) -> bool {
+    owner_uid != 0 && peer_uid == owner_uid
+}
+
 fn peer_is_same_user(stream: &UnixStream) -> bool {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
     // SAFETY: the accepted stream owns a valid socket FD; kernel supplies
     // credentials, not an untrusted claim in the request body.
     let validated = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) == 0 };
-    validated && uid == unsafe { libc::geteuid() }
+    validated && allowed_peer_uid(uid, unsafe { libc::geteuid() })
 }
 
 fn exact_focus_request(stream: &mut UnixStream) -> bool {
@@ -164,6 +168,15 @@ mod tests {
 
     fn checked_temp_path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("desktop-focus.sock")
+    }
+
+    #[test]
+    fn rejects_foreign_or_root_uid_even_with_matching_socket_bytes() {
+        assert!(allowed_peer_uid(501, 501));
+        assert!(!allowed_peer_uid(502, 501));
+        assert!(!allowed_peer_uid(0, 501));
+        assert!(!allowed_peer_uid(0, 0));
+        assert!(!allowed_peer_uid(501, 0));
     }
 
     #[test]
