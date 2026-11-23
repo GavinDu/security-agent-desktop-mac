@@ -8,6 +8,7 @@ test('native negative test proves setsid escape without orphaning either child (
   assert.match(fixture, /fn process_group_kill_does_not_contain_a_setsid_descendant\(/);
   assert.match(fixture, /fn escaped_session_fixture_child\(/);
   assert.match(fixture, /libc::setsid\(\)/);
+  assert.match(fixture, /let self_expiry = Instant::now\(\) \+ Duration::from_secs\(15\)/);
   assert.match(fixture, /\.process_group\(0\)/);
   assert.match(fixture, /\.process_group\(group_id\)/);
   assert.match(fixture, /libc::kill\(-group_id, libc::SIGKILL\)/);
