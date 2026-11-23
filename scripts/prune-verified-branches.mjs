@@ -424,7 +424,13 @@ export async function pruneVerifiedBranches(env = process.env, api = request, re
     throw new Error('Ref or PR pagination needed; refusing incomplete cleanup snapshot');
   }
   const byName = new Map(branches.map(branch => [branch.name, branch]));
-  const activeBranches = new Set(openPRs.filter(pr => pr.head?.repo?.full_name === repo).map(pr => pr.head.ref));
+  // An open stacked PR may use a merged feature branch as its BASE even
+  // after the parent PR merges. Deleting that base ref would break the active
+  // child PR, so preserve both same-repo heads and every open PR base.
+  const activeBranches = new Set(openPRs.flatMap(pr => [
+    pr.base?.ref,
+    ...(pr.head?.repo?.full_name === repo ? [pr.head.ref] : []),
+  ]).filter(Boolean));
   let deleted = 0;
   let skipped = 0;
   for (const candidate of verifiedCandidates) {
