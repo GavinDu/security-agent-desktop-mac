@@ -10,7 +10,10 @@ test('production Keychain startup errors discard raw backend diagnostics (#109)'
   assert.match(source, /\.map_err\(\|_\| redacted_keychain_failure\(KeychainFailureKind::Write\)\)/);
   assert.match(source, /Err\(keyring::Error::NoEntry\) => \{\}/);
   assert.match(source, /OsRng\.fill_bytes\(&mut entropy\)/);
-  assert.match(source, /Refusing a short existing API token in Keychain/);
+  // Existing token readback must fail closed on ANY noncanonical representation,
+  // not only a short string; never echo the stored value or regenerate it.
+  assert.match(source, /Invalid existing API token in Keychain/);
+  assert.match(source, /Ok\(token\) if canonical_api_token\(&token\) => return Ok\(token\)/);
   assert.match(source, /fn keychain_backend_failure_messages_are_fixed_and_secret_free/);
   assert.doesNotMatch(source, /Keychain (unavailable|read failed|write failed): \{/);
 });
