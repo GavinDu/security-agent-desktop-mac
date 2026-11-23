@@ -438,7 +438,7 @@ mod tests {
         ));
         headers.insert(
             header::HOST,
-            HeaderValue::from_bytes(b"\\xff").unwrap(),
+            HeaderValue::from_bytes(&[0xff]).unwrap(),
         );
         assert!(!host_authority_allowed(&headers, &relative, local));
     }
