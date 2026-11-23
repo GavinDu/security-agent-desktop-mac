@@ -67,9 +67,12 @@ impl ApprovalGate {
     }
 
     pub fn policy(&self, tool: &str) -> Policy {
-        self.policies
-            .read()
-            .expect("policy lock poisoned")
+        // Poisoning represents an unknown policy state; never panic and
+        // certainly never fall back to filesystem Auto on this path.
+        let Ok(policies) = self.policies.read() else {
+            return Policy::Disable;
+        };
+        policies
             .get(tool)
             .copied()
             .unwrap_or(if tool == "filesystem__read_file" {
@@ -79,11 +82,31 @@ impl ApprovalGate {
             })
     }
 
-    pub fn set_policy(&self, tool: &str, policy: Policy) {
-        self.policies
+    /// Acquire the live policy writer BEFORE durable persistence, so a
+    /// poisoned writer cannot leave settings.json ahead of live authority.
+    /// No async await is allowed in this transaction. Slow filesystem writes
+    /// can still block readers; do not treat this as bounded revocation.
+    pub(crate) fn commit_policy_transaction(
+        &self,
+        tool: &str,
+        policy: Policy,
+        persist: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut current = self
+            .policies
             .write()
-            .expect("policy lock poisoned")
-            .insert(tool.to_owned(), policy);
+            .map_err(|_| "Approval policy registry unavailable".to_owned())?;
+        persist()?;
+        current.insert(tool.to_owned(), policy);
+        Ok(())
+    }
+
+    // Test-only hook. All production policy mutations must persist through
+    // commit_policy_transaction to preserve the durable/live ordering.
+    #[cfg(test)]
+    pub fn set_policy(&self, tool: &str, policy: Policy) {
+        self.commit_policy_transaction(tool, policy, || Ok(()))
+            .expect("test policy mutation failed");
     }
 
     pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
@@ -155,6 +178,59 @@ mod tests {
         assert_eq!(gate.policy("filesystem__read_file"), Policy::Auto);
         gate.set_policy("bash__run", Policy::Disable);
         assert!(gate.require("bash__run", "dangerous").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn poisoned_policy_writer_disables_discovery_and_denies_invocation() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let poisoned = gate.clone();
+        let worker = std::thread::spawn(move || {
+            let _lock = poisoned.policies.write().unwrap();
+            panic!("poison fixture: policy writer");
+        });
+        assert!(worker.join().is_err());
+
+        assert_eq!(gate.policy("filesystem__read_file"), Policy::Disable);
+        assert_eq!(gate.policy("bash__run"), Policy::Disable);
+        assert_eq!(
+            gate.require("filesystem__read_file", "private read")
+                .await
+                .unwrap_err(),
+            "Tool disabled by policy"
+        );
+
+        let saved = std::sync::atomic::AtomicBool::new(false);
+        let err = gate
+            .commit_policy_transaction("bash__run", Policy::Auto, || {
+                saved.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(err, "Approval policy registry unavailable");
+        assert!(!saved.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn accepted_policy_save_precedes_live_publish_and_failure_preserves_old_value() {
+        let mut policies = HashMap::new();
+        policies.insert("bash__run".into(), Policy::Ask);
+        let gate = ApprovalGate::new(policies);
+
+        let failure = gate
+            .commit_policy_transaction("bash__run", Policy::Auto, || {
+                Err("hidden filesystem failure".into())
+            });
+        assert_eq!(failure.unwrap_err(), "hidden filesystem failure");
+        assert_eq!(gate.policy("bash__run"), Policy::Ask);
+
+        let mut saved = false;
+        gate.commit_policy_transaction("bash__run", Policy::Disable, || {
+            saved = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(saved);
+        assert_eq!(gate.policy("bash__run"), Policy::Disable);
     }
 
     #[tokio::test]
