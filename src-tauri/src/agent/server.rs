@@ -97,7 +97,11 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
 /// even examining bearer credentials. Literal matching deliberately performs
 /// no DNS lookup, proxy inference or attacker-controlled canonicalization.
 /// Direct in-process Router tests can omit Host; deployed HTTP/1.1 requires it.
-fn host_authority_allowed(headers: &HeaderMap, requested: &axum::http::Uri, bind: SocketAddr) -> bool {
+fn host_authority_allowed(
+    headers: &HeaderMap,
+    requested: &axum::http::Uri,
+    bind: SocketAddr,
+) -> bool {
     let mut hosts = headers.get_all(header::HOST).iter();
     let one_header = match hosts.next() {
         Some(header) => {
@@ -396,7 +400,10 @@ mod tests {
             "10.8.0.1:8080",
         ] {
             headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
-            assert!(!host_authority_allowed(&headers, &relative, local), "{host}");
+            assert!(
+                !host_authority_allowed(&headers, &relative, local),
+                "{host}"
+            );
         }
         headers.clear();
         headers.append(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
@@ -445,10 +452,9 @@ mod tests {
                 .header("x-forwarded-for", "127.0.0.1")
                 .body(Body::empty())
                 .unwrap();
-            wrong.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-                [127, 0, 0, 1],
-                44000,
-            ))));
+            wrong
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44000))));
             let denied = app.clone().oneshot(wrong).await.unwrap();
             assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{method} {path}");
             let bytes = denied.into_body().collect().await.unwrap().to_bytes();
@@ -463,10 +469,9 @@ mod tests {
                 .header("authorization", "Bearer host-header-test-token")
                 .body(Body::empty())
                 .unwrap();
-            valid.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-                [127, 0, 0, 1],
-                44001,
-            ))));
+            valid
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44001))));
             let accepted = app.clone().oneshot(valid).await.unwrap();
             assert_ne!(accepted.status(), StatusCode::FORBIDDEN, "{method} {path}");
         }
@@ -476,11 +481,13 @@ mod tests {
             .header("host", "127.0.0.1:8080")
             .body(Body::empty())
             .unwrap();
-        remote.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-            [192, 168, 4, 2],
-            44002,
-        ))));
-        assert_eq!(app.oneshot(remote).await.unwrap().status(), StatusCode::FORBIDDEN);
+        remote
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 4, 2], 44002))));
+        assert_eq!(
+            app.oneshot(remote).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
