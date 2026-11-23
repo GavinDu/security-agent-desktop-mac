@@ -17,8 +17,9 @@ use std::{
 use tauri::Manager;
 
 const FOCUS_REQUEST: u8 = b'F';
+const FOCUS_ACCEPTED: u8 = b'A';
 const MAX_REQUEST_BYTES: u64 = 2;
-const PEER_READ_DEADLINE: Duration = Duration::from_millis(250);
+const PEER_READ_DEADLINE: Duration = Duration::from_millis(750);
 
 fn activation_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Home directory unavailable")?;
@@ -123,10 +124,21 @@ fn request_at(path: &Path) -> Result<(), String> {
         UnixStream::connect(path).map_err(|_| "Existing desktop activation unavailable")?;
     peer.set_write_timeout(Some(PEER_READ_DEADLINE))
         .map_err(|_| "Existing desktop activation unavailable")?;
+    peer.set_read_timeout(Some(PEER_READ_DEADLINE))
+        .map_err(|_| "Existing desktop activation unavailable")?;
     peer.write_all(&[FOCUS_REQUEST])
         .map_err(|_| "Existing desktop activation unavailable")?;
+    // A one-way write followed by immediate close can reset a pending AF_UNIX
+    // stream on macOS. Keep the client FD alive until the primary has read
+    // and accepted the request; an ACK means queued, not necessarily focused.
     peer.shutdown(std::net::Shutdown::Write)
         .map_err(|_| "Existing desktop activation unavailable")?;
+    let mut acknowledged = [0_u8; 1];
+    peer.read_exact(&mut acknowledged)
+        .map_err(|_| "Existing desktop activation unavailable")?;
+    if acknowledged[0] != FOCUS_ACCEPTED {
+        return Err("Existing desktop activation refused".into());
+    }
     Ok(())
 }
 
@@ -154,7 +166,15 @@ pub(crate) fn install(app: &tauri::AppHandle) -> Result<(), String> {
                 let on_main = app.clone();
                 // AppKit focus must run on Tauri's main thread; the socket
                 // thread must never manufacture another window or invoke IPC.
-                let _ = app.run_on_main_thread(move || crate::tray::show_main(&on_main));
+                if app
+                    .run_on_main_thread(move || crate::tray::show_main(&on_main))
+                    .is_ok()
+                {
+                    // The sender must not close its socket until the primary
+                    // accepts it, otherwise macOS may reset the unread stream.
+                    // ACK confirms queue admission only, not visible focus.
+                    let _ = peer.write_all(&[FOCUS_ACCEPTED]);
+                }
             }
         })
         .map_err(|_| "Cannot start desktop activation listener".to_owned())?;
@@ -231,10 +251,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = checked_temp_path(&dir);
         let listener = bind_at(&path).unwrap();
-        request_at(&path).unwrap();
+        let sender_path = path.clone();
+        let sender = std::thread::spawn(move || request_at(&sender_path));
         let (mut peer, _) = listener.accept().unwrap();
         assert!(peer_is_same_user(&peer));
         assert!(exact_focus_request(&mut peer));
+        peer.write_all(&[FOCUS_ACCEPTED]).unwrap();
+        assert!(sender.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn refuses_invalid_or_missing_primary_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = checked_temp_path(&dir);
+        let listener = bind_at(&path).unwrap();
+        let sender_path = path.clone();
+        let sender = std::thread::spawn(move || request_at(&sender_path));
+        let (mut peer, _) = listener.accept().unwrap();
+        assert!(exact_focus_request(&mut peer));
+        peer.write_all(b"X").unwrap();
+        assert!(sender.join().unwrap().is_err());
     }
 
     #[test]
