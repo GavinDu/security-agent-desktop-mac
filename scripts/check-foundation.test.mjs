@@ -231,7 +231,7 @@ test('poisoned registry fails closed before disk persistence and never panics in
   const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
   const commits = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
   const mutation = source.slice(source.indexOf('pub(crate) fn commit_roots_transaction('),
-    source.indexOf('pub fn set_roots('));
+    source.indexOf('fn set_roots(', source.indexOf('pub(crate) fn commit_roots_transaction(')));
   const writer = mutation.indexOf('.write()');
   const save = mutation.indexOf('persist()?');
   const publish = mutation.indexOf('*current = roots');
