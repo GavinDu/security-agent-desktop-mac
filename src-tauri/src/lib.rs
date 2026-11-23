@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod activation;
 mod agent;
 mod app;
 mod navigation;
