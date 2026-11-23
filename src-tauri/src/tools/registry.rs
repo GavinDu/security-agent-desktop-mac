@@ -291,10 +291,7 @@ impl ToolRegistry {
     // production native changes enter through the fair accepted publication
     // gate in commit_serialized_roots.
     #[cfg(test)]
-    fn set_roots(
-        &self,
-        roots: Vec<crate::tools::pinned_read::GrantedRoot>,
-    ) -> Result<(), String> {
+    fn set_roots(&self, roots: Vec<crate::tools::pinned_read::GrantedRoot>) -> Result<(), String> {
         self.commit_roots_transaction(roots, || Ok(()))
     }
 
