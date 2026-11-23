@@ -14,12 +14,15 @@ test('all authorized native root commands acquire one mutation gate before block
   assert.match(state, /root_mutations:\s*Arc::new\(Mutex::new\(RootGrantRevision::new\(\)\)\)/);
   const locked = native.indexOf('Arc::clone(&state.root_mutations).lock_owned().await');
   const validator = native.indexOf('tokio::task::spawn_blocking(move || validate(roots))');
-  const accepted = native.indexOf('tokio::task::spawn_blocking(move || {', validator);
+  const fairWriter = native.indexOf('state.registry.reserve_root_publication().await', validator);
+  const accepted = native.indexOf('tokio::task::spawn_blocking(move || {', fairWriter);
+  const writerPermit = native.indexOf('let _root_write_admission = root_write_admission;', accepted);
   const settings = native.indexOf('state.settings.blocking_lock()', accepted);
   const published = native.indexOf('persist_root_grants(', accepted);
   const advanced = native.indexOf('revision.advance()', published);
-  assert.ok(locked > 0 && validator > locked && accepted > validator &&
-    settings > accepted && published > settings && advanced > published,
+  assert.ok(locked > 0 && validator > locked && fairWriter > validator &&
+    accepted > fairWriter && writerPermit > accepted && settings > writerPermit &&
+    published > settings && advanced > published,
     'native arrival-order gate must enter cancellable validation, then owned accepted commit on blocking worker');
   assert.match(native, /move \|\| validate\(roots\)/);
   assert.match(native, /\.map_err\(\|_\| "Cannot validate approved roots"\.to_owned\(\)\)\?\?/);
@@ -50,10 +53,17 @@ test('native async fixture proves first validated write cannot be overtaken by l
 
 test('accepted root commit is moved off the Tokio executor, retaining the CAS guard across cancellation (#173)', () => {
   assert.match(native, /Arc::clone\(&state\.root_mutations\)\.lock_owned\(\)\.await/);
-  assert.match(native, /tokio::task::spawn_blocking\(move \|\| \{\s*let mut settings = state\.settings\.blocking_lock\(\)/);
+  assert.match(native, /tokio::task::spawn_blocking\(move \|\| \{\s*let _root_write_admission = root_write_admission;\s*let mut settings = state\.settings\.blocking_lock\(\)/);
   assert.match(native, /persist_root_grants\(&mut settings, &state\.registry, resolved, persist\)\?/);
   assert.match(native, /revision\.advance\(\);\s*Ok::<\(\), String>\(\(\)\)/);
   assert.doesNotMatch(native, /let mut settings = state\.settings\.lock\(\)\.await/);
   assert.match(source, /let mut readback = tokio::spawn\(async move \{/);
   assert.match(source, /readback must await the accepted commit/);
+});
+
+test('fair root writer intent queues after validated CAS before accepted blocking publication (#177)', () => {
+  assert.match(native, /let root_write_admission = state\.registry\.reserve_root_publication\(\)\.await/);
+  assert.match(native, /let _root_write_admission = root_write_admission/);
+  assert.match(source, /async fn queued_root_writer_precedes_later_admitted_file_read\(\)/);
+  assert.match(source, /async fn scoped_read_slots_bound_active_and_waiting_workers\(\)/);
 });
