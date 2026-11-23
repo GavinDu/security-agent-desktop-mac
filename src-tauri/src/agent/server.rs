@@ -436,10 +436,7 @@ mod tests {
             &"http://localhost:8080/health".parse().unwrap(),
             local,
         ));
-        headers.insert(
-            header::HOST,
-            HeaderValue::from_bytes(&[0xff]).unwrap(),
-        );
+        headers.insert(header::HOST, HeaderValue::from_bytes(&[0xff]).unwrap());
         assert!(!host_authority_allowed(&headers, &relative, local));
     }
 
