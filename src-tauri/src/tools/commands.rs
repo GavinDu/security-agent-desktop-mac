@@ -136,12 +136,15 @@ where
         .await
         .map_err(|_| "Cannot validate approved roots".to_owned())??;
 
-    // Explicit COMMIT ACCEPTANCE boundary: this worker now owns the revision
-    // guard even if the Tauri/HTTP requester is canceled. No other writer
-    // can overtake it, and no Tokio executor thread waits for the registry
-    // writer or performs synchronous settings I/O.
+    // Reserve fair writer intent after successful validation but BEFORE
+    // accepting commit ownership. If the caller cancels while this awaits
+    // older FD reads, no grant is published; pending writers block new reads.
+    let root_write_admission = state.registry.reserve_root_publication().await;
+    // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
+    // fair write permit. Cancellation cannot cut save/live publication apart.
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || {
+        let _root_write_admission = root_write_admission;
         let mut settings = state.settings.blocking_lock();
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
         // No await/cancellation point between save, live publish and CAS.
