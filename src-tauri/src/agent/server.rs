@@ -116,10 +116,15 @@ fn host_authority_allowed(
         None => None,
     };
     // HTTP absolute-form URIs have their own potentially attacker-controlled
-    // authority. Require that it is independently valid as well.
+    // authority. Independently validate it AND reject Host/URI disagreement,
+    // even if both would otherwise be independently permitted aliases.
     let authority = requested.authority().map(|a| a.as_str());
-    if authority.is_some_and(|value| !matches_bind_authority(value, bind)) {
-        return false;
+    if let Some(value) = authority {
+        if !matches_bind_authority(value, bind)
+            || one_header.is_some_and(|host| !host.eq_ignore_ascii_case(value))
+        {
+            return false;
+        }
     }
     one_header.is_none_or(|value| matches_bind_authority(value, bind))
 }
@@ -426,6 +431,16 @@ mod tests {
             &"http://127.0.0.1:8080/health".parse().unwrap(),
             local,
         ));
+        assert!(!host_authority_allowed(
+            &headers,
+            &"http://localhost:8080/health".parse().unwrap(),
+            local,
+        ));
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_bytes(b"\\xff").unwrap(),
+        );
+        assert!(!host_authority_allowed(&headers, &relative, local));
     }
 
     #[tokio::test]
