@@ -537,8 +537,7 @@ mod tests {
         let file = root.path().join("safe.txt");
         std::fs::write(&file, "approved-content").unwrap();
         let registry = Arc::new(ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
-                .unwrap(),
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
         ));
         let roots = Arc::clone(&registry.roots);
@@ -566,7 +565,9 @@ mod tests {
             writer_registry.set_roots(Vec::new());
             revoked_tx.send(()).unwrap();
         });
-        writer_started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        writer_started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
         assert!(
             revoked_rx.recv_timeout(Duration::from_millis(80)).is_err(),
             "a root revoke cannot report success before the old read releases its lease"
