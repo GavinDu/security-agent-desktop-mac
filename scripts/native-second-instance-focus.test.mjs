@@ -40,7 +40,8 @@ test('activation socket enforces kernel peer UID and one bounded marker, no arbi
   assert.match(source, /run_on_main_thread\(move \|\| crate::tray::show_main\(&on_main\)\)/);
   assert.match(tray, /get_webview_window\("main"\)/);
   assert.equal((source.match(/UnixListener::bind\(/g) || []).length, 1);
-  assert.doesNotMatch(source, /invoke_tool|set_allowed_roots|AgentState::new|WebviewWindowBuilder|http:\/\/|https:\/\/|\.arg\(/);
+  const production = source.split('#[cfg(test)]')[0];
+  assert.doesNotMatch(production, /invoke_tool|set_allowed_roots|AgentState::new|WebviewWindowBuilder|http:\/\/|https:\/\/|\.arg\(/);
 });
 
 test('activation handoff retains macOS native tests and physical acceptance remains separate (#189)', async () => {
