@@ -23,6 +23,8 @@ use tokio::{
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 // Fail fast before a request can monopolize a blocking filesystem worker.
 const MAX_ADMITTED_FILE_READS: usize = 32;
+// Metadata syscalls may block on network mounts even before read admission.
+const MAX_ADMITTED_PATH_PREFLIGHTS: usize = 16;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
 
 #[cfg(unix)]
@@ -244,6 +246,7 @@ pub struct ToolRegistry {
     // blocking FD read or the accepted native grant save/publication.
     root_admission: Arc<AsyncRwLock<()>>,
     read_slots: Arc<Semaphore>,
+    path_preflight_slots: Arc<Semaphore>,
     // Private process-local monotonic grant generation, not a caller-supplied
     // revision token. Used to reject already-revoked completed read results.
     root_generation: AtomicU64,
@@ -259,6 +262,7 @@ impl ToolRegistry {
             roots: Arc::new(RwLock::new(roots)),
             root_admission: Arc::new(AsyncRwLock::new(())),
             read_slots: Arc::new(Semaphore::new(MAX_ADMITTED_FILE_READS)),
+            path_preflight_slots: Arc::new(Semaphore::new(MAX_ADMITTED_PATH_PREFLIGHTS)),
             root_generation: AtomicU64::new(0),
             gate,
         }
@@ -364,19 +368,21 @@ impl ToolRegistry {
         Err("Path outside granted roots".into())
     }
 
-    fn allowed_path(&self, requested: &Path) -> Result<PathBuf, String> {
+    // Do all filesystem metadata and path resolution on a blocking worker,
+    // never on the Tokio executor. The admission try_read is deliberately
+    // short-lived and rejects preflights while Clear/Grant is waiting.
+    fn allowed_path_against(
+        roots: &RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>,
+        root_admission: &AsyncRwLock<()>,
+        requested: &Path,
+    ) -> Result<PathBuf, String> {
         let resolved = requested
             .canonicalize()
             .map_err(|_| "Requested file path is inaccessible".to_string())?;
-        // Do not let newly arriving authorization checks continually
-        // reacquire the synchronous roots lock while a writer is pending.
-        // Never retain this short preflight guard across the Ask await.
-        let _preflight = self
-            .root_admission
+        let _preflight = root_admission
             .try_read()
             .map_err(|_| "Directory permission update pending".to_owned())?;
-        let permitted = self
-            .roots
+        let permitted = roots
             .read()
             .map_err(|_| "Directory permission registry unavailable".to_owned())?
             .iter()
@@ -387,17 +393,64 @@ impl ToolRegistry {
         Ok(resolved)
     }
 
-    // Approval may wait 60 seconds. A former grant or Ask decision is not
-    // a capability that survives a newer explicit disable/root revocation.
-    // This recheck is intentionally after the await and before execution.
-    // An already-running tool needs a separate revocation supervisor (#34).
-    fn reauthorize_after_approval(&self, tool: &str, approved: &Path) -> Result<(), String> {
+    // Retained only for deterministic sync authorization regression tests.
+    #[cfg(test)]
+    fn allowed_path(&self, requested: &Path) -> Result<PathBuf, String> {
+        Self::allowed_path_against(&self.roots, &self.root_admission, requested)
+    }
+
+    // The slot is moved into the blocking closure, rather than owned by the
+    // request future. A dropped caller cannot free capacity while its kernel
+    // metadata syscall is still in progress. Bounded admission also avoids
+    // launching unbounded tasks into Tokio's global blocking worker pool.
+    async fn offload_path_check(
+        &self,
+        check: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+    ) -> Result<PathBuf, String> {
+        let slot = Arc::clone(&self.path_preflight_slots)
+            .try_acquire_owned()
+            .map_err(|_| "Approved path check capacity exceeded".to_owned())?;
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            check()
+        })
+        .await
+        .map_err(|_| "Approved path check task failed".to_owned())?
+    }
+
+    async fn allowed_path_for_tool(
+        &self,
+        requested: PathBuf,
+        require_directory: bool,
+    ) -> Result<PathBuf, String> {
+        let roots = Arc::clone(&self.roots);
+        let root_admission = Arc::clone(&self.root_admission);
+        self.offload_path_check(move || {
+            let resolved = Self::allowed_path_against(&roots, &root_admission, &requested)?;
+            // Directory metadata is also potentially blocking on slow mounts.
+            if require_directory && !resolved.is_dir() {
+                return Err("cwd must be a directory".into());
+            }
+            Ok(resolved)
+        })
+        .await
+    }
+
+    // Ask may wait 60 seconds. Recheck live grant and policy AFTER the wait
+    // using a second independent bounded worker; do not hold an admission
+    // permit or registry guard over interactive approval.
+    async fn reauthorize_after_approval(&self, tool: &str, approved: &Path) -> Result<(), String> {
         if self.gate.policy(tool) == Policy::Disable {
             return Err("Tool disabled by policy".into());
         }
-        let current = self.allowed_path(approved)?;
+        let current = self
+            .allowed_path_for_tool(approved.to_path_buf(), tool == "bash__run")
+            .await?;
         if current != approved {
             return Err("Approved path changed during authorization".into());
+        }
+        if self.gate.policy(tool) == Policy::Disable {
+            return Err("Tool disabled by policy".into());
         }
         Ok(())
     }
@@ -427,11 +480,12 @@ impl ToolRegistry {
             "filesystem__read_file" => {
                 let input: ReadInput = serde_json::from_value(call.arguments)
                     .map_err(|_| "Expected { path: string }".to_owned())?;
-                let path = self.allowed_path(Path::new(&input.path))?;
+                let path = self.allowed_path_for_tool(PathBuf::from(&input.path), false).await?;
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
-                self.reauthorize_after_approval("filesystem__read_file", &path)?;
+                self.reauthorize_after_approval("filesystem__read_file", &path)
+                    .await?;
                 #[cfg(unix)]
                 let (read_slot, read_gate) = self.admit_scoped_read().await?;
                 // Once fair admission is held, no writer can publish until
@@ -469,17 +523,17 @@ impl ToolRegistry {
                 if input.command.trim().is_empty() || input.command.len() > 4096 {
                     return Err("Invalid shell command length".into());
                 }
-                let directory = self.allowed_path(Path::new(&input.cwd))?;
-                if !directory.is_dir() {
-                    return Err("cwd must be a directory".into());
-                }
+                let directory = self
+                    .allowed_path_for_tool(PathBuf::from(&input.cwd), true)
+                    .await?;
                 self.gate
                     .require(
                         "bash__run",
                         &format!("{} (cwd: {})", input.command, directory.display()),
                     )
                     .await?;
-                self.reauthorize_after_approval("bash__run", &directory)?;
+                self.reauthorize_after_approval("bash__run", &directory)
+                    .await?;
                 run_approved_shell(input.command, directory).await
             }
             _ => Err("Unknown tool".into()),
