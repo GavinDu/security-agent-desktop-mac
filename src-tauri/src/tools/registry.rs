@@ -11,10 +11,15 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
-    sync::{oneshot, Semaphore},
+    sync::{
+        oneshot, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit,
+        RwLock as AsyncRwLock, Semaphore,
+    },
 };
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
+// Fail fast before a request can monopolize a blocking filesystem worker.
+const MAX_ADMITTED_FILE_READS: usize = 32;
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
 
 #[cfg(unix)]
@@ -232,6 +237,10 @@ pub struct ToolCall {
 
 pub struct ToolRegistry {
     roots: Arc<RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>>,
+    // Tokio's FIFO/write-preferring guard must be held through the complete
+    // blocking FD read or the accepted native grant save/publication.
+    root_admission: Arc<AsyncRwLock<()>>,
+    read_slots: Arc<Semaphore>,
     gate: Arc<ApprovalGate>,
 }
 
@@ -242,6 +251,8 @@ impl ToolRegistry {
     ) -> Self {
         Self {
             roots: Arc::new(RwLock::new(roots)),
+            root_admission: Arc::new(AsyncRwLock::new(())),
+            read_slots: Arc::new(Semaphore::new(MAX_ADMITTED_FILE_READS)),
             gate,
         }
     }
@@ -276,11 +287,34 @@ impl ToolRegistry {
         Ok(())
     }
 
-    pub fn set_roots(
+    // Direct setters are restricted to deterministic low-level tests. All
+    // production native changes enter through the fair accepted publication
+    // gate in commit_serialized_roots.
+    #[cfg(test)]
+    fn set_roots(
         &self,
         roots: Vec<crate::tools::pinned_read::GrantedRoot>,
     ) -> Result<(), String> {
         self.commit_roots_transaction(roots, || Ok(()))
+    }
+
+    /// No new FD worker may overtake a queued trusted Clear/Grant. Capacity
+    /// is acquired first with a fail-fast bound; both owned permits are moved
+    /// into spawn_blocking so disconnect cannot release them before FD I/O.
+    async fn admit_scoped_read(
+        &self,
+    ) -> Result<(OwnedSemaphorePermit, OwnedRwLockReadGuard<()>), String> {
+        let slot = Arc::clone(&self.read_slots)
+            .try_acquire_owned()
+            .map_err(|_| "Approved file read capacity exceeded".to_owned())?;
+        let admission = Arc::clone(&self.root_admission).read_owned().await;
+        Ok((slot, admission))
+    }
+
+    /// Last cancellable phase before accepted native publication. Writer
+    /// intent queues ahead of later Tokio read permits on this shared gate.
+    pub(crate) async fn reserve_root_publication(&self) -> OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.root_admission).write_owned().await
     }
 
     // The read lease spans grant selection, FD-relative traversal, and all
@@ -313,6 +347,13 @@ impl ToolRegistry {
         let resolved = requested
             .canonicalize()
             .map_err(|_| "Requested file path is inaccessible".to_string())?;
+        // Do not let newly arriving authorization checks continually
+        // reacquire the synchronous roots lock while a writer is pending.
+        // Never retain this short preflight guard across the Ask await.
+        let _preflight = self
+            .root_admission
+            .try_read()
+            .map_err(|_| "Directory permission update pending".to_owned())?;
         let permitted = self
             .roots
             .read()
@@ -370,6 +411,8 @@ impl ToolRegistry {
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
                 self.reauthorize_after_approval("filesystem__read_file", &path)?;
+                #[cfg(unix)]
+                let (read_slot, read_gate) = self.admit_scoped_read().await?;
                 // A separate caller may revoke roots between approval and
                 // the blocking worker. Resolve the CURRENT pinned grant and
                 // retain its read lease through the entire bounded read.
@@ -379,6 +422,10 @@ impl ToolRegistry {
                 let read_path = path.clone();
                 #[cfg(unix)]
                 let text = tokio::task::spawn_blocking(move || {
+                    // Owned guard and capacity remain held even if requester
+                    // drops its JoinHandle before this FD read completes.
+                    let _read_slot = read_slot;
+                    let _read_gate = read_gate;
                     Self::scoped_read_with_lease(&roots, &read_path, |fd, relative| {
                         crate::tools::pinned_read::read_scoped_file(fd, relative)
                     })
