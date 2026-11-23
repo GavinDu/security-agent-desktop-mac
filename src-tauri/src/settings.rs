@@ -1,4 +1,4 @@
-use crate::tools::approvals::Policy;
+use crate::tools::{approvals::Policy, registry::ToolRegistry};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -87,6 +87,12 @@ fn file_path() -> Result<PathBuf, String> {
 }
 
 impl AgentSettings {
+    /// A dormant 'auto' capability in persisted JSON may not silently
+    /// become privileged when a future version adds a new registry tool.
+    fn only_known_tool_policies(&self) -> bool {
+        self.policies.keys().all(|tool| ToolRegistry::is_known(tool))
+    }
+
     pub fn load() -> Result<Self, String> {
         Self::load_at(&file_path()?)
     }
@@ -154,7 +160,12 @@ impl AgentSettings {
         if bytes.len() as u64 > MAX_SETTINGS_BYTES {
             return Err("Oversized settings.json".into());
         }
-        serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings.json: {e}"))
+        let settings: Self =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings.json: {e}"))?;
+        if !settings.only_known_tool_policies() {
+            return Err("Invalid settings.json".into());
+        }
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -162,6 +173,11 @@ impl AgentSettings {
     }
 
     fn save_at(&self, path: &Path) -> Result<(), String> {
+        // Refuse invalid names before any filesystem mutation. Do not persist
+        // dormant authority for future tool names.
+        if !self.only_known_tool_policies() {
+            return Err("Invalid tool policy configuration".into());
+        }
         let bytes = serde_json::to_vec_pretty(self).map_err(|_| "Cannot encode settings.json")?;
         if bytes.len() as u64 > MAX_SETTINGS_BYTES {
             return Err("Settings exceed 256 KiB limit".into());
@@ -246,6 +262,59 @@ mod tests {
         let settings = AgentSettings::load_at(&dir.path().join("missing.json")).unwrap();
         assert!(settings.allowed_roots.is_empty());
         assert!(settings.policies.is_empty());
+    }
+
+    #[test]
+    fn unknown_persisted_tool_policy_names_fail_closed_without_echoing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"allowed_roots":[],"policies":{"future__sensitive_tool":"auto"}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let error = AgentSettings::load_at(&path).unwrap_err();
+        assert_eq!(error, "Invalid settings.json");
+        assert!(!error.contains("future__sensitive_tool"));
+        let known = r#"{"allowed_roots":[],"policies":{"filesystem__read_file":"auto","bash__run":"ask"}}"#;
+        fs::write(&path, known).unwrap();
+        let settings = AgentSettings::load_at(&path).unwrap();
+        assert_eq!(
+            settings.policies.get("filesystem__read_file"),
+            Some(&Policy::Auto)
+        );
+        assert_eq!(settings.policies.get("bash__run"), Some(&Policy::Ask));
+    }
+
+    #[test]
+    fn saving_unknown_tool_policy_does_not_replace_prior_secure_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = AgentSettings::default();
+        settings.policies.insert("bash__run".into(), Policy::Disable);
+        settings.save_at(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        settings
+            .policies
+            .insert("future__sensitive_tool".into(), Policy::Auto);
+        assert_eq!(
+            settings.save_at(&path).unwrap_err(),
+            "Invalid tool policy configuration"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            AgentSettings::load_at(&path)
+                .unwrap()
+                .policies
+                .get("bash__run"),
+            Some(&Policy::Disable)
+        );
     }
 
     #[test]
