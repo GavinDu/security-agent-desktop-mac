@@ -91,8 +91,12 @@ fn persist_root_grants(
         .iter()
         .map(|grant| grant.path().to_string_lossy().into_owned())
         .collect();
-    persist(&staged).map_err(|_| "Cannot persist approved roots".to_owned())?;
-    registry.set_roots(roots);
+    // Acquire the live registry writer BEFORE persisting. If the lock is
+    // poisoned, the disk snapshot must not advance ahead of live authority.
+    // The writer spans save and publication without an await/cancel boundary.
+    registry.commit_roots_transaction(roots, || {
+        persist(&staged).map_err(|_| "Cannot persist approved roots".to_owned())
+    })?;
     *settings = staged;
     Ok(())
 }
@@ -606,6 +610,42 @@ mod tests {
             })
             .await
             .is_err());
+    }
+
+    #[test]
+    fn poisoned_registry_writer_denies_root_save_before_any_disk_change() {
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let old_name = old_root.path().to_string_lossy().into_owned();
+        let new_name = new_root.path().to_string_lossy().into_owned();
+        let mut settings = AgentSettings {
+            allowed_roots: vec![old_name.clone()],
+            ..AgentSettings::default()
+        };
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&settings.allowed_roots).unwrap(),
+            ApprovalGate::new(Default::default()),
+        );
+        // Simulate a previous writer panic. Never recover the poisoned
+        // directory authority or persist a grant snapshot before checking it.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = registry.commit_roots_transaction(Vec::new(), || -> Result<(), String> {
+                panic!("intentional fixture writer panic")
+            });
+        }));
+        assert!(poisoned.is_err());
+        let mut saved = false;
+        let new_grants = ToolRegistry::canonical_roots(&[new_name]).unwrap();
+        let result = persist_root_grants(&mut settings, &registry, new_grants, |_| {
+            saved = true;
+            Ok(())
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "Directory permission registry unavailable"
+        );
+        assert!(!saved, "no disk snapshot is written before lock preflight");
+        assert_eq!(settings.allowed_roots, vec![old_name]);
     }
 
     #[tokio::test]
