@@ -519,10 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_health_has_separate_real_peer_budget_and_no_dispatch_cost() {
-        use crate::agent::{
-            rate_limit::HEALTH_REQUESTS_PER_WINDOW,
-            MAX_CONCURRENT_TOOL_REQUESTS,
-        };
+        use crate::agent::{rate_limit::HEALTH_REQUESTS_PER_WINDOW, MAX_CONCURRENT_TOOL_REQUESTS};
         let state = AgentState::new(
             "health-limit-test-bearer".into(),
             "10.8.0.1:8080".parse().unwrap(),
@@ -537,10 +534,8 @@ mod tests {
                 .header("x-forwarded-for", forwarded)
                 .body(Body::empty())
                 .unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                source.parse().unwrap(),
-                49000,
-            )));
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 49000)));
             req
         };
         let occupied = state
