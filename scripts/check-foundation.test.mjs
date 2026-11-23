@@ -214,7 +214,7 @@ test('failed persisted root-grant change leaves live registry and UI in sync (#1
   const source = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
   assert.match(source, /fn persist_root_grants\(/);
   assert.match(source, /let mut staged = settings\.clone\(\)/);
-  assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)\?/);
+  assert.match(source, /registry\.commit_roots_transaction\(roots, \(\) => \{[\s\S]*?persist\(&staged\)\.map_err/);
   assert.match(source, /registry\.commit_roots_transaction\(roots, \(\) => \{/);
   assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)/);
   assert.match(source, /\}\)\?;\s*\*settings = staged/);
