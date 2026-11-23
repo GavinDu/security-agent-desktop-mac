@@ -222,10 +222,9 @@ mod tests {
         policies.insert("bash__run".into(), Policy::Ask);
         let gate = ApprovalGate::new(policies);
 
-        let failure = gate
-            .commit_policy_transaction("bash__run", Policy::Auto, || {
-                Err("hidden filesystem failure".into())
-            });
+        let failure = gate.commit_policy_transaction("bash__run", Policy::Auto, || {
+            Err("hidden filesystem failure".into())
+        });
         assert_eq!(failure.unwrap_err(), "hidden filesystem failure");
         assert_eq!(gate.policy("bash__run"), Policy::Ask);
 
