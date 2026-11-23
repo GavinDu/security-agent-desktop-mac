@@ -73,3 +73,34 @@ test('fair writer priority, bounded admitted FD reads and owned cancellation gua
   assert.match(mutation, /let _root_write_admission = root_write_admission/);
   assert.doesNotMatch(mutation, /blocking_write\(\)/);
 });
+
+test('post-worker file result generation recheck rejects completed reads invalidated by Clear (#179)', async () => {
+  const source = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
+  assert.match(source, /root_generation: AtomicU64/);
+  assert.match(source, /root_generation: AtomicU64::new\(0\)/);
+  const publish = source.slice(source.indexOf('pub(crate) fn commit_roots_transaction('),
+    source.indexOf('fn set_roots(', source.indexOf('pub(crate) fn commit_roots_transaction(')));
+  const persist = publish.indexOf('persist()?');
+  const update = publish.indexOf('*current = roots');
+  const epoch = publish.indexOf('root_generation.fetch_add(1, Ordering::AcqRel)');
+  assert.ok(persist > 0 && update > persist && epoch > update);
+  assert.match(publish, /u64::MAX/);
+  const file = source.slice(source.indexOf('"filesystem__read_file" => {'),
+    source.indexOf('"bash__run" => {'));
+  const admitted = file.indexOf('let (read_slot, read_gate) = self.admit_scoped_read().await?');
+  const capture = file.indexOf('let read_generation = self.root_generation.load(Ordering::Acquire)');
+  const spawned = file.indexOf('tokio::task::spawn_blocking(move || {');
+  const readReturned = file.indexOf('.map_err(|_| "Approved file read task failed")??;');
+  const validated = file.indexOf('self.ensure_current_file_result(read_generation)?;');
+  const json = file.indexOf('Ok(json!({ "path": path, "content": text }))');
+  assert.ok(admitted >= 0 && capture > admitted && spawned > capture &&
+    readReturned > spawned && validated > readReturned && json > validated,
+    'post-read epoch must be checked before successful content JSON is built');
+  assert.match(source, /"File read authorization changed"/);
+  assert.match(source, /fn completed_file_result_denied_after_root_clear_before_json_return/);
+  assert.match(source, /fn root_generation_only_advances_after_successful_publication/);
+  const command = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
+  const http = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  assert.match(command, /state\.registry\.invoke\(call\)\.await/);
+  assert.match(http, /state\.registry\.invoke\(call\)\.await/);
+});
