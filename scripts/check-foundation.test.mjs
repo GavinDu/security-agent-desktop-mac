@@ -241,10 +241,13 @@ test('poisoned registry fails closed before disk persistence and never panics in
   assert.match(source, /fn poisoned_root_registry_fails_closed_without_panicking_or_saving/);
   assert.match(commits, /fn poisoned_registry_writer_denies_root_save_before_any_disk_change/);
   const lease = source.slice(source.indexOf('fn scoped_read_with_lease<T>('),
-    source.indexOf('fn allowed_path('));
+    source.indexOf('fn allowed_path_against('));
   assert.match(lease, /\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
-  const auth = source.slice(source.indexOf('fn allowed_path('), source.indexOf('fn reauthorize_after_approval('));
+  const auth = source.slice(source.indexOf('fn allowed_path_against('), source.indexOf('async fn reauthorize_after_approval('));
   assert.match(auth, /\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
+  assert.match(auth, /root_admission[\s\S]*?\.try_read\(\)/);
+  assert.match(source, /Self::allowed_path_against\(&roots, &root_admission, &requested\)/);
+  assert.match(source, /\.allowed_path_for_tool\(approved\.to_path_buf\(\), tool == "bash__run"\)/);
   assert.doesNotMatch(mutation, /expect\(|unwrap\(/);
   assert.doesNotMatch(lease, /expect\("roots lock poisoned"\)/);
 });
