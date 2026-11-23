@@ -644,6 +644,83 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_root_writer_precedes_later_admitted_file_read() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("safe.txt");
+        std::fs::write(&file, "old content").unwrap();
+        // Match canonical /private/var paths on macOS native CI.
+        let file = file.canonicalize().unwrap();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        ));
+        let (first_slot, first_gate) = registry.admit_scoped_read().await.unwrap();
+        let (writer_started_tx, writer_started_rx) = oneshot::channel();
+        let writer_registry = Arc::clone(&registry);
+        let mut writer = tokio::spawn(async move {
+            writer_started_tx.send(()).unwrap();
+            let _writer = writer_registry.reserve_root_publication().await;
+            writer_registry
+                .commit_roots_transaction(Vec::new(), || Ok(()))
+                .unwrap();
+        });
+        writer_started_rx.await.unwrap();
+        // The writer has entered its write_owned() wait before the next
+        // reader is scheduled, so Tokio's fair lock must queue it behind.
+        tokio::task::yield_now().await;
+        let later_registry = Arc::clone(&registry);
+        let later_file = file.clone();
+        let mut later = tokio::spawn(async move {
+            let (_slot, _read_gate) = later_registry.admit_scoped_read().await.unwrap();
+            ToolRegistry::scoped_read_with_lease(
+                &later_registry.roots,
+                &later_file,
+                crate::tools::pinned_read::read_scoped_file,
+            )
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut writer)
+                .await
+                .is_err(),
+            "the first admitted reader must hold up a subsequent writer"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut later)
+                .await
+                .is_err(),
+            "a late read must never overtake queued revocation"
+        );
+        assert_eq!(
+            registry.allowed_path(&file).unwrap_err(),
+            "Directory permission update pending"
+        );
+        drop(first_gate);
+        drop(first_slot);
+        writer.await.unwrap();
+        assert_eq!(
+            later.await.unwrap().unwrap_err(),
+            "Path outside granted roots"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_read_slots_bound_active_and_waiting_workers() {
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let mut held = Vec::new();
+        for _ in 0..MAX_ADMITTED_FILE_READS {
+            held.push(registry.admit_scoped_read().await.unwrap());
+        }
+        assert_eq!(
+            registry.admit_scoped_read().await.err().unwrap(),
+            "Approved file read capacity exceeded"
+        );
+        held.pop();
+        let next = registry.admit_scoped_read().await;
+        assert!(next.is_ok(), "dropping a reader must reclaim capacity");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn acknowledged_root_revoke_waits_for_inflight_scoped_file_read() {
         use std::{sync::mpsc, thread};
