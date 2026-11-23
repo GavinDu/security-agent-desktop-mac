@@ -130,9 +130,10 @@ async fn authorize(
     next.run(request).await
 }
 
-/// Fail fast for authenticated tool/chat dispatch: 60 requests per minute
-/// per actual TCP peer plus 16 shared concurrent permits. Unauthorized
-/// requests are rejected in the outer bearer/source middleware first.
+/// Bound authenticated tool/chat POST and catalog/pairing GET requests by
+/// the same 60-per-minute per-real-TCP-peer budget. Only expensive tool/chat
+/// POST dispatch needs one of the 16 shared concurrent permits.
+/// Unauthorized/out-of-range requests are denied before any rate admission.
 async fn limit_tool_dispatch(
     State(state): State<Arc<AgentState>>,
     ConnectInfo(source): ConnectInfo<SocketAddr>,
@@ -141,7 +142,9 @@ async fn limit_tool_dispatch(
 ) -> Response {
     let is_tool_post =
         request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
-    if !is_tool_post {
+    let is_catalog_get =
+        request.method() == Method::GET && matches!(request.uri().path(), "/tools" | "/pairing");
+    if !is_tool_post && !is_catalog_get {
         return next.run(request).await;
     }
 
@@ -155,9 +158,14 @@ async fn limit_tool_dispatch(
             .into_response();
     }
 
-    // Same semaphore for both routes and all requests. The owned permit is
-    // held until the response completes, including an awaited approval flow;
-    // cancellation drops it automatically without leaking capacity.
+    // Only expensive POST tool dispatch takes the 16 shared permits.
+    // Authenticated read-only catalog/pairing GETs are rate admitted but must
+    // not block a legitimate queued approval or tool invocation.
+    if !is_tool_post {
+        return next.run(request).await;
+    }
+    // The owned permit spans the full tool/chat request and releases on
+    // cancellation, including when the caller abandons an approval flow.
     let Ok(_permit) = state.dispatch_permits.clone().try_acquire_owned() else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -912,9 +920,10 @@ mod tests {
             "10.8.0.2".parse().unwrap(),
             40401,
         )));
+        // GET /tools uses the same real-peer budget as authenticated POSTs.
         assert_eq!(
             app.clone().oneshot(listing).await.unwrap().status(),
-            StatusCode::OK
+            StatusCode::TOO_MANY_REQUESTS
         );
 
         let mut health = Request::builder()
