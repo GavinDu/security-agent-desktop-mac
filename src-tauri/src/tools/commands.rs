@@ -365,6 +365,84 @@ mod tests {
         assert!(state.settings.lock().await.allowed_roots.is_empty());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_commit_survives_canceled_caller_without_blocking_tokio() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let granted = root.path().canonicalize().unwrap();
+        let file = granted.join("available.txt");
+        std::fs::write(&file, "published").unwrap();
+        let state = AgentState::new(
+            "native-accepted-commit-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker_state = state.clone();
+        let request = tokio::spawn(async move {
+            commit_serialized_roots(
+                &worker_state,
+                vec![granted.to_string_lossy().into_owned()],
+                Some(before.clone()),
+                |requested| ToolRegistry::canonical_roots(&requested),
+                move |_| {
+                    let _ = accepted_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Test commit fixture timed out".to_owned())?;
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The test runs on ONE Tokio executor thread. The commit's blocking
+        // persist closure must never freeze its timers or unrelated tasks.
+        tokio::time::timeout(Duration::from_millis(250), tokio::task::yield_now())
+            .await
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        // Publication has been ACCEPTED. Losing the caller's acknowledgement
+        // cannot abort it or release the revision gate before durable publish.
+        let readback_state = state.clone();
+        let mut readback = tokio::spawn(async move {
+            let revision = readback_state.root_mutations.lock().await.token();
+            let roots = readback_state.settings.lock().await.allowed_roots.clone();
+            (revision, roots)
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut readback)
+                .await
+                .is_err(),
+            "authoritative readback must await the accepted commit"
+        );
+        release_tx.send(()).unwrap();
+        let (revision, roots) = tokio::time::timeout(Duration::from_secs(3), readback)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(revision, state.root_mutations.lock().await.token().replace(":invalid", ""));
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            state
+                .registry
+                .invoke(ToolCall {
+                    name: "filesystem__read_file".into(),
+                    arguments: json!({"path":file}),
+                })
+                .await
+                .unwrap()["content"],
+            "published"
+        );
+    }
+
     #[tokio::test]
     async fn invalid_validation_releases_native_mutation_guard_without_publication() {
         let state = AgentState::new(
