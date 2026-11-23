@@ -97,12 +97,14 @@ fn persist_root_grants(
     Ok(())
 }
 
-/// Serialize every authorized native caller before validating filesystem
-/// roots.  Validation can open many directory FDs; move it to the blocking
-/// pool while retaining this per-AgentState gate through save/publish.
+/// Reserve a per-AgentState revision slot in native arrival order.
+/// Validation is cancellation-sensitive: the resolver alone cannot publish.
 ///
-/// Dropping the async request during blocking validation cannot commit a grant:
-/// only this future performs persist_root_grants after the worker returns.
+/// After successful validation the owned revision guard is explicitly handed
+/// to a blocking commit worker. Once accepted, canceling the caller cannot
+/// interrupt save/live publication or let a later Clear overtake; a client
+/// with an unknown acknowledgment must reread authoritative settings.
+/// No synchronous registry writer wait or disk save runs on a Tokio executor.
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
     roots: Vec<String>,
@@ -112,9 +114,11 @@ async fn commit_serialized_roots<V, P>(
 ) -> Result<(), String>
 where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
-    P: FnOnce(&AgentSettings) -> Result<(), String>,
+    P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
 {
-    let mut revision = state.root_mutations.lock().await;
+    // Acquire before launching the cancellable validator, preserving the
+    // existing FIFO admission order and revision/CAS semantics.
+    let mut revision = Arc::clone(&state.root_mutations).lock_owned().await;
     if !roots.is_empty() || expected_root_revision.is_some() {
         revision.ensure_current(
             expected_root_revision
@@ -127,11 +131,21 @@ where
     let resolved = tokio::task::spawn_blocking(move || validate(roots))
         .await
         .map_err(|_| "Cannot validate approved roots".to_owned())??;
-    let mut settings = state.settings.lock().await;
-    persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
-    // No await point between durable publish and revision advancement.
-    revision.advance();
-    Ok(())
+
+    // Explicit COMMIT ACCEPTANCE boundary: this worker now owns the revision
+    // guard even if the Tauri/HTTP requester is canceled. No other writer
+    // can overtake it, and no Tokio executor thread waits for the registry
+    // writer or performs synchronous settings I/O.
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let mut settings = state.settings.blocking_lock();
+        persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
+        // No await/cancellation point between save, live publish and CAS.
+        revision.advance();
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "Cannot commit approved roots".to_owned())?
 }
 
 #[tauri::command]
