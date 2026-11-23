@@ -81,7 +81,7 @@ fn process_group_kill_does_not_contain_a_setsid_descendant() {
     // Isolated leader is a *direct child*, never this test process's group.
     // /bin/sleep exists on native macOS and Linux test runners.
     let leader = Command::new("/bin/sleep")
-        .arg("10")
+        .arg("30")
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
