@@ -19,7 +19,7 @@ test('pre/post-approval filesystem metadata checks run in bounded blocking worke
   assert.match(src, /async fn async_path_preflight_preserves_grants_and_directory_type\(/);
 
   const invocation = src.slice(src.indexOf('pub async fn invoke('), src.indexOf('#[derive(Deserialize)]', src.indexOf('pub async fn invoke(')));
-  assert.match(invocation, /allowed_path_for_tool\(PathBuf::from\(&input\.path\), false\)\.await/);
+  assert.match(invocation, /allowed_path_for_tool\(PathBuf::from\(&input\.path\), false\)\s*\.await/);
   assert.match(invocation, /allowed_path_for_tool\(PathBuf::from\(&input\.cwd\), true\)/);
   assert.match(invocation, /reauthorize_after_approval\("filesystem__read_file", &path\)\s*\.await/);
   assert.match(invocation, /reauthorize_after_approval\("bash__run", &directory\)\s*\.await/);
