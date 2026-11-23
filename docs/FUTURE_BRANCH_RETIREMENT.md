@@ -11,7 +11,7 @@ On each run, after auditing the historical candidates, the janitor enumerates up
 - Current remote feature branch is present, not `main`, syntactically safe, and **not protected**.
 - Its exact SHA equals the GitHub PR's recorded final source head SHA, not merely an ancestor; no subsequent feature commits can be deleted.
 - The PR is **closed and merged**, targets `main`, and its source repository is exactly `GavinDu/security-agent-desktop-mac`. Closed-but-unmerged and fork PRs never qualify.
-- No other currently open PR in this repository uses the feature ref.
+- No currently open PR uses the feature ref **as either head or base** (including a fork's open child PR targeting this feature branch). Stacked PR dependencies block cleanup until their base is no longer referenced.
 - Its merge commit SHA is valid and GitHub's compare API says that merged commit is `ahead`/`identical` ancestor of the trusted `GITHUB_SHA` on `main`. A rewritten or diverged main causes refusal.
 - A **fresh** GET of the actual Git ref immediately before deletion still shows the same original head SHA.
 - GitHub confirms DELETE success, and a final branch inventory checks the owner's ceiling of five.
@@ -24,4 +24,4 @@ GitHub's REST `DELETE /git/refs/heads/<branch>` does not accept an `expected_sha
 
 ## Regression / review
 
-`node --test scripts/prune-verified-branches.test.mjs` covers authorization, exact SHA, main ancestry, closed-unmerged, fork, protected, open PR, final ref drift and repeat idempotency. Strict developer-only distribution policy remains unchanged and all ordinary CI jobs stay read-only. The five-gate exact-head PR requirement and separate principal Rust/macOS security-style AI review are mandatory before merging. No independent human review or physical macOS GUI verification is claimed.
+`node --test scripts/prune-verified-branches.test.mjs` covers authorization, exact SHA, main ancestry, closed-unmerged, fork, protected, open PR head/base including stacked fork PRs, final ref drift and repeat idempotency. Strict developer-only distribution policy remains unchanged and all ordinary CI jobs stay read-only. The five-gate exact-head PR requirement and separate principal Rust/macOS security-style AI review are mandatory before merging. No independent human review or physical macOS GUI verification is claimed.
