@@ -9,6 +9,11 @@ use std::{
 #[cfg(not(unix))]
 use std::fs::OpenOptions;
 
+pub(crate) const DESKTOP_PRIVATE_DIRECTORY: &str =
+    "Library/Application Support/com.gavindu.securityagent.desktop";
+pub(crate) const ALREADY_RUNNING: &str =
+    "Security Agent is already running; use the existing menu-bar app to show its window";
+
 pub struct InstanceGuard {
     _lock: File,
 }
@@ -35,9 +40,9 @@ impl InstanceGuard {
         Self::validate_unprivileged_user(unsafe { libc::getuid() }, unsafe { libc::geteuid() })?;
 
         let home = dirs::home_dir().ok_or("Home directory unavailable")?;
-        let path = home.join(
-            "Library/Application Support/com.gavindu.securityagent.desktop/desktop-instance.lock",
-        );
+        let path = home
+            .join(DESKTOP_PRIVATE_DIRECTORY)
+            .join("desktop-instance.lock");
         Self::acquire_at(&path)
     }
 
@@ -104,10 +109,7 @@ impl InstanceGuard {
 
         match file.try_lock() {
             Ok(()) => Ok(Self { _lock: file }),
-            Err(TryLockError::WouldBlock) => Err(
-                "Security Agent is already running; use the existing menu-bar app to show its window"
-                    .into(),
-            ),
+            Err(TryLockError::WouldBlock) => Err(ALREADY_RUNNING.into()),
             Err(TryLockError::Error(_)) => Err("Cannot acquire desktop instance lock".into()),
         }
     }
