@@ -256,8 +256,31 @@ impl ToolRegistry {
         crate::tools::pinned_read::canonical_roots(roots)
     }
 
-    pub fn set_roots(&self, roots: Vec<crate::tools::pinned_read::GrantedRoot>) {
-        *self.roots.write().expect("roots lock poisoned") = roots;
+    /// Acquire the authoritative publication lock BEFORE calling the durable
+    /// settings writer. If poisoned, the save callback never runs, avoiding
+    /// a persisted grant set that the live registry cannot publish.
+    ///
+    /// No await point is permitted while holding this synchronous guard.
+    /// Fair/cancellable waiting remains separately tracked under #166.
+    pub(crate) fn commit_roots_transaction(
+        &self,
+        roots: Vec<crate::tools::pinned_read::GrantedRoot>,
+        persist: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut current = self
+            .roots
+            .write()
+            .map_err(|_| "Directory permission registry unavailable".to_owned())?;
+        persist()?;
+        *current = roots;
+        Ok(())
+    }
+
+    pub fn set_roots(
+        &self,
+        roots: Vec<crate::tools::pinned_read::GrantedRoot>,
+    ) -> Result<(), String> {
+        self.commit_roots_transaction(roots, || Ok(()))
     }
 
     // The read lease spans grant selection, FD-relative traversal, and all
@@ -271,7 +294,9 @@ impl ToolRegistry {
         path: &Path,
         read: impl FnOnce(&File, &Path) -> Result<T, String>,
     ) -> Result<T, String> {
-        let grants = roots.read().expect("roots lock poisoned");
+        let grants = roots
+            .read()
+            .map_err(|_| "Directory permission registry unavailable".to_owned())?;
         for grant in grants.iter() {
             if let Ok(relative) = path.strip_prefix(grant.path()) {
                 if relative.components().next().is_some() {
@@ -291,7 +316,7 @@ impl ToolRegistry {
         let permitted = self
             .roots
             .read()
-            .expect("roots lock poisoned")
+            .map_err(|_| "Directory permission registry unavailable".to_owned())?
             .iter()
             .any(|root| resolved.starts_with(root.path()));
         if !permitted {
@@ -405,6 +430,49 @@ mod tests {
     use super::*;
     use crate::tools::approvals::{ApprovalGate, Policy};
     use std::collections::HashMap;
+    #[test]
+    fn poisoned_root_registry_fails_closed_without_panicking_or_saving() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("safe.txt");
+        std::fs::write(&file, "must-not-read").unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
+                .unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        // Deliberately simulate a writer panic while its guard is held.
+        // A poisoned write lock cannot be recovered as an authorization source.
+        let poisoned = Arc::clone(&registry.roots);
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoned.write().unwrap();
+            panic!("intentional test-only registry poisoning");
+        })
+        .join()
+        .is_err());
+        let expected = "Directory permission registry unavailable";
+        assert_eq!(registry.allowed_path(&file).unwrap_err(), expected);
+        assert_eq!(registry.set_roots(Vec::new()).unwrap_err(), expected);
+        let mut persisted = false;
+        let err = registry
+            .commit_roots_transaction(Vec::new(), || {
+                persisted = true;
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(err, expected);
+        assert!(!persisted, "poisoned state must fail before disk save");
+        #[cfg(unix)]
+        {
+            let error = ToolRegistry::scoped_read_with_lease(
+                &registry.roots,
+                &file.canonicalize().unwrap(),
+                crate::tools::pinned_read::read_scoped_file,
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
+        }
+    }
+
     #[test]
     fn tool_call_envelope_requires_exact_fields_on_both_http_and_tauri_paths() {
         for (name, arguments) in [
@@ -572,7 +640,7 @@ mod tests {
         let writer_registry = Arc::clone(&registry);
         let writer = thread::spawn(move || {
             writer_started_tx.send(()).unwrap();
-            writer_registry.set_roots(Vec::new());
+            writer_registry.set_roots(Vec::new()).unwrap();
             revoked_tx.send(()).unwrap();
         });
         writer_started_rx
@@ -608,7 +676,7 @@ mod tests {
             ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
-        registry.set_roots(Vec::new());
+        registry.set_roots(Vec::new()).unwrap();
         let error = ToolRegistry::scoped_read_with_lease(
             &registry.roots,
             &file,
@@ -870,7 +938,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        registry.set_roots(Vec::new());
+        registry.set_roots(Vec::new()).unwrap();
         assert!(
             gate.resolve(uuid::Uuid::parse_str(&event.id).unwrap(), true)
                 .await
