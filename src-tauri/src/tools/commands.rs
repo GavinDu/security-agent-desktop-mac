@@ -1050,16 +1050,10 @@ mod tests {
         // dangerous persistence callback under an unprotected writer.
         poisoned.poison_policy_for_test();
         let mut durable_save_called = false;
-        let err = persist_tool_policy(
-            &mut settings,
-            &gate,
-            "bash__run",
-            Policy::Disable,
-            |_| {
-                durable_save_called = true;
-                Ok(())
-            },
-        )
+        let err = persist_tool_policy(&mut settings, &gate, "bash__run", Policy::Disable, |_| {
+            durable_save_called = true;
+            Ok(())
+        })
         .unwrap_err();
         assert_eq!(err, "Approval policy registry unavailable");
         assert!(!durable_save_called);
