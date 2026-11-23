@@ -101,12 +101,23 @@ impl ApprovalGate {
         Ok(())
     }
 
-    // Test-only hook. All production policy mutations must persist through
+    // Test-only hooks. All production policy mutations must persist through
     // commit_policy_transaction to preserve the durable/live ordering.
     #[cfg(test)]
     pub fn set_policy(&self, tool: &str, policy: Policy) {
         self.commit_policy_transaction(tool, policy, || Ok(()))
             .expect("test policy mutation failed");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_policy_for_test(&self) {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _writer = self.policies.write().unwrap();
+                panic!("fixed policy poison test fixture");
+            });
+            assert!(worker.join().is_err());
+        });
     }
 
     pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
@@ -183,12 +194,7 @@ mod tests {
     #[tokio::test]
     async fn poisoned_policy_writer_disables_discovery_and_denies_invocation() {
         let gate = ApprovalGate::new(HashMap::new());
-        let poisoned = gate.clone();
-        let worker = std::thread::spawn(move || {
-            let _lock = poisoned.policies.write().unwrap();
-            panic!("poison fixture: policy writer");
-        });
-        assert!(worker.join().is_err());
+        gate.poison_policy_for_test();
 
         assert_eq!(gate.policy("filesystem__read_file"), Policy::Disable);
         assert_eq!(gate.policy("bash__run"), Policy::Disable);
