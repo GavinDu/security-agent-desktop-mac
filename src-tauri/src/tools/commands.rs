@@ -312,13 +312,10 @@ mod tests {
         );
         assert_eq!(persist_count.load(Ordering::SeqCst), 0);
         // Timeout must cancel the queued writer and release the revision lock.
-        let after = tokio::time::timeout(
-            Duration::from_millis(100),
-            state.root_mutations.lock(),
-        )
-        .await
-        .expect("abandoned writer must release native revision gate")
-        .token();
+        let after = tokio::time::timeout(Duration::from_millis(100), state.root_mutations.lock())
+            .await
+            .expect("abandoned writer must release native revision gate")
+            .token();
         assert_eq!(original_revision, after);
         assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
 
