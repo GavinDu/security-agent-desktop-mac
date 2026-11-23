@@ -822,6 +822,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_and_pairing_reads_share_post_rate_budget_without_consuming_dispatch_permits() {
+        use crate::agent::{rate_limit::REQUESTS_PER_WINDOW, MAX_CONCURRENT_TOOL_REQUESTS};
+
+        let state = AgentState::new(
+            "catalog-rate-test-token".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+
+        let request = |source: &str, method: Method, path: &str, authenticated: bool| {
+            let mut builder = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                // A forged IP header must never select another rate bucket.
+                .header("x-forwarded-for", "10.8.0.3");
+            if authenticated {
+                builder = builder.header("authorization", "Bearer catalog-rate-test-token");
+            }
+            let body = if method == Method::POST {
+                builder = builder.header("content-type", "application/json");
+                Body::from(r#"{"message":"hello"}"#)
+            } else {
+                Body::empty()
+            };
+            let mut req = builder.body(body).unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 40500)));
+            req
+        };
+
+        // Requests failing outer bearer/source authentication do not spend
+        // the actual peer's budget; health is intentionally not rate counted.
+        for _ in 0..3 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("10.8.0.2", Method::GET, "/tools", false))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("192.168.1.42", Method::GET, "/pairing", true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        // Even when expensive dispatch is fully occupied, catalog GETs
+        // never take permits: they are admitted by the rate limiter only.
+        let occupied = state
+            .dispatch_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TOOL_REQUESTS as u32)
+            .await
+            .unwrap();
+        for n in 0..REQUESTS_PER_WINDOW {
+            let path = if n % 2 == 0 { "/tools" } else { "/pairing" };
+            let expected = if path == "/tools" {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_IMPLEMENTED
+            };
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("10.8.0.2", Method::GET, path, true))
+                    .await
+                    .unwrap()
+                    .status(),
+                expected,
+                "catalog/pairing GET number {n} must not consume a tool permit"
+            );
+        }
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        // GET and POST share the same real source budget, including when
+        // the attacker spoofs a forwarding header.
+        for (method, path) in [
+            (Method::GET, "/tools"),
+            (Method::GET, "/pairing"),
+            (Method::POST, "/chat"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("10.8.0.2", method, path, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let output: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(output["error"], "Source request rate limit reached");
+            assert!(!output.to_string().contains("catalog-rate-test-token"));
+            assert!(!output.to_string().contains("10.8.0.2"));
+        }
+
+        // The genuine different tunnel peer retains an independent budget.
+        assert_eq!(
+            app.clone()
+                .oneshot(request("10.8.0.3", Method::GET, "/tools", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request("10.8.0.2", Method::GET, "/health", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        drop(occupied);
+    }
+
+    #[tokio::test]
     async fn per_tcp_source_authenticated_post_rate_limit_is_shared_and_not_spoofable() {
         use crate::agent::rate_limit::REQUESTS_PER_WINDOW;
 
