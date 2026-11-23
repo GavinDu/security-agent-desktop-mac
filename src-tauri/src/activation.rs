@@ -32,7 +32,9 @@ fn activation_path() -> Result<PathBuf, String> {
 // a same-UID adversary can rename its own directories, but cannot gain tools,
 // secrets or authorization through this focus-only channel.
 fn checked_parent(path: &Path) -> Result<(), String> {
-    let parent = path.parent().ok_or("Invalid desktop activation directory")?;
+    let parent = path
+        .parent()
+        .ok_or("Invalid desktop activation directory")?;
     let metadata =
         fs::symlink_metadata(parent).map_err(|_| "Cannot inspect desktop activation directory")?;
     if !metadata.file_type().is_dir()
@@ -92,8 +94,8 @@ fn peer_is_same_user(stream: &UnixStream) -> bool {
     let mut gid: libc::gid_t = 0;
     // SAFETY: the accepted stream owns a valid socket FD; kernel supplies
     // credentials, not an untrusted claim in the request body.
-    unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) == 0 }
-        && uid == unsafe { libc::geteuid() }
+    let validated = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) == 0 };
+    validated && uid == unsafe { libc::geteuid() }
 }
 
 fn exact_focus_request(stream: &mut UnixStream) -> bool {
