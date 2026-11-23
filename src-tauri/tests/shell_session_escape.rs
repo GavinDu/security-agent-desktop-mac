@@ -123,7 +123,13 @@ fn process_group_kill_does_not_contain_a_setsid_descendant() {
     let deadline = Instant::now() + Duration::from_secs(8);
     while heartbeat_size(&heartbeat) < 2 && Instant::now() < deadline {
         assert!(
-            owned.escaped.as_mut().unwrap().try_wait().unwrap().is_none(),
+            owned
+                .escaped
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
             "escaping fixture exited before demonstrating setsid"
         );
         thread::sleep(Duration::from_millis(25));
@@ -151,7 +157,13 @@ fn process_group_kill_does_not_contain_a_setsid_descendant() {
         "expected escaped child to survive the old group's SIGKILL"
     );
     assert!(
-        owned.escaped.as_mut().unwrap().try_wait().unwrap().is_none(),
+        owned
+                .escaped
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
         "escaped fixture unexpectedly exited"
     );
     // OwnedSessionFixture::drop always stops AND reaps both direct children,
