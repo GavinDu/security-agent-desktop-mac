@@ -287,6 +287,12 @@ test('future branch cleanup preserves non-ancestor, open, protected and last-mom
     { ancestors: { [candidate.merge_commit_sha]: 'diverged' } },
     { ancestors: { [candidate.merge_commit_sha]: 'behind' } },
     { open: [{ head: { ref: candidate.head.ref, repo: { full_name: repo } } }] },
+    // Open dependent PRs must retain their base even after a parent merges.
+    { open: [{ base: { ref: candidate.head.ref, repo: { full_name: repo } },
+      head: { ref: 'feature/stacked-child', repo: { full_name: repo } } }] },
+    // A fork PR can also use a same-repository feature branch as its base.
+    { open: [{ base: { ref: candidate.head.ref, repo: { full_name: repo } },
+      head: { ref: 'feature/fork-child', repo: { full_name: 'example/fork' } } }] },
     { branchOverrides: { [candidate.head.ref]: { protected: true } } },
     { refDrift: { [candidate.head.ref]: 'f'.repeat(40) } },
   ]) {
@@ -312,4 +318,11 @@ test('future branch cleanup refuses unidentified main checkout and ignores close
   assert.equal(result.deleted, 0);
   assert.equal(result.featureCount, 1);
   assert.deepEqual(unmerged.deleted, []);
+});
+
+test('active branch inventory includes open PR base refs, including forked child PRs (#167)', async () => {
+  const source = await readFile('scripts/prune-verified-branches.mjs', 'utf8');
+  assert.match(source, /openPRs\.flatMap\(pr => \[/);
+  assert.match(source, /pr\.base\?\.ref/);
+  assert.match(source, /pr\.head\?\.repo\?\.full_name === repo/);
 });
