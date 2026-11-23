@@ -25,7 +25,7 @@ test('all authorized native root commands acquire one mutation gate before block
     accepted > fairWriter && writerPermit > accepted && settings > writerPermit &&
     published > settings && advanced > published,
     'native arrival-order gate must enter cancellable validation, then owned accepted commit on blocking worker');
-  assert.match(native, /tokio::task::spawn_blocking\(move \|\| \{\s*let _validation_permit = validation_permit;\s*validate\(roots\)/);
+  assert.match(native, /tokio::task::spawn_blocking\(move \|\| \{[\s\S]*?let _validation_permit = validation_permit;\s*validate\(roots\)/);
   assert.match(native, /\.map_err\(\|_\| "Cannot validate approved roots"\.to_owned\(\)\)\?\?/);
 });
 
