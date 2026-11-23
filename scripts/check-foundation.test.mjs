@@ -185,7 +185,8 @@ test('file read tool validates opened leaf FD and bounded bytes in anchored trav
   assert.match(source, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
   assert.match(source, /Component::Normal\(name\)/);
   assert.match(registry, /spawn_blocking\(move \|\| \{/);
-  assert.match(registry, /crate::tools::pinned_read::read_scoped_file\(&grant_fd, &relative\)/);
+  assert.match(registry, /crate::tools::pinned_read::read_scoped_file\(fd, relative\)/);
+  assert.match(registry, /Self::scoped_read_with_lease\(&roots, &read_path,/);
   assert.match(source, /fn preserves_leaf_type_nlink_utf8_and_64k_limit/);
   assert.match(source, /fn rejects_absolute_parent_and_symlinked_intermediate_components/);
   assert.doesNotMatch(registry, /tokio::fs::read\(&path\)/);
