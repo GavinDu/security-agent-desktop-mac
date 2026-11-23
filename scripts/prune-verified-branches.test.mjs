@@ -23,13 +23,14 @@ const pr = (candidate, mergedAt = '2026-11-21T00:00:00Z') => ({
   head: { ref: candidate.name, sha: candidate.sha, repo: { full_name: repo } },
 });
 
-test('explicit inventory preserves main and both active work branches (#162)', () => {
-  assert.deepEqual(trackedActivePRs.map(entry => entry.pr), [161, 163]);
+test('explicit inventory preserves main and every tracked working PR branch (#162/#164)', () => {
+  assert.deepEqual(trackedActivePRs.map(entry => entry.pr), [161, 163, 165]);
   assert.equal(verifiedCandidates.length, 48);
   assert.equal(new Set(verifiedCandidates.map(candidate => candidate.name)).size, 48);
   assert.ok(verifiedCandidates.every(candidate => /^[0-9a-f]{40}$/.test(candidate.sha)));
   assert.ok(!verifiedCandidates.some(candidate => [
     'main', 'security/158-stale-root-snapshot-fence', 'security/156-native-root-mutation-order',
+    'security/164-pinned-read-revocation-lease',
   ].includes(candidate.name)));
   assert.equal(verifiedCandidates.filter(candidate => candidate.status === 'merged').length, 43);
   assert.equal(verifiedCandidates.filter(candidate => candidate.status === 'superseded').length, 5);
@@ -86,10 +87,7 @@ function mockGitHub(initial, { open = [], refDrift = {}, prOverrides = {} } = {}
     if (path.startsWith('/pulls/')) {
       const n = Number(path.slice('/pulls/'.length));
       const candidate = original.get(n);
-      const inFlight = [
-        { name: 'security/158-stale-root-snapshot-fence', pr: 161 },
-        { name: 'security/156-native-root-mutation-order', pr: 163 },
-      ].find(item => item.pr === n);
+      const inFlight = trackedActivePRs.find(item => item.pr === n);
       if (!candidate && !inFlight) throw new Error('unexpected pull request fetch');
       const mock = candidate || {
         name: inFlight.name, pr: n, sha: current.get(inFlight.name)?.commit.sha,
