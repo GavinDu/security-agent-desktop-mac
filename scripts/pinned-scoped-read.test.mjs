@@ -15,7 +15,7 @@ test('scoped file uses pinned directory-FD openat traversal, leaf caps and races
   assert.match(source, /file\.take\(MAX_FILE_BYTES \+ 1\)/);
   assert.match(source, /metadata\.nlink\(\) != 1/);
   assert.match(registry, /Self::scoped_read_with_lease\(&roots, &read_path,/);
-  assert.match(registry, /let grants = roots\.read\(\)\.expect\("roots lock poisoned"\)/);
+  assert.match(registry, /let grants = roots\s*\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
   assert.match(registry, /spawn_blocking\(move \|\| \{/);
   assert.match(registry, /fn parent_symlink_swap_during_approval_is_denied/);
   assert.match(source, /fn pinned_root_is_not_replaced_by_renaming_the_granted_path/);
