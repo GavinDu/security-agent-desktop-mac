@@ -888,6 +888,146 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_path_preflight_preserves_grants_and_directory_type() {
+        let root = tempfile::tempdir().unwrap();
+        let document = root.path().join("allowed.txt");
+        std::fs::write(&document, "safe").unwrap();
+        let document = document.canonicalize().unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        assert_eq!(
+            registry
+                .allowed_path_for_tool(document.clone(), false)
+                .await
+                .unwrap(),
+            document
+        );
+        assert_eq!(
+            registry
+                .allowed_path_for_tool(document.clone(), true)
+                .await
+                .unwrap_err(),
+            "cwd must be a directory"
+        );
+        registry.set_roots(Vec::new()).unwrap();
+        assert_eq!(
+            registry
+                .allowed_path_for_tool(document, false)
+                .await
+                .unwrap_err(),
+            "Path outside granted roots"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_path_preflight_stays_bounded_after_request_cancellation() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+            Condvar, Mutex,
+        };
+
+        let registry = Arc::new(ToolRegistry::new(
+            Vec::new(),
+            ApprovalGate::new(HashMap::new()),
+        ));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut requests = Vec::new();
+
+        for _ in 0..MAX_ADMITTED_PATH_PREFLIGHTS {
+            let reg = Arc::clone(&registry);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            requests.push(tokio::spawn(async move {
+                reg.offload_path_check(move || {
+                    entered.fetch_add(1, AtomicOrdering::Release);
+                    let (lock, ready) = &*release;
+                    let mut permitted = lock.lock().unwrap();
+                    while !*permitted {
+                        let (next, timed) = ready
+                            .wait_timeout(permitted, Duration::from_secs(10))
+                            .unwrap();
+                        permitted = next;
+                        if timed.timed_out() && !*permitted {
+                            return Err("Native path test fixture timed out".into());
+                        }
+                    }
+                    Ok(PathBuf::from("/fixture-only"))
+                })
+                .await
+            }));
+        }
+
+        // This timeout and yield execute on a *single-threaded Tokio
+        // executor*. A direct blocking canonicalization path would prevent
+        // the reactor from scheduling this test's progress.
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while entered.load(AtomicOrdering::Acquire) != MAX_ADMITTED_PATH_PREFLIGHTS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all bounded blocking preflight workers must start");
+
+        assert_eq!(
+            registry
+                .offload_path_check(|| Ok(PathBuf::from("/rejected")))
+                .await
+                .unwrap_err(),
+            "Approved path check capacity exceeded"
+        );
+        // Aborting one request must NOT free its worker's slot before its
+        // underlying syscall would return.
+        let canceled = requests.pop().unwrap();
+        canceled.abort();
+        let _ = canceled.await;
+        assert_eq!(
+            registry
+                .offload_path_check(|| Ok(PathBuf::from("/still-rejected")))
+                .await
+                .unwrap_err(),
+            "Approved path check capacity exceeded"
+        );
+
+        let (lock, ready) = &*release;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+        for request in requests {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), request)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                PathBuf::from("/fixture-only")
+            );
+        }
+        // The canceled worker may still be releasing its owned slot.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match registry
+                    .offload_path_check(|| Ok(PathBuf::from("/reclaimed")))
+                    .await
+                {
+                    Ok(path) => {
+                        assert_eq!(path, PathBuf::from("/reclaimed"));
+                        break;
+                    }
+                    Err(ref message) if message == "Approved path check capacity exceeded" => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(other) => panic!("unexpected preflight error: {other}"),
+                }
+            }
+        })
+        .await
+        .expect("finished metadata workers must release the bound");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn acknowledged_root_revoke_waits_for_inflight_scoped_file_read() {
         use std::{sync::mpsc, thread};
