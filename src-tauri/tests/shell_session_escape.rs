@@ -158,12 +158,12 @@ fn process_group_kill_does_not_contain_a_setsid_descendant() {
     );
     assert!(
         owned
-                .escaped
-                .as_mut()
-                .unwrap()
-                .try_wait()
-                .unwrap()
-                .is_none(),
+            .escaped
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none(),
         "escaped fixture unexpectedly exited"
     );
     // OwnedSessionFixture::drop always stops AND reaps both direct children,
