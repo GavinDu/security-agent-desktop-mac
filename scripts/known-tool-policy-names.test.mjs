@@ -8,7 +8,7 @@ test('persisted tool policies reject dormant names through the shared registry p
   assert.match(registry, /pub fn is_known\(tool: &str\) -> bool/);
   assert.match(settings, /registry::ToolRegistry/);
   assert.match(settings, /fn only_known_tool_policies\(&self\) -> bool/);
-  assert.match(settings, /self\.policies\.keys\(\)\.all\(\|tool\| ToolRegistry::is_known\(tool\)\)/);
+  assert.match(settings, /self\.policies\s*\.keys\(\)\s*\.all\(\|tool\| ToolRegistry::is_known\(tool\)\)/);
   const load = settings.slice(settings.indexOf('fn load_at('), settings.indexOf('pub fn save('));
   assert.match(load, /if !settings\.only_known_tool_policies\(\)/);
   assert.match(load, /return Err\("Invalid settings\.json"\.into\(\)\)/);
