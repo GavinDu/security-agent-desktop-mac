@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   verifiedCandidates,
   supersededEvidence,
@@ -7,6 +8,7 @@ import {
   eligibleForDeletion,
   verifySupersededEvidence,
   pruneVerifiedBranches,
+  eligibleMergedRecentBranch,
 } from './prune-verified-branches.mjs';
 
 const repo = 'GavinDu/security-agent-desktop-mac';
@@ -181,4 +183,147 @@ test('two tracked active PR source refs retire only after merged status is prove
   assert.equal(result.deleted, 1);
   assert.equal(result.featureCount, 1);
   assert.deepEqual(mock.deleted, [tracked[1].name]);
+});
+
+function recentMergedPr(overrides = {}) {
+  const base = {
+    number: 1001,
+    state: 'closed',
+    merged_at: '2026-11-22T20:00:00Z',
+    merge_commit_sha: 'b'.repeat(40),
+    base: { ref: 'main' },
+    head: { ref: 'feature/future-success', sha: 'c'.repeat(40), repo: { full_name: repo } },
+  };
+  return {
+    ...base, ...overrides,
+    head: overrides.head ? { ...base.head, ...overrides.head } : base.head,
+  };
+}
+
+function recentMergedMock(prs, {
+  open = [], refDrift = {}, ancestors = {}, branchOverrides = {},
+} = {}) {
+  const current = new Map([
+    ['main', { name: 'main', protected: true, commit: { sha: 'a'.repeat(40) } }],
+    ...prs.map(p => [p.head.ref, {
+      name: p.head.ref, protected: false, commit: { sha: p.head.sha },
+      ...branchOverrides[p.head.ref],
+    }]),
+  ]);
+  const calls = [];
+  const deleted = [];
+  const api = async (seenRepo, token, path, method = 'GET') => {
+    assert.equal(seenRepo, repo);
+    assert.equal(token, 'test-only-no-credentials');
+    calls.push({ path, method });
+    if (path === '/branches?per_page=100') return [...current.values()];
+    if (path === '/pulls?state=open&per_page=100') return open;
+    if (path === '/pulls?state=closed&sort=updated&direction=desc&per_page=100') return prs;
+    if (path.startsWith('/compare/')) {
+      const sha = path.slice('/compare/'.length).split('...')[0];
+      return { status: ancestors[sha] || 'ahead' };
+    }
+    if (path.startsWith('/git/ref/heads/')) {
+      const name = path.slice('/git/ref/heads/'.length);
+      return { object: { sha: refDrift[name] || current.get(name)?.commit.sha } };
+    }
+    if (path.startsWith('/git/refs/heads/') && method === 'DELETE') {
+      const name = path.slice('/git/refs/heads/'.length);
+      assert.ok(current.has(name));
+      current.delete(name);
+      deleted.push(name);
+      return null;
+    }
+    throw new Error('Unexpected future ref cleanup request ' + method + ' ' + path);
+  };
+  return { api, deleted, current, calls };
+}
+
+const futureEnv = {
+  GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main',
+  GITHUB_SHA: 'a'.repeat(40), GITHUB_TOKEN: 'test-only-no-credentials',
+};
+
+test('future main-merged PR needs same-repo exact head, main base and merged SHA (#167)', () => {
+  const candidate = recentMergedPr();
+  const current = { name: candidate.head.ref, protected: false,
+    commit: { sha: candidate.head.sha } };
+  assert.equal(eligibleMergedRecentBranch(candidate, current, new Set()), true);
+  for (const changed of [
+    { state: 'open' }, { merged_at: null }, { merge_commit_sha: null },
+    { merge_commit_sha: 'invalid' }, { base: { ref: 'develop' } },
+    { head: { repo: { full_name: 'untrusted/fork' } } },
+  ]) {
+    assert.equal(eligibleMergedRecentBranch(recentMergedPr(changed), current, new Set()), false,
+      'bad PR metadata must not authorize deletion: ' + JSON.stringify(changed));
+  }
+  assert.equal(eligibleMergedRecentBranch(candidate,
+    { ...current, protected: true }, new Set()), false);
+  assert.equal(eligibleMergedRecentBranch(candidate,
+    { ...current, commit: { sha: 'd'.repeat(40) } }, new Set()), false);
+  assert.equal(eligibleMergedRecentBranch(candidate, current,
+    new Set([candidate.head.ref])), false);
+});
+
+test('future merged PR branch is deleted only after verified merge ancestry, then cleanup is idempotent (#167)', async () => {
+  const candidate = recentMergedPr();
+  const mock = recentMergedMock([candidate]);
+  const first = await pruneVerifiedBranches(futureEnv, mock.api);
+  assert.deepEqual(first, { deleted: 1, skipped: 48, featureCount: 0 });
+  assert.deepEqual(mock.deleted, [candidate.head.ref]);
+  assert.ok(mock.calls.some(call => call.path === '/compare/' +
+    candidate.merge_commit_sha + '...' + futureEnv.GITHUB_SHA));
+  assert.ok(mock.calls.some(call => call.method === 'GET' &&
+    call.path === '/git/ref/heads/' + candidate.head.ref));
+  assert.ok(mock.calls.some(call => call.method === 'DELETE' &&
+    call.path === '/git/refs/heads/' + candidate.head.ref));
+  const second = await pruneVerifiedBranches(futureEnv, mock.api);
+  assert.deepEqual(second, { deleted: 0, skipped: 48, featureCount: 0 });
+  assert.ok(mock.current.has('main'));
+});
+
+test('future branch cleanup preserves non-ancestor, open, protected and last-moment drifted refs (#167)', async () => {
+  const candidate = recentMergedPr();
+  for (const modifiers of [
+    { ancestors: { [candidate.merge_commit_sha]: 'diverged' } },
+    { ancestors: { [candidate.merge_commit_sha]: 'behind' } },
+    { open: [{ head: { ref: candidate.head.ref, repo: { full_name: repo } } }] },
+    // Open dependent PRs must retain their base even after a parent merges.
+    { open: [{ base: { ref: candidate.head.ref, repo: { full_name: repo } },
+      head: { ref: 'feature/stacked-child', repo: { full_name: repo } } }] },
+    // A fork PR can also use a same-repository feature branch as its base.
+    { open: [{ base: { ref: candidate.head.ref, repo: { full_name: repo } },
+      head: { ref: 'feature/fork-child', repo: { full_name: 'example/fork' } } }] },
+    { branchOverrides: { [candidate.head.ref]: { protected: true } } },
+    { refDrift: { [candidate.head.ref]: 'f'.repeat(40) } },
+  ]) {
+    const mock = recentMergedMock([candidate], modifiers);
+    const result = await pruneVerifiedBranches(futureEnv, mock.api);
+    assert.equal(result.deleted, 0);
+    assert.equal(result.featureCount, 1);
+    assert.deepEqual(mock.deleted, []);
+  }
+});
+
+test('future branch cleanup refuses unidentified main checkout and ignores closed but unmerged PR (#167)', async () => {
+  const candidate = recentMergedPr();
+  const invalid = recentMergedMock([candidate]);
+  await assert.rejects(
+    pruneVerifiedBranches({ ...futureEnv, GITHUB_SHA: 'invalid' }, invalid.api),
+    /Cannot attest checked-out main commit/,
+  );
+  assert.deepEqual(invalid.deleted, []);
+  const closedNotMerged = recentMergedPr({ merged_at: null });
+  const unmerged = recentMergedMock([closedNotMerged]);
+  const result = await pruneVerifiedBranches(futureEnv, unmerged.api);
+  assert.equal(result.deleted, 0);
+  assert.equal(result.featureCount, 1);
+  assert.deepEqual(unmerged.deleted, []);
+});
+
+test('active branch inventory includes open PR base refs, including forked child PRs (#167)', async () => {
+  const source = await readFile('scripts/prune-verified-branches.mjs', 'utf8');
+  assert.match(source, /openPRs\.flatMap\(pr => \[/);
+  assert.match(source, /pr\.base\?\.ref/);
+  assert.match(source, /pr\.head\?\.repo\?\.full_name === repo/);
 });
