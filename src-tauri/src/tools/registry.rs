@@ -536,6 +536,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("safe.txt");
         std::fs::write(&file, "approved-content").unwrap();
+        // macOS often resolves temporary /var paths to /private/var; use
+        // the same canonical pathname the real tool would authorize.
+        let file = file.canonicalize().unwrap();
         let registry = Arc::new(ToolRegistry::new(
             ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
@@ -593,6 +596,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("safe.txt");
         std::fs::write(&file, "never reauthorized").unwrap();
+        let file = file.canonicalize().unwrap();
         let registry = ToolRegistry::new(
             ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
