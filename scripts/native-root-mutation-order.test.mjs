@@ -6,7 +6,7 @@ const source = readFileSync('src-tauri/src/tools/commands.rs', 'utf8');
 const state = readFileSync('src-tauri/src/agent/mod.rs', 'utf8');
 const registry = readFileSync('src-tauri/src/tools/registry.rs', 'utf8');
 const native = source.slice(
-  source.indexOf('async fn commit_serialized_roots'),
+  source.indexOf('async fn commit_serialized_roots_with_timeout'),
   source.indexOf('// Staged policy publication'),
 );
 
@@ -15,7 +15,7 @@ test('all authorized native root commands acquire one mutation gate before block
   assert.match(state, /root_mutations:\s*Arc::new\(Mutex::new\(RootGrantRevision::new\(\)\)\)/);
   const locked = native.indexOf('Arc::clone(&state.root_mutations).lock_owned().await');
   const validator = native.indexOf('tokio::task::spawn_blocking(move || validate(roots))');
-  const fairWriter = native.indexOf('state.registry.reserve_root_publication().await', validator);
+  const fairWriter = native.indexOf('state.registry.reserve_root_publication()', validator);
   const accepted = native.indexOf('tokio::task::spawn_blocking(move || {', fairWriter);
   const writerPermit = native.indexOf('let _root_write_admission = root_write_admission;', accepted);
   const settings = native.indexOf('state.settings.blocking_lock()', accepted);
@@ -63,7 +63,7 @@ test('accepted root commit is moved off the Tokio executor, retaining the CAS gu
 });
 
 test('fair root writer intent queues after validated CAS before accepted blocking publication (#177)', () => {
-  assert.match(native, /let root_write_admission = state\.registry\.reserve_root_publication\(\)\.await/);
+  assert.match(native, /let root_write_admission = tokio::time::timeout\([\s\S]*?state\.registry\.reserve_root_publication\(\),[\s\S]*?\)\s*\.await/);
   assert.match(native, /let _root_write_admission = root_write_admission/);
   assert.match(registry, /async fn queued_root_writer_precedes_later_admitted_file_read\(\)/);
   assert.match(registry, /async fn scoped_read_slots_bound_active_and_waiting_workers\(\)/);

@@ -10,7 +10,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tauri::{State, WebviewWindow};
 use uuid::Uuid;
 
@@ -101,6 +101,33 @@ fn persist_root_grants(
     Ok(())
 }
 
+// This bounds only the cancellable, pre-acceptance wait. A stalled NFS read
+// can still retain its old granted FD; never acknowledge Clear as committed
+// unless the accepted worker actually completes its durable publication.
+const ROOT_PUBLICATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn commit_serialized_roots<V, P>(
+    state: &Arc<AgentState>,
+    roots: Vec<String>,
+    expected_root_revision: Option<String>,
+    validate: V,
+    persist: P,
+) -> Result<(), String>
+where
+    V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
+    P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
+{
+    commit_serialized_roots_with_timeout(
+        state,
+        roots,
+        expected_root_revision,
+        validate,
+        persist,
+        ROOT_PUBLICATION_ADMISSION_TIMEOUT,
+    )
+    .await
+}
+
 /// Reserve a per-AgentState revision slot in native arrival order.
 /// Validation is cancellation-sensitive: the resolver alone cannot publish.
 ///
@@ -109,12 +136,13 @@ fn persist_root_grants(
 /// interrupt save/live publication or let a later Clear overtake; a client
 /// with an unknown acknowledgment must reread authoritative settings.
 /// No synchronous registry writer wait or disk save runs on a Tokio executor.
-async fn commit_serialized_roots<V, P>(
+async fn commit_serialized_roots_with_timeout<V, P>(
     state: &Arc<AgentState>,
     roots: Vec<String>,
     expected_root_revision: Option<String>,
     validate: V,
     persist: P,
+    max_admission_wait: Duration,
 ) -> Result<(), String>
 where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
@@ -139,7 +167,14 @@ where
     // Reserve fair writer intent after successful validation but BEFORE
     // accepting commit ownership. If the caller cancels while this awaits
     // older FD reads, no grant is published; pending writers block new reads.
-    let root_write_admission = state.registry.reserve_root_publication().await;
+    let root_write_admission = tokio::time::timeout(
+        max_admission_wait,
+        state.registry.reserve_root_publication(),
+    )
+    .await
+    .map_err(|_| {
+        "Directory permission change not committed; retry after active reads finish".to_owned()
+    })?;
     // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
     // fair write permit. Cancellation cannot cut save/live publication apart.
     let state = Arc::clone(state);
@@ -235,6 +270,80 @@ mod tests {
     use super::*;
     use crate::tools::approvals::ApprovalGate;
     use serde_json::json;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unaccepted_root_writer_times_out_without_publishing_and_retry_recovers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-writer-timeout-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path.clone()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let original_revision = state.root_mutations.lock().await.token();
+        let persist_count = Arc::new(AtomicUsize::new(0));
+
+        // A held admission guard represents an admitted read that cannot yet
+        // finish I/O. The Clear has not been accepted for publication.
+        let held_admission = state.registry.reserve_root_publication().await;
+        let writes = Arc::clone(&persist_count);
+        let failure = commit_serialized_roots_with_timeout(
+            &state,
+            Vec::new(),
+            None,
+            |requested| ToolRegistry::canonical_roots(&requested),
+            move |_| {
+                writes.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            Duration::from_millis(35),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            failure,
+            "Directory permission change not committed; retry after active reads finish"
+        );
+        assert_eq!(persist_count.load(Ordering::SeqCst), 0);
+        // Timeout must cancel the queued writer and release the revision lock.
+        let after = tokio::time::timeout(Duration::from_millis(100), state.root_mutations.lock())
+            .await
+            .expect("abandoned writer must release native revision gate")
+            .token();
+        assert_eq!(original_revision, after);
+        assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
+
+        drop(held_admission);
+        // A timed-out writer must not resume later and double-publish. A
+        // separate retry owns the only accepted durable publication.
+        let writes = Arc::clone(&persist_count);
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            commit_serialized_roots_with_timeout(
+                &state,
+                Vec::new(),
+                None,
+                |requested| ToolRegistry::canonical_roots(&requested),
+                move |_| {
+                    writes.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(persist_count.load(Ordering::SeqCst), 1);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert_ne!(state.root_mutations.lock().await.token(), original_revision);
+    }
 
     #[tokio::test]
     async fn native_root_calls_commit_in_validation_entry_order_even_if_first_is_slow() {
