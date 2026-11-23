@@ -90,7 +90,9 @@ impl AgentSettings {
     /// A dormant 'auto' capability in persisted JSON may not silently
     /// become privileged when a future version adds a new registry tool.
     fn only_known_tool_policies(&self) -> bool {
-        self.policies.keys().all(|tool| ToolRegistry::is_known(tool))
+        self.policies
+            .keys()
+            .all(|tool| ToolRegistry::is_known(tool))
     }
 
     pub fn load() -> Result<Self, String> {
@@ -281,7 +283,8 @@ mod tests {
         let error = AgentSettings::load_at(&path).unwrap_err();
         assert_eq!(error, "Invalid settings.json");
         assert!(!error.contains("future__sensitive_tool"));
-        let known = r#"{"allowed_roots":[],"policies":{"filesystem__read_file":"auto","bash__run":"ask"}}"#;
+        let known =
+            r#"{"allowed_roots":[],"policies":{"filesystem__read_file":"auto","bash__run":"ask"}}"#;
         fs::write(&path, known).unwrap();
         let settings = AgentSettings::load_at(&path).unwrap();
         assert_eq!(
@@ -296,7 +299,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let mut settings = AgentSettings::default();
-        settings.policies.insert("bash__run".into(), Policy::Disable);
+        settings
+            .policies
+            .insert("bash__run".into(), Policy::Disable);
         settings.save_at(&path).unwrap();
         let original = fs::read(&path).unwrap();
 
