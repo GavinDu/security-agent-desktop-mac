@@ -27,7 +27,8 @@ test('activation socket enforces kernel peer UID and one bounded marker, no arbi
   const source = await readFile('src-tauri/src/activation.rs', 'utf8');
   const tray = await readFile('src-tauri/src/tray.rs', 'utf8');
   assert.match(source, /libc::getpeereid\(/);
-  assert.match(source, /uid == unsafe \{ libc::geteuid\(\) \}/);
+  assert.match(source, /allowed_peer_uid\(uid, unsafe \{ libc::geteuid\(\) \}\)/);
+  assert.match(source, /owner_uid != 0 && peer_uid == owner_uid/);
   assert.match(source, /const FOCUS_REQUEST: u8 = b'F';/);
   assert.match(source, /const MAX_REQUEST_BYTES: u64 = 2;/);
   assert.match(source, /set_read_timeout\(Some\(PEER_READ_DEADLINE\)\)/);
@@ -48,6 +49,7 @@ test('activation handoff retains macOS native tests and physical acceptance rema
   const source = await readFile('src-tauri/src/activation.rs', 'utf8');
   const doc = await readFile('docs/SECOND_INSTANCE_FOCUS.md', 'utf8');
   for (const testName of [
+    'rejects_foreign_or_root_uid_even_with_matching_socket_bytes',
     'same_uid_socket_pair_is_validated_by_kernel',
     'accepts_only_exact_marker_and_eof',
     'refuses_symlinks_and_non_socket_targets',
