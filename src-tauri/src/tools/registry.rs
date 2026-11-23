@@ -530,6 +530,86 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn acknowledged_root_revoke_waits_for_inflight_scoped_file_read() {
+        use std::{sync::mpsc, thread};
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("safe.txt");
+        std::fs::write(&file, "approved-content").unwrap();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
+                .unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        ));
+        let roots = Arc::clone(&registry.roots);
+        let read_path = file.clone();
+        let (reading_tx, reading_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            ToolRegistry::scoped_read_with_lease(&roots, &read_path, |fd, relative| {
+                reading_tx.send(()).unwrap();
+                // A read that already acquired the authoritative lease may
+                // finish before Clear acknowledges, never AFTER it returns.
+                continue_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .map_err(|_| "Test read lease fixture timed out".to_owned())?;
+                crate::tools::pinned_read::read_scoped_file(fd, relative)
+            })
+        });
+        reading_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+        let (writer_started_tx, writer_started_rx) = mpsc::channel();
+        let (revoked_tx, revoked_rx) = mpsc::channel();
+        let writer_registry = Arc::clone(&registry);
+        let writer = thread::spawn(move || {
+            writer_started_tx.send(()).unwrap();
+            writer_registry.set_roots(Vec::new());
+            revoked_tx.send(()).unwrap();
+        });
+        writer_started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            revoked_rx.recv_timeout(Duration::from_millis(80)).is_err(),
+            "a root revoke cannot report success before the old read releases its lease"
+        );
+        continue_tx.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap(), "approved-content");
+        revoked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        writer.join().unwrap();
+
+        // A later invocation cannot clone or use the former directory FD.
+        let denied = ToolRegistry::scoped_read_with_lease(
+            &registry.roots,
+            &file,
+            crate::tools::pinned_read::read_scoped_file,
+        )
+        .unwrap_err();
+        assert_eq!(denied, "Path outside granted roots");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revoked_root_precedes_any_queued_scoped_read() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("safe.txt");
+        std::fs::write(&file, "never reauthorized").unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
+                .unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        registry.set_roots(Vec::new());
+        let error = ToolRegistry::scoped_read_with_lease(
+            &registry.roots,
+            &file,
+            |_fd, _rel| -> Result<String, String> {
+                panic!("revoked file read must fail before any openat operation")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "Path outside granted roots");
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn parent_symlink_swap_during_approval_is_denied() {
         let temp = tempfile::tempdir().unwrap();
