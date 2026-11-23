@@ -214,8 +214,8 @@ test('failed persisted root-grant change leaves live registry and UI in sync (#1
   const source = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
   assert.match(source, /fn persist_root_grants\(/);
   assert.match(source, /let mut staged = settings\.clone\(\)/);
-  assert.match(source, /registry\.commit_roots_transaction\(roots, \(\) => \{[\s\S]*?persist\(&staged\)\.map_err/);
-  assert.match(source, /registry\.commit_roots_transaction\(roots, \(\) => \{/);
+  assert.match(source, /registry\.commit_roots_transaction\(roots, \|\| \{[\s\S]*?persist\(&staged\)\.map_err/);
+  assert.match(source, /registry\.commit_roots_transaction\(roots, \|\| \{/);
   assert.match(source, /persist\(&staged\)\.map_err\(\|_\| "Cannot persist approved roots"\.to_owned\(\)\)/);
   assert.match(source, /\}\)\?;\s*\*settings = staged/);
   assert.doesNotMatch(source, /persist\(&staged\)\.map_err\([^\n]+\)\?;\s*registry\.set_roots/);
@@ -240,7 +240,7 @@ test('poisoned registry fails closed before disk persistence and never panics in
   assert.match(mutation, /map_err\(\|_\| "Directory permission registry unavailable"/);
   assert.match(source, /fn poisoned_root_registry_fails_closed_without_panicking_or_saving/);
   assert.match(commits, /fn poisoned_registry_writer_denies_root_save_before_any_disk_change/);
-  const lease = source.slice(source.indexOf('fn scoped_read_with_lease('),
+  const lease = source.slice(source.indexOf('fn scoped_read_with_lease<T>('),
     source.indexOf('fn allowed_path('));
   assert.match(lease, /\.read\(\)\s*\.map_err\(\|_\| "Directory permission registry unavailable"/);
   const auth = source.slice(source.indexOf('fn allowed_path('), source.indexOf('fn reauthorize_after_approval('));
