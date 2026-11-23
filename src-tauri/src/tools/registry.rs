@@ -559,6 +559,13 @@ mod tests {
             })
         });
         reading_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            matches!(
+                registry.roots.try_write(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "an in-flight scoped read must retain the actual registry read lock"
+        );
 
         let (writer_started_tx, writer_started_rx) = mpsc::channel();
         let (revoked_tx, revoked_rx) = mpsc::channel();
