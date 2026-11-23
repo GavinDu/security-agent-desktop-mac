@@ -374,6 +374,16 @@ export function eligibleForDeletion(candidate, branch, pr, activeBranches, evide
     : candidate.status === 'superseded' && !pr.merged_at && evidenceSatisfied;
 }
 
+// Generic maintenance path for future PRs; never infer a merged head from
+// branch ancestry alone because this repository uses squash merges.
+export function eligibleMergedRecentBranch(pr, branch, activeBranches) {
+  if (!pr || pr.base?.ref !== 'main' ||
+      !/^[0-9a-f]{40}$/.test(pr.merge_commit_sha || '')) return false;
+  const candidate = { name: pr.head?.ref, sha: pr.head?.sha, status: 'merged' };
+  return /^[0-9a-f]{40}$/.test(candidate.sha || '') &&
+    eligibleForDeletion(candidate, branch, pr, activeBranches, true);
+}
+
 export async function verifySupersededEvidence(candidate, reader = readFile) {
   if (candidate.status !== 'superseded') return true;
   const required = supersededEvidence[String(candidate.pr)];
@@ -453,6 +463,45 @@ export async function pruneVerifiedBranches(env = process.env, api = request, re
     await api(repo, token, '/git/refs/heads/' + tracked.name, 'DELETE');
     deleted++;
     console.log('Pruned verified merged active branch: ' + tracked.name + ' (PR #' + tracked.pr + ')');
+  }
+  // Newer PRs should not need a permanently hardcoded branch manifest.
+  // This executes ONLY on the trusted main ref and only for same-repository
+  // PRs merged into main whose original head ref has not moved since merge.
+  // Verify merged-commit ancestry so rewritten main history fails closed.
+  const trackedNames = new Set([
+    ...verifiedCandidates.map(candidate => candidate.name),
+    ...trackedActivePRs.map(candidate => candidate.name),
+  ]);
+  const untracked = [...byName.keys()].some(name =>
+    name !== 'main' && !trackedNames.has(name));
+  if (untracked) {
+    const mainSha = env.GITHUB_SHA;
+    if (!/^[0-9a-f]{40}$/.test(mainSha || '')) {
+      throw new Error('Cannot attest checked-out main commit for future PR cleanup');
+    }
+    const recent = await api(repo, token,
+      '/pulls?state=closed&sort=updated&direction=desc&per_page=100');
+    if (!Array.isArray(recent) || recent.length > 100) {
+      throw new Error('Cannot verify bounded recent merged PR inventory');
+    }
+    for (const pr of recent) {
+      const name = pr.head?.ref;
+      if (!name || trackedNames.has(name)) continue;
+      const branch = byName.get(name);
+      if (!eligibleMergedRecentBranch(pr, branch, activeBranches)) continue;
+      // A squash merge's commit may not share ancestry with its source SHA,
+      // but the merge commit must remain in the trusted main history.
+      const ancestry = await api(repo, token, '/compare/' +
+        pr.merge_commit_sha + '...' + mainSha);
+      if (!['ahead', 'identical'].includes(ancestry.status)) continue;
+      const live = await api(repo, token, '/git/ref/heads/' + name);
+      if (live.object?.sha !== pr.head.sha) continue;
+      await api(repo, token, '/git/refs/heads/' + name, 'DELETE');
+      byName.delete(name);
+      deleted++;
+      console.log('Pruned verified future merged branch: ' + name +
+        ' (PR #' + pr.number + ')');
+    }
   }
   const remaining = await api(repo, token, '/branches?per_page=100');
   if (remaining.length === 100) throw new Error('Cannot verify full post-cleanup branch inventory');
