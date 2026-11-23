@@ -1,7 +1,7 @@
 use crate::{agent::AgentState, tools::registry::ToolCall};
 use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, Request, State},
-    http::{header, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -92,6 +92,49 @@ async fn serve_with_retry_interval(state: Arc<AgentState>, retry: Duration) {
     }
 }
 
+/// A Host header is not an authentication factor, and must never redefine
+/// which interface or DNS origin is trusted. Reject foreign authorities before
+/// even examining bearer credentials. Literal matching deliberately performs
+/// no DNS lookup, proxy inference or attacker-controlled canonicalization.
+/// Direct in-process Router tests can omit Host; deployed HTTP/1.1 requires it.
+fn host_authority_allowed(
+    headers: &HeaderMap,
+    requested: &axum::http::Uri,
+    bind: SocketAddr,
+) -> bool {
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let one_header = match hosts.next() {
+        Some(header) => {
+            if hosts.next().is_some() {
+                return false;
+            }
+            let Ok(value) = header.to_str() else {
+                return false;
+            };
+            Some(value)
+        }
+        None => None,
+    };
+    // HTTP absolute-form URIs have their own potentially attacker-controlled
+    // authority. Independently validate it AND reject Host/URI disagreement,
+    // even if both would otherwise be independently permitted aliases.
+    let authority = requested.authority().map(|a| a.as_str());
+    if let Some(value) = authority {
+        if !matches_bind_authority(value, bind)
+            || one_header.is_some_and(|host| !host.eq_ignore_ascii_case(value))
+        {
+            return false;
+        }
+    }
+    one_header.is_none_or(|value| matches_bind_authority(value, bind))
+}
+
+fn matches_bind_authority(value: &str, bind: SocketAddr) -> bool {
+    value == bind.to_string()
+        || (bind.ip().is_loopback()
+            && value.eq_ignore_ascii_case(&format!("localhost:{}", bind.port())))
+}
+
 /// ConnectInfo is set by axum's TCP server, not a client-supplied forwarding header.
 async fn authorize(
     State(state): State<Arc<AgentState>>,
@@ -103,6 +146,13 @@ async fn authorize(
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"Source IP not in allowed tunnel network"})),
+        )
+            .into_response();
+    }
+    if !host_authority_allowed(request.headers(), request.uri(), state.bind) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error":"HTTP Host authority not permitted"})),
         )
             .into_response();
     }
@@ -331,6 +381,126 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn literal_host_policy_rejects_foreign_duplicate_and_absolute_authorities() {
+        use axum::http::{HeaderMap, HeaderValue, Uri};
+        let local = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let tunnel = SocketAddr::from(([10, 8, 0, 1], 8080));
+        let relative: Uri = "/health".parse().unwrap();
+        let mut headers = HeaderMap::new();
+
+        assert!(host_authority_allowed(&headers, &relative, local));
+        for host in ["127.0.0.1:8080", "localhost:8080", "LOCALHOST:8080"] {
+            headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+            assert!(host_authority_allowed(&headers, &relative, local), "{host}");
+        }
+        for host in [
+            "evil.example:8080",
+            "localhost.evil:8080",
+            "127.0.0.1.evil:8080",
+            "127.0.0.1:9999",
+            "127.0.0.1:8080@evil.example",
+            "localhost.:8080",
+            "10.8.0.1:8080",
+        ] {
+            headers.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+            assert!(
+                !host_authority_allowed(&headers, &relative, local),
+                "{host}"
+            );
+        }
+        headers.clear();
+        headers.append(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        headers.append(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(!host_authority_allowed(&headers, &relative, local));
+        headers.clear();
+        headers.insert(header::HOST, HeaderValue::from_static("10.8.0.1:8080"));
+        assert!(host_authority_allowed(&headers, &relative, tunnel));
+        assert!(!host_authority_allowed(&headers, &relative, local));
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+        assert!(!host_authority_allowed(&headers, &relative, tunnel));
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8080"));
+        assert!(!host_authority_allowed(
+            &headers,
+            &"http://evil.example:8080/health".parse().unwrap(),
+            local,
+        ));
+        assert!(host_authority_allowed(
+            &headers,
+            &"http://127.0.0.1:8080/health".parse().unwrap(),
+            local,
+        ));
+        assert!(!host_authority_allowed(
+            &headers,
+            &"http://localhost:8080/health".parse().unwrap(),
+            local,
+        ));
+        headers.insert(header::HOST, HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert!(!host_authority_allowed(&headers, &relative, local));
+    }
+
+    #[tokio::test]
+    async fn host_rebinding_denied_before_bearer_and_dispatch_but_valid_host_works() {
+        let state = AgentState::new(
+            "host-header-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        for (path, method) in [
+            ("/health", "GET"),
+            ("/tools", "GET"),
+            ("/tools", "POST"),
+            ("/chat", "POST"),
+        ] {
+            let mut wrong = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "evil.example:8080")
+                .header("authorization", "Bearer host-header-test-token")
+                .header("x-forwarded-host", "127.0.0.1:8080")
+                .header("x-forwarded-for", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap();
+            wrong
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44000))));
+            let denied = app.clone().oneshot(wrong).await.unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            let bytes = denied.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(!body.contains("evil.example"));
+            assert!(!body.contains("host-header-test-token"));
+
+            let mut valid = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:8080")
+                .header("authorization", "Bearer host-header-test-token")
+                .body(Body::empty())
+                .unwrap();
+            valid
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 44001))));
+            let accepted = app.clone().oneshot(valid).await.unwrap();
+            assert_ne!(accepted.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        // The real network source always takes precedence over any Host value.
+        let mut remote = Request::builder()
+            .uri("/health")
+            .header("host", "127.0.0.1:8080")
+            .body(Body::empty())
+            .unwrap();
+        remote
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([192, 168, 4, 2], 44002))));
+        assert_eq!(
+            app.oneshot(remote).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[tokio::test]
     async fn health_is_loopback_only_and_tools_need_token() {
