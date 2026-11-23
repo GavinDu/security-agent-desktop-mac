@@ -67,8 +67,8 @@ test('fair writer priority, bounded admitted FD reads and owned cancellation gua
   assert.match(registry, /root_admission\s*\.try_read\(\)\s*\.map_err\(\|_\| "Directory permission update pending"/);
   assert.match(registry, /fn queued_root_writer_precedes_later_admitted_file_read/);
   assert.match(registry, /fn scoped_read_slots_bound_active_and_waiting_workers/);
-  const mutation = commands.slice(commands.indexOf('async fn commit_serialized_roots'),
-    commands.indexOf('#[tauri::command]', commands.indexOf('async fn commit_serialized_roots')));
+  const mutation = commands.slice(commands.indexOf('async fn commit_serialized_roots_with_timeout'),
+    commands.indexOf('#[tauri::command]', commands.indexOf('async fn commit_serialized_roots_with_timeout')));
   assert.match(mutation, /reserve_root_publication\(\)\.await/);
   assert.match(mutation, /let _root_write_admission = root_write_admission/);
   assert.doesNotMatch(mutation, /blocking_write\(\)/);
