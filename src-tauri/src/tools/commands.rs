@@ -379,6 +379,7 @@ mod tests {
         )
         .unwrap();
         let before = state.root_mutations.lock().await.token();
+        let old_revision = before.clone();
         let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let worker_state = state.clone();
@@ -428,7 +429,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_ne!(revision, state.root_mutations.lock().await.token().replace(":invalid", ""));
+        assert_ne!(revision, old_revision);
         assert_eq!(roots.len(), 1);
         assert_eq!(
             state
