@@ -196,16 +196,30 @@ fn remote_shell_denied() -> Response {
         .into_response()
 }
 
+// Until #176 establishes response handoff ordering against trusted root
+// revocation, do not let the tunnel-facing HTTP API deliver file contents.
+// Keep loopback and trusted native Tauri IPC unchanged. The real TCP peer
+// comes from ConnectInfo; never trust an X-Forwarded-For claim.
+fn tunnel_file_read_forbidden(source: SocketAddr, tool_name: &str) -> bool {
+    tool_name == "filesystem__read_file" && !source.ip().is_loopback()
+}
+
+fn remote_file_read_denied() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error":"Remote file read awaits a verified revocation response fence"})),
+    )
+        .into_response()
+}
+
 async fn list_tools(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AgentState>>,
 ) -> Json<Value> {
     let mut tools = state.registry.list();
     tools.retain(|tool| {
-        !tunnel_shell_forbidden(
-            source,
-            tool["function"]["name"].as_str().unwrap_or_default(),
-        )
+        let name = tool["function"]["name"].as_str().unwrap_or_default();
+        !tunnel_shell_forbidden(source, name) && !tunnel_file_read_forbidden(source, name)
     });
     Json(json!({"tools":tools}))
 }
@@ -217,6 +231,9 @@ async fn invoke_tool(
 ) -> Response {
     if tunnel_shell_forbidden(source, &call.name) {
         return remote_shell_denied();
+    }
+    if tunnel_file_read_forbidden(source, &call.name) {
+        return remote_file_read_denied();
     }
     match state.registry.invoke(call).await {
         Ok(data) => (StatusCode::OK, Json(json!({"result":data}))).into_response(),
@@ -242,6 +259,9 @@ async fn chat(
     if let Some(call) = request.tool_call {
         if tunnel_shell_forbidden(source, &call.name) {
             return remote_shell_denied();
+        }
+        if tunnel_file_read_forbidden(source, &call.name) {
+            return remote_file_read_denied();
         }
         let name = call.name.clone();
         return match state.registry.invoke(call).await {
@@ -512,6 +532,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tunnel_file_read_is_restricted_only_to_remote_http_peers() {
+        let local = SocketAddr::from(([127, 0, 0, 1], 41000));
+        let tunnel = SocketAddr::from(([10, 8, 0, 2], 41000));
+        assert!(!tunnel_file_read_forbidden(local, "filesystem__read_file"));
+        assert!(tunnel_file_read_forbidden(tunnel, "filesystem__read_file"));
+        assert!(!tunnel_file_read_forbidden(tunnel, "bash__run"));
+        assert!(!tunnel_file_read_forbidden(tunnel, "unrecognized__tool"));
+    }
+
     #[tokio::test]
     async fn tunnel_http_never_advertises_or_invokes_uncontained_shell() {
         let state = AgentState::new(
@@ -545,7 +575,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&"filesystem__read_file"));
+        assert!(!names.contains(&"filesystem__read_file"));
         assert!(!names.contains(&"bash__run"));
 
         for (route, body) in [
@@ -561,6 +591,20 @@ mod tests {
                 json!({
                     "message":"run this",
                     "tool_call":{"name":"bash__run","arguments":{"command":"touch should-not-execute","cwd":"/"}}
+                }),
+            ),
+            (
+                "/tools",
+                json!({
+                    "name":"filesystem__read_file",
+                    "arguments":{"path":"/private/should-not-be-read"}
+                }),
+            ),
+            (
+                "/chat",
+                json!({
+                    "message":"read this",
+                    "tool_call":{"name":"filesystem__read_file","arguments":{"path":"/private/should-not-be-read"}}
                 }),
             ),
         ] {
@@ -615,11 +659,13 @@ mod tests {
         let json: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert!(json["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| { tool["function"]["name"] == "bash__run" }));
+        for expected in ["bash__run", "filesystem__read_file"] {
+            assert!(json["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == expected));
+        }
     }
 
     #[tokio::test]
