@@ -14,7 +14,7 @@ test('all authorized native root commands acquire one mutation gate before block
   assert.match(state, /root_mutations:\s*Arc<Mutex<RootGrantRevision>>/);
   assert.match(state, /root_mutations:\s*Arc::new\(Mutex::new\(RootGrantRevision::new\(\)\)\)/);
   const locked = native.indexOf('Arc::clone(&state.root_mutations).lock_owned().await');
-  const validator = native.indexOf('tokio::task::spawn_blocking(move || validate(roots))');
+  const validator = native.indexOf('tokio::task::spawn_blocking(move || {');
   const fairWriter = native.indexOf('state.registry.reserve_root_publication()', validator);
   const accepted = native.indexOf('tokio::task::spawn_blocking(move || {', fairWriter);
   const writerPermit = native.indexOf('let _root_write_admission = root_write_admission;', accepted);
@@ -25,7 +25,7 @@ test('all authorized native root commands acquire one mutation gate before block
     accepted > fairWriter && writerPermit > accepted && settings > writerPermit &&
     published > settings && advanced > published,
     'native arrival-order gate must enter cancellable validation, then owned accepted commit on blocking worker');
-  assert.match(native, /move \|\| validate\(roots\)/);
+  assert.match(native, /tokio::task::spawn_blocking\(move \|\| \{[\s\S]*?let _validation_permit = validation_permit;\s*validate\(roots\)/);
   assert.match(native, /\.map_err\(\|_\| "Cannot validate approved roots"\.to_owned\(\)\)\?\?/);
 });
 
