@@ -30,6 +30,10 @@ test('activation socket enforces kernel peer UID and one bounded marker, no arbi
   assert.match(source, /allowed_peer_uid\(uid, unsafe \{ libc::geteuid\(\) \}\)/);
   assert.match(source, /owner_uid != 0 && peer_uid == owner_uid/);
   assert.match(source, /const FOCUS_REQUEST: u8 = b'F';/);
+  assert.match(source, /const FOCUS_ACCEPTED: u8 = b'A';/);
+  assert.match(source, /peer.read_exact\(&mut acknowledged\)/);
+  assert.match(source, /peer.write_all\(&\[FOCUS_ACCEPTED\]\)/);
+  assert.match(source, /if acknowledged\[0\] != FOCUS_ACCEPTED/);
   assert.match(source, /const MAX_REQUEST_BYTES: u64 = 2;/);
   assert.match(source, /set_read_timeout\(Some\(PEER_READ_DEADLINE\)\)/);
   assert.match(source, /bytes.as_slice\(\) == \[FOCUS_REQUEST\]/);
@@ -55,6 +59,7 @@ test('activation handoff retains macOS native tests and physical acceptance rema
     'refuses_symlinks_and_non_socket_targets',
     'stale_socket_is_recovered_but_active_socket_is_not_unlinked',
     'rejected_second_launch_sends_one_constant_byte_to_first_instance',
+    'refuses_invalid_or_missing_primary_ack',
     'rejects_permissive_socket_mode',
   ]) {
     assert.ok(source.includes('fn ' + testName + '('), 'missing native test: ' + testName);
