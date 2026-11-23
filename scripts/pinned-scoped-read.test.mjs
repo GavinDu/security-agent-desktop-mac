@@ -31,7 +31,7 @@ test('revocation acknowledgment waits for complete FD-relative file read (#164)'
   const invoke = registry.slice(registry.indexOf('pub async fn invoke('),
     registry.indexOf('#[derive(Deserialize)]'));
   assert.match(registry, /roots: Arc<RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>>/);
-  assert.match(lease, /let grants = roots\.read\(\)/);
+  assert.match(lease, /let grants = roots\s*\.read\(\)/);
   assert.match(lease, /grant\.clone_directory\(\)\?/);
   assert.match(lease, /return read\(&pinned, relative\)/);
   assert.doesNotMatch(lease, /drop\(grants\)/);
