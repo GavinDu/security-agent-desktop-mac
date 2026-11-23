@@ -180,9 +180,10 @@ async fn authorize(
     next.run(request).await
 }
 
-/// Bound authenticated tool/chat POST and catalog/pairing GET requests by
-/// the same 60-per-minute per-real-TCP-peer budget. Only expensive tool/chat
-/// POST dispatch needs one of the 16 shared concurrent permits.
+/// Bound unauthenticated health probes with a separate budget, and bound
+/// authenticated tool/chat POST and catalog/pairing GET requests by the
+/// existing 60-per-minute real-TCP-peer budget. Only tool/chat POST dispatch
+/// needs one of the 16 shared concurrent permits.
 /// Unauthorized/out-of-range requests are denied before any rate admission.
 async fn limit_tool_dispatch(
     State(state): State<Arc<AgentState>>,
@@ -190,6 +191,20 @@ async fn limit_tool_dispatch(
     request: Request,
     next: Next,
 ) -> Response {
+    let is_health_get = request.method() == Method::GET && request.uri().path() == "/health";
+    if is_health_get {
+        // A probe needs no bearer, but the *outer* middleware already checks
+        // the real TCP source and requested Host. Separate this budget from
+        // authenticated tools so unauthenticated floods cannot starve them.
+        if !state.health_rate_limiter.allow(source.ip()) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error":"Health request rate limit reached"})),
+            )
+                .into_response();
+        }
+        return next.run(request).await;
+    }
     let is_tool_post =
         request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
     let is_catalog_get =
@@ -500,6 +515,101 @@ mod tests {
             app.oneshot(remote).await.unwrap().status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_health_has_separate_real_peer_budget_and_no_dispatch_cost() {
+        use crate::agent::{
+            rate_limit::HEALTH_REQUESTS_PER_WINDOW,
+            MAX_CONCURRENT_TOOL_REQUESTS,
+        };
+        let state = AgentState::new(
+            "health-limit-test-bearer".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let make_health = |source: &str, host: &str, forwarded: &str| {
+            let mut req = Request::builder()
+                .uri("/health")
+                .header("host", host)
+                .header("x-forwarded-for", forwarded)
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+                source.parse().unwrap(),
+                49000,
+            )));
+            req
+        };
+        let occupied = state
+            .dispatch_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TOOL_REQUESTS as u32)
+            .await
+            .unwrap();
+        // Source/Host gates remain outermost, before health admission.
+        assert_eq!(
+            app.clone()
+                .oneshot(make_health("192.168.1.2", "10.8.0.1:8080", "10.8.0.2"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make_health("10.8.0.2", "attacker.test:8080", "10.8.0.3"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for _ in 0..HEALTH_REQUESTS_PER_WINDOW {
+            assert_eq!(
+                app.clone()
+                    .oneshot(make_health("10.8.0.2", "10.8.0.1:8080", "10.8.0.3"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(make_health("10.8.0.2", "10.8.0.1:8080", "10.8.0.3"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let message = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(message.contains("Health request rate limit reached"));
+        assert!(!message.contains("10.8.0.2"));
+        assert!(!message.contains("attacker.test"));
+        assert!(!message.contains("health-limit-test-bearer"));
+        // Real source, not X-Forwarded-For, owns the budget.
+        assert_eq!(
+            app.clone()
+                .oneshot(make_health("10.8.0.3", "10.8.0.1:8080", "10.8.0.2"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+        drop(occupied);
+        let mut tools = Request::builder()
+            .uri("/tools")
+            .header("host", "10.8.0.1:8080")
+            .header("authorization", "Bearer health-limit-test-bearer")
+            .body(Body::empty())
+            .unwrap();
+        tools.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            49001,
+        )));
+        assert_eq!(app.oneshot(tools).await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
