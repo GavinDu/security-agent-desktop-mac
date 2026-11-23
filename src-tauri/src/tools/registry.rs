@@ -5,7 +5,10 @@ use std::process::{ExitStatus, Stdio};
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock, RwLock,
+    },
     time::Duration,
 };
 use tokio::{
@@ -241,6 +244,9 @@ pub struct ToolRegistry {
     // blocking FD read or the accepted native grant save/publication.
     root_admission: Arc<AsyncRwLock<()>>,
     read_slots: Arc<Semaphore>,
+    // Private process-local monotonic grant generation, not a caller-supplied
+    // revision token. Used to reject already-revoked completed read results.
+    root_generation: AtomicU64,
     gate: Arc<ApprovalGate>,
 }
 
@@ -253,6 +259,7 @@ impl ToolRegistry {
             roots: Arc::new(RwLock::new(roots)),
             root_admission: Arc::new(AsyncRwLock::new(())),
             read_slots: Arc::new(Semaphore::new(MAX_ADMITTED_FILE_READS)),
+            root_generation: AtomicU64::new(0),
             gate,
         }
     }
@@ -282,8 +289,14 @@ impl ToolRegistry {
             .roots
             .write()
             .map_err(|_| "Directory permission registry unavailable".to_owned())?;
+        // Never persist new roots if the private epoch cannot advance.
+        // Holding the std writer excludes all other epoch mutations.
+        if self.root_generation.load(Ordering::Relaxed) == u64::MAX {
+            return Err("Directory permission generation exhausted".to_owned());
+        }
         persist()?;
         *current = roots;
+        self.root_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -293,6 +306,17 @@ impl ToolRegistry {
     #[cfg(test)]
     fn set_roots(&self, roots: Vec<crate::tools::pinned_read::GrantedRoot>) -> Result<(), String> {
         self.commit_roots_transaction(roots, || Ok(()))
+    }
+
+    /// Called after the admitted pinned worker releases its read permit and
+    /// BEFORE the shared ToolRegistry returns a successful JSON result to
+    /// either native IPC or authenticated HTTP. A later Clear/Grant invalidates
+    /// the result even when the underlying FD read itself completed safely.
+    fn ensure_current_file_result(&self, expected_generation: u64) -> Result<(), String> {
+        if self.root_generation.load(Ordering::Acquire) != expected_generation {
+            return Err("File read authorization changed".to_owned());
+        }
+        Ok(())
     }
 
     /// No new FD worker may overtake a queued trusted Clear/Grant. Capacity
@@ -410,6 +434,10 @@ impl ToolRegistry {
                 self.reauthorize_after_approval("filesystem__read_file", &path)?;
                 #[cfg(unix)]
                 let (read_slot, read_gate) = self.admit_scoped_read().await?;
+                // Once fair admission is held, no writer can publish until
+                // the blocking worker releases it. Capture a trusted epoch.
+                #[cfg(unix)]
+                let read_generation = self.root_generation.load(Ordering::Acquire);
                 // A separate caller may revoke roots between approval and
                 // the blocking worker. Resolve the CURRENT pinned grant and
                 // retain its read lease through the entire bounded read.
@@ -429,6 +457,8 @@ impl ToolRegistry {
                 })
                 .await
                 .map_err(|_| "Approved file read task failed")??;
+                #[cfg(unix)]
+                self.ensure_current_file_result(read_generation)?;
                 #[cfg(not(unix))]
                 let text: String = return Err("Scoped reads require Unix".into());
                 Ok(json!({ "path": path, "content": text }))
@@ -699,6 +729,92 @@ mod tests {
             later.await.unwrap().unwrap_err(),
             "Path outside granted roots"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_file_result_denied_after_root_clear_before_json_return() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "SENSITIVE_FILE_CONTENT").unwrap();
+        let file = file.canonicalize().unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        let (_slot, held_gate) = registry.admit_scoped_read().await.unwrap();
+        let authorized_generation = registry.root_generation.load(Ordering::Acquire);
+        // Use the same pinned FD-relative read path as the actual invoke.
+        let content = ToolRegistry::scoped_read_with_lease(
+            &registry.roots,
+            &file,
+            crate::tools::pinned_read::read_scoped_file,
+        )
+        .unwrap();
+        assert_eq!(content, "SENSITIVE_FILE_CONTENT");
+        registry
+            .ensure_current_file_result(authorized_generation)
+            .unwrap();
+
+        // Once I/O is complete its read permit is released. A trusted Clear
+        // can now publish before native/HTTP JSON delivery begins.
+        drop(held_gate);
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        assert_eq!(
+            registry
+                .ensure_current_file_result(authorized_generation)
+                .unwrap_err(),
+            "File read authorization changed"
+        );
+        assert_eq!(
+            ToolRegistry::scoped_read_with_lease(
+                &registry.roots,
+                &file,
+                crate::tools::pinned_read::read_scoped_file
+            )
+            .unwrap_err(),
+            "Path outside granted roots"
+        );
+    }
+
+    #[test]
+    fn root_generation_only_advances_after_successful_publication() {
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let initial = registry.root_generation.load(Ordering::Acquire);
+        assert_eq!(initial, 0);
+        assert_eq!(
+            registry
+                .commit_roots_transaction(Vec::new(), || {
+                    Err("secret filesystem path".to_owned())
+                })
+                .unwrap_err(),
+            "secret filesystem path"
+        );
+        assert_eq!(registry.root_generation.load(Ordering::Acquire), initial);
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        assert_eq!(
+            registry.root_generation.load(Ordering::Acquire),
+            initial + 2
+        );
+        registry.root_generation.store(u64::MAX, Ordering::Release);
+        let mut persisted = false;
+        assert_eq!(
+            registry
+                .commit_roots_transaction(Vec::new(), || {
+                    persisted = true;
+                    Ok(())
+                })
+                .unwrap_err(),
+            "Directory permission generation exhausted"
+        );
+        assert!(!persisted, "overflow must fail before disk persistence");
     }
 
     #[tokio::test]
