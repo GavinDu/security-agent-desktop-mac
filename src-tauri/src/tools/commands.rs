@@ -262,8 +262,9 @@ fn persist_tool_policy(
 ) -> Result<(), String> {
     let mut staged = settings.clone();
     staged.policies.insert(tool.to_owned(), policy);
-    persist(&staged).map_err(|_| "Cannot persist tool policy".to_owned())?;
-    gate.set_policy(tool, policy);
+    gate.commit_policy_transaction(tool, policy, || {
+        persist(&staged).map_err(|_| "Cannot persist tool policy".to_owned())
+    })?;
     *settings = staged;
     Ok(())
 }
@@ -1037,6 +1038,27 @@ mod tests {
         assert_eq!(failure, "Cannot persist tool policy");
         assert_eq!(settings.policies.get("bash__run"), Some(&Policy::Auto));
         assert_eq!(gate.policy("bash__run"), Policy::Auto);
+    }
+
+    #[test]
+    fn poisoned_live_policy_writer_cannot_persist_or_claim_success() {
+        let mut settings = AgentSettings::default();
+        settings.policies.insert("bash__run".into(), Policy::Auto);
+        let gate = ApprovalGate::new(settings.policies.clone());
+        let poisoned = gate.clone();
+        // Poison via the actual gate test fixture, not by running the
+        // dangerous persistence callback under an unprotected writer.
+        poisoned.poison_policy_for_test();
+        let mut durable_save_called = false;
+        let err = persist_tool_policy(&mut settings, &gate, "bash__run", Policy::Disable, |_| {
+            durable_save_called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err, "Approval policy registry unavailable");
+        assert!(!durable_save_called);
+        assert_eq!(settings.policies.get("bash__run"), Some(&Policy::Auto));
+        assert_eq!(gate.policy("bash__run"), Policy::Disable);
     }
 
     #[test]
