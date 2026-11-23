@@ -480,7 +480,9 @@ impl ToolRegistry {
             "filesystem__read_file" => {
                 let input: ReadInput = serde_json::from_value(call.arguments)
                     .map_err(|_| "Expected { path: string }".to_owned())?;
-                let path = self.allowed_path_for_tool(PathBuf::from(&input.path), false).await?;
+                let path = self
+                    .allowed_path_for_tool(PathBuf::from(&input.path), false)
+                    .await?;
                 self.gate
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
