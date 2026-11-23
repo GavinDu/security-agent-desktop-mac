@@ -231,7 +231,7 @@ pub struct ToolCall {
 }
 
 pub struct ToolRegistry {
-    roots: RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>,
+    roots: Arc<RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>>,
     gate: Arc<ApprovalGate>,
 }
 
@@ -241,7 +241,7 @@ impl ToolRegistry {
         gate: Arc<ApprovalGate>,
     ) -> Self {
         Self {
-            roots: RwLock::new(roots),
+            roots: Arc::new(RwLock::new(roots)),
             gate,
         }
     }
@@ -260,15 +260,24 @@ impl ToolRegistry {
         *self.roots.write().expect("roots lock poisoned") = roots;
     }
 
-    // Resolve only against the CURRENT grants, after a potentially lengthy
-    // user approval await. The FD keeps that root's inode alive until read.
+    // The read lease spans grant selection, FD-relative traversal, and all
+    // bytes read. A root revoke must acquire this lock's WRITE side, so an
+    // acknowledged Clear cannot leave an older worker reading a stale grant.
+    // Execute only from the blocking pool: never hold std::sync::RwLock across
+    // an async await or do disk I/O on the Tokio executor.
     #[cfg(unix)]
-    fn scoped_read_grant(&self, path: &Path) -> Result<(File, PathBuf), String> {
-        let roots = self.roots.read().expect("roots lock poisoned");
-        for grant in roots.iter() {
+    fn scoped_read_with_lease<T>(
+        roots: &RwLock<Vec<crate::tools::pinned_read::GrantedRoot>>,
+        path: &Path,
+        read: impl FnOnce(&File, &Path) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let grants = roots.read().expect("roots lock poisoned");
+        for grant in grants.iter() {
             if let Ok(relative) = path.strip_prefix(grant.path()) {
                 if relative.components().next().is_some() {
-                    return Ok((grant.clone_directory()?, relative.to_path_buf()));
+                    let pinned = grant.clone_directory()?;
+                    // Keep the guard live until the read closure returns.
+                    return read(&pinned, relative);
                 }
             }
         }
@@ -336,13 +345,18 @@ impl ToolRegistry {
                     .require("filesystem__read_file", &format!("Read {}", path.display()))
                     .await?;
                 self.reauthorize_after_approval("filesystem__read_file", &path)?;
-                // Open only relative to the pinned CURRENT grant FD, never
-                // by a possibly swapped absolute pathname after approval.
+                // A separate caller may revoke roots between approval and
+                // the blocking worker. Resolve the CURRENT pinned grant and
+                // retain its read lease through the entire bounded read.
                 #[cfg(unix)]
-                let (grant_fd, relative) = self.scoped_read_grant(&path)?;
+                let roots = Arc::clone(&self.roots);
+                #[cfg(unix)]
+                let read_path = path.clone();
                 #[cfg(unix)]
                 let text = tokio::task::spawn_blocking(move || {
-                    crate::tools::pinned_read::read_scoped_file(&grant_fd, &relative)
+                    Self::scoped_read_with_lease(&roots, &read_path, |fd, relative| {
+                        crate::tools::pinned_read::read_scoped_file(fd, relative)
+                    })
                 })
                 .await
                 .map_err(|_| "Approved file read task failed")??;
