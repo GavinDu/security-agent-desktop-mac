@@ -33,8 +33,19 @@ pub fn run() {
         .setup(|app| {
             // A second launch must not create duplicate privileges, windows or
             // a competing local HTTP listener. Hold this lock until Tauri exits.
-            let instance =
-                crate::single_instance::InstanceGuard::acquire().map_err(std::io::Error::other)?;
+            let instance = match crate::single_instance::InstanceGuard::acquire() {
+                Ok(instance) => instance,
+                Err(error) => {
+                    // A rejected second process may request focus, but it
+                    // must NEVER initialize Keychain, AgentState or another
+                    // WebView/listener. Other lock errors never send IPC.
+                    #[cfg(target_os = "macos")]
+                    if error == crate::single_instance::ALREADY_RUNNING {
+                        let _ = crate::activation::request_focus_existing();
+                    }
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
             app.manage(instance);
 
             // Refuse to start with a missing/invalid Keychain or settings state.
@@ -61,6 +72,8 @@ pub fn run() {
                 .build()?;
             window.set_title("Security Agent")?;
             tray::install(app)?;
+            #[cfg(target_os = "macos")]
+            crate::activation::install(app.handle()).map_err(std::io::Error::other)?;
 
             let mut approvals = state.gate.subscribe();
             let handle = app.handle().clone();
