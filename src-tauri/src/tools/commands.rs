@@ -101,12 +101,14 @@ fn persist_root_grants(
     Ok(())
 }
 
-/// Serialize every authorized native caller before validating filesystem
-/// roots.  Validation can open many directory FDs; move it to the blocking
-/// pool while retaining this per-AgentState gate through save/publish.
+/// Reserve a per-AgentState revision slot in native arrival order.
+/// Validation is cancellation-sensitive: the resolver alone cannot publish.
 ///
-/// Dropping the async request during blocking validation cannot commit a grant:
-/// only this future performs persist_root_grants after the worker returns.
+/// After successful validation the owned revision guard is explicitly handed
+/// to a blocking commit worker. Once accepted, canceling the caller cannot
+/// interrupt save/live publication or let a later Clear overtake; a client
+/// with an unknown acknowledgment must reread authoritative settings.
+/// No synchronous registry writer wait or disk save runs on a Tokio executor.
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
     roots: Vec<String>,
@@ -116,9 +118,11 @@ async fn commit_serialized_roots<V, P>(
 ) -> Result<(), String>
 where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
-    P: FnOnce(&AgentSettings) -> Result<(), String>,
+    P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
 {
-    let mut revision = state.root_mutations.lock().await;
+    // Acquire before launching the cancellable validator, preserving the
+    // existing FIFO admission order and revision/CAS semantics.
+    let mut revision = Arc::clone(&state.root_mutations).lock_owned().await;
     if !roots.is_empty() || expected_root_revision.is_some() {
         revision.ensure_current(
             expected_root_revision
@@ -131,11 +135,21 @@ where
     let resolved = tokio::task::spawn_blocking(move || validate(roots))
         .await
         .map_err(|_| "Cannot validate approved roots".to_owned())??;
-    let mut settings = state.settings.lock().await;
-    persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
-    // No await point between durable publish and revision advancement.
-    revision.advance();
-    Ok(())
+
+    // Explicit COMMIT ACCEPTANCE boundary: this worker now owns the revision
+    // guard even if the Tauri/HTTP requester is canceled. No other writer
+    // can overtake it, and no Tokio executor thread waits for the registry
+    // writer or performs synchronous settings I/O.
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let mut settings = state.settings.blocking_lock();
+        persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
+        // No await/cancellation point between save, live publish and CAS.
+        revision.advance();
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "Cannot commit approved roots".to_owned())?
 }
 
 #[tauri::command]
@@ -353,6 +367,85 @@ mod tests {
         release_tx.send(()).unwrap();
         tokio::task::yield_now().await;
         assert!(state.settings.lock().await.allowed_roots.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_commit_survives_canceled_caller_without_blocking_tokio() {
+        use std::time::Duration;
+        let root = tempfile::tempdir().unwrap();
+        let granted = root.path().canonicalize().unwrap();
+        let file = granted.join("available.txt");
+        std::fs::write(&file, "published").unwrap();
+        let state = AgentState::new(
+            "native-accepted-commit-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        let old_revision = before.clone();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker_state = state.clone();
+        let request = tokio::spawn(async move {
+            commit_serialized_roots(
+                &worker_state,
+                vec![granted.to_string_lossy().into_owned()],
+                Some(before.clone()),
+                |requested| ToolRegistry::canonical_roots(&requested),
+                move |_| {
+                    let _ = accepted_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Test commit fixture timed out".to_owned())?;
+                    Ok(())
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The test runs on ONE Tokio executor thread. The commit's blocking
+        // persist closure must never freeze its timers or unrelated tasks.
+        tokio::time::timeout(Duration::from_millis(250), tokio::task::yield_now())
+            .await
+            .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        // Publication has been ACCEPTED. Losing the caller's acknowledgement
+        // cannot abort it or release the revision gate before durable publish.
+        let readback_state = state.clone();
+        let mut readback = tokio::spawn(async move {
+            let revision = readback_state.root_mutations.lock().await.token();
+            let roots = readback_state.settings.lock().await.allowed_roots.clone();
+            (revision, roots)
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), &mut readback)
+                .await
+                .is_err(),
+            "authoritative readback must await the accepted commit"
+        );
+        release_tx.send(()).unwrap();
+        let (revision, roots) = tokio::time::timeout(Duration::from_secs(3), readback)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(revision, old_revision);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            state
+                .registry
+                .invoke(ToolCall {
+                    name: "filesystem__read_file".into(),
+                    arguments: json!({"path":file}),
+                })
+                .await
+                .unwrap()["content"],
+            "published"
+        );
     }
 
     #[tokio::test]

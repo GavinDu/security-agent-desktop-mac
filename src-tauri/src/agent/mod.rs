@@ -64,7 +64,7 @@ pub struct AgentState {
     pub dispatch_permits: Arc<Semaphore>,
     pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
     /// Serialize every native root-grant mutation before filesystem validation.
-    pub(crate) root_mutations: Mutex<RootGrantRevision>,
+    pub(crate) root_mutations: Arc<Mutex<RootGrantRevision>>,
     pub settings: Mutex<AgentSettings>,
     listener_error: RwLock<Option<String>>,
 }
@@ -94,7 +94,7 @@ impl AgentState {
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             source_rate_limiter: rate_limit::SourceRateLimiter::default(),
-            root_mutations: Mutex::new(RootGrantRevision::new()),
+            root_mutations: Arc::new(Mutex::new(RootGrantRevision::new())),
             settings: Mutex::new(settings),
             listener_error: RwLock::new(None),
         }))
