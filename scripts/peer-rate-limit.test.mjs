@@ -33,3 +33,24 @@ test('authenticated POST source budget precedes dispatch and ignores spoofed hea
   assert.match(limiter, /windows\.retain\(/);
   assert.match(server, /async fn per_tcp_source_authenticated_post_rate_limit_is_shared_and_not_spoofable/);
 });
+
+test('authenticated read-only catalog and pairing GETs use the real-peer rate budget without tool permits (#169)', async () => {
+  const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
+  const middleware = server.slice(server.indexOf('async fn limit_tool_dispatch('),
+    server.indexOf('async fn health('));
+  assert.match(middleware, /let is_tool_post\s*=/);
+  assert.match(middleware, /request\.method\(\) == Method::POST/);
+  assert.match(middleware, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/chat"\)/);
+  assert.match(middleware, /let is_catalog_get\s*=/);
+  assert.match(middleware, /request\.method\(\) == Method::GET/);
+  assert.match(middleware, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/pairing"\)/);
+  assert.match(middleware, /if !is_tool_post && !is_catalog_get/);
+  const admit = middleware.indexOf('source_rate_limiter.allow(source.ip())');
+  const avoidPermit = middleware.indexOf('if !is_tool_post {', admit);
+  const costlyPermit = middleware.indexOf('dispatch_permits.clone().try_acquire_owned()', admit);
+  assert.ok(admit > 0 && avoidPermit > admit && costlyPermit > avoidPermit,
+    'rate admission must precede the GET-only bypass of POST expensive permits');
+  assert.match(server, /async fn catalog_and_pairing_reads_share_post_rate_budget_without_consuming_dispatch_permits/);
+  assert.match(server, /assert_eq!\(state\.dispatch_permits\.available_permits\(\), 0\)/);
+  assert.match(server, /StatusCode::TOO_MANY_REQUESTS/);
+});
