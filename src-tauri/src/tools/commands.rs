@@ -536,10 +536,8 @@ mod tests {
         // Simulate a previous writer panic. Never recover the poisoned
         // directory authority or persist a grant snapshot before checking it.
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = registry.commit_roots_transaction(Vec::new(), || {
-                panic!("intentional fixture writer panic");
-                #[allow(unreachable_code)]
-                Ok(())
+            let _ = registry.commit_roots_transaction(Vec::new(), || -> Result<(), String> {
+                panic!("intentional fixture writer panic")
             });
         }));
         assert!(poisoned.is_err());
