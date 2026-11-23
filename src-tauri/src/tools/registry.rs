@@ -594,8 +594,7 @@ mod tests {
         let file = root.path().join("safe.txt");
         std::fs::write(&file, "never reauthorized").unwrap();
         let registry = ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()])
-                .unwrap(),
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
             ApprovalGate::new(HashMap::new()),
         );
         registry.set_roots(Vec::new());
