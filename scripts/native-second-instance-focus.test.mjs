@@ -49,6 +49,25 @@ test('activation socket enforces kernel peer UID and one bounded marker, no arbi
   assert.doesNotMatch(production, /invoke_tool|set_allowed_roots|AgentState::new|WebviewWindowBuilder|http:\/\/|https:\/\/|\.arg\(/);
 });
 
+test('negative ACK tests call production verifier without a timing-dependent second client (#214)', async () => {
+  const source = await readFile('src-tauri/src/activation.rs', 'utf8');
+  assert.match(source, /fn read_focus_ack\(peer: &mut UnixStream\) -> Result<\(\), String>/);
+  const production = source.slice(source.indexOf('fn request_at('), source.indexOf('/// Only a precise singleton'));
+  assert.match(production, /peer\.shutdown\(std::net::Shutdown::Write\)/);
+  assert.match(production, /read_focus_ack\(&mut peer\)/);
+  assert.match(production, /peer\.read_exact\(&mut acknowledged\)/);
+  assert.match(production, /if acknowledged\[0\] != FOCUS_ACCEPTED/);
+  const negative = source.slice(source.indexOf('fn refuses_invalid_or_missing_primary_ack('),
+    source.indexOf('fn rejects_permissive_socket_mode('));
+  assert.match(negative, /UnixStream::pair\(\)/);
+  assert.match(negative, /for response in \[b"X"\.as_slice\(\), b""\.as_slice\(\)\]/);
+  assert.match(negative, /read_focus_ack\(&mut client\)\.is_err\(\)/);
+  assert.match(negative, /read_focus_ack\(&mut client\)\.is_ok\(\)/);
+  assert.doesNotMatch(negative, /std::thread::spawn|request_at\(&sender_path\)|listener\.accept\(\)/);
+  assert.match(source, /fn rejected_second_launch_sends_one_constant_byte_to_first_instance\(\)/);
+  assert.match(source, /const PEER_READ_DEADLINE: Duration = Duration::from_millis\(750\)/);
+});
+
 test('activation handoff retains macOS native tests and physical acceptance remains separate (#189)', async () => {
   const source = await readFile('src-tauri/src/activation.rs', 'utf8');
   const doc = await readFile('docs/SECOND_INSTANCE_FOCUS.md', 'utf8');

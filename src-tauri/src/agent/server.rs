@@ -19,6 +19,9 @@ pub fn router(state: Arc<AgentState>) -> Router {
         .route("/tools", get(list_tools).post(invoke_tool))
         .route("/chat", post(chat))
         .route("/pairing", get(pairing))
+        // An explicit fallback ensures unknown paths pass through our outer
+        // source/Host/bearer and inner per-real-peer admission middleware.
+        .fallback(unknown_route)
         // Bound JSON extractors before dispatch; source/bearer checks are
         // still outermost, and authenticated work is subject to admission.
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -183,8 +186,8 @@ async fn authorize(
     next.run(request).await
 }
 
-/// Bound unauthenticated health probes with a separate budget, and bound
-/// authenticated tool/chat POST and catalog/pairing GET requests by the
+/// Bound all methods at /health with a separate source budget, and every
+/// authenticated non-health method/path (including 404 and 405) with the
 /// existing 60-per-minute real-TCP-peer budget. Only tool/chat POST dispatch
 /// needs one of the 16 shared concurrent permits.
 /// Unauthorized/out-of-range requests are denied before any rate admission.
@@ -210,13 +213,11 @@ async fn limit_tool_dispatch(
     }
     let is_tool_post =
         request.method() == Method::POST && matches!(request.uri().path(), "/tools" | "/chat");
-    let is_catalog_get =
-        request.method() == Method::GET && matches!(request.uri().path(), "/tools" | "/pairing");
-    if !is_tool_post && !is_catalog_get {
-        return next.run(request).await;
-    }
 
     // The outer authorize middleware already checked source and bearer.
+    // Charge every non-health method/path: HEAD/OPTIONS, unsupported 405,
+    // unknown/fallback 404, and real tools all consume the same 60/min.
+    // Never use a caller-controlled forwarding header for this quota.
     // ConnectInfo is server-supplied, never forwarded from an HTTP header.
     if !state.source_rate_limiter.allow(source.ip()) {
         return (
@@ -227,8 +228,8 @@ async fn limit_tool_dispatch(
     }
 
     // Only expensive POST tool dispatch takes the 16 shared permits.
-    // Authenticated read-only catalog/pairing GETs are rate admitted but must
-    // not block a legitimate queued approval or tool invocation.
+    // Authenticated read-only routes, unsupported methods and unknown
+    // routes are rate admitted but never consume a tool execution permit.
     if !is_tool_post {
         return next.run(request).await;
     }
@@ -242,6 +243,14 @@ async fn limit_tool_dispatch(
             .into_response();
     };
     next.run(request).await
+}
+
+// Keep 404 responses constant: no reflection of URI, Host or credentials.
+async fn unknown_route() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error":"Unknown route"})),
+    )
 }
 
 async fn health(State(state): State<Arc<AgentState>>) -> Json<Value> {
@@ -761,6 +770,183 @@ mod tests {
             50000,
         )));
         assert_eq!(app.oneshot(catalog).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unknown_routes_and_unsupported_methods_share_authenticated_real_peer_budget() {
+        use crate::agent::{rate_limit::REQUESTS_PER_WINDOW, MAX_CONCURRENT_TOOL_REQUESTS};
+        let state = AgentState::new(
+            "unknown-route-test-bearer".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let make = |method: Method, path: &str, source: &str, host: &str, bearer: bool| {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", host)
+                .header("x-forwarded-for", "10.8.0.99");
+            if bearer {
+                builder = builder.header("authorization", "Bearer unknown-route-test-bearer");
+            }
+            let mut request = builder.body(Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 48999)));
+            request
+        };
+        let occupied = state
+            .dispatch_permits
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TOOL_REQUESTS as u32)
+            .await
+            .unwrap();
+
+        // A known path and an unknown fallback get exactly the same outer
+        // source/Host/bearer checks before any rate budget is consumed.
+        for (method, path) in [
+            (Method::GET, "/missing"),
+            (Method::POST, "/missing"),
+            (Method::DELETE, "/tools"),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(make(
+                        method.clone(),
+                        path,
+                        "10.8.0.2",
+                        "10.8.0.1:8080",
+                        false
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(make(
+                        method.clone(),
+                        path,
+                        "10.8.0.2",
+                        "evil.test:8080",
+                        true
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(make(method, path, "192.168.1.2", "10.8.0.1:8080", true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        let cases = [
+            (Method::GET, "/missing/a", StatusCode::NOT_FOUND),
+            (Method::POST, "/missing/b", StatusCode::NOT_FOUND),
+            (Method::DELETE, "/tools", StatusCode::METHOD_NOT_ALLOWED),
+            (Method::OPTIONS, "/chat", StatusCode::METHOD_NOT_ALLOWED),
+            (Method::HEAD, "/missing/c", StatusCode::NOT_FOUND),
+        ];
+        for n in 0..REQUESTS_PER_WINDOW {
+            let (method, path, expected) = &cases[n as usize % cases.len()];
+            let response = app
+                .clone()
+                .oneshot(make(
+                    method.clone(),
+                    path,
+                    "10.8.0.2",
+                    "10.8.0.1:8080",
+                    true,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                *expected,
+                "request #{n}: {method} {path}"
+            );
+            if *method == Method::GET {
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["error"], "Unknown route");
+                assert!(!body.to_string().contains(path));
+                assert!(!body.to_string().contains("unknown-route-test-bearer"));
+            }
+        }
+        assert_eq!(state.dispatch_permits.available_permits(), 0);
+
+        for (method, path) in [
+            (Method::GET, "/new-unknown"),
+            (Method::HEAD, "/missing"),
+            (Method::POST, "/missing"),
+            (Method::GET, "/tools"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(make(method, path, "10.8.0.2", "10.8.0.1:8080", true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        let rate = app
+            .clone()
+            .oneshot(make(
+                Method::GET,
+                "/yet-another-unknown",
+                "10.8.0.2",
+                "10.8.0.1:8080",
+                true,
+            ))
+            .await
+            .unwrap();
+        let bytes = rate.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "Source request rate limit reached");
+        assert!(!body.to_string().contains("10.8.0.2"));
+        assert!(!body.to_string().contains("unknown-route-test-bearer"));
+
+        // The forwarding header cannot lend this source another IP quota;
+        // a different genuine TCP source still gets its own 404 response.
+        assert_eq!(
+            app.clone()
+                .oneshot(make(
+                    Method::GET,
+                    "/missing",
+                    "10.8.0.3",
+                    "10.8.0.1:8080",
+                    true,
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        // Even with all 16 expensive dispatch permits occupied, GET health
+        // still uses only its separate 300/min readiness budget.
+        assert_eq!(
+            app.clone()
+                .oneshot(make(
+                    Method::GET,
+                    "/health",
+                    "10.8.0.2",
+                    "10.8.0.1:8080",
+                    false,
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        drop(occupied);
     }
 
     #[tokio::test]

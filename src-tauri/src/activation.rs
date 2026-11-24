@@ -133,6 +133,12 @@ fn request_at(path: &Path) -> Result<(), String> {
     // and accepted the request; an ACK means queued, not necessarily focused.
     peer.shutdown(std::net::Shutdown::Write)
         .map_err(|_| "Existing desktop activation unavailable")?;
+    read_focus_ack(&mut peer)
+}
+
+// Keep ACK verification independent of socket connect/write scheduling.
+// Only the one fixed byte admits focus; absent/invalid responses fail closed.
+fn read_focus_ack(peer: &mut UnixStream) -> Result<(), String> {
     let mut acknowledged = [0_u8; 1];
     peer.read_exact(&mut acknowledged)
         .map_err(|_| "Existing desktop activation unavailable")?;
@@ -262,15 +268,20 @@ mod tests {
 
     #[test]
     fn refuses_invalid_or_missing_primary_ack() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = checked_temp_path(&dir);
-        let listener = bind_at(&path).unwrap();
-        let sender_path = path.clone();
-        let sender = std::thread::spawn(move || request_at(&sender_path));
-        let (mut peer, _) = listener.accept().unwrap();
-        assert!(exact_focus_request(&mut peer));
-        peer.write_all(b"X").unwrap();
-        assert!(sender.join().unwrap().is_err());
+        // This tests *only* the client's production ACK verifier. A separate
+        // native test exercises the full request/response handshake; mixing
+        // that thread scheduling into a negative ACK test was flaky on the
+        // shared Apple Silicon CI runner at the 750ms peer deadline.
+        for response in [b"X".as_slice(), b"".as_slice()] {
+            let (mut primary, mut client) = UnixStream::pair().unwrap();
+            primary.write_all(response).unwrap();
+            primary.shutdown(Shutdown::Write).unwrap();
+            assert!(read_focus_ack(&mut client).is_err());
+        }
+        let (mut primary, mut client) = UnixStream::pair().unwrap();
+        primary.write_all(&[FOCUS_ACCEPTED]).unwrap();
+        primary.shutdown(Shutdown::Write).unwrap();
+        assert!(read_focus_ack(&mut client).is_ok());
     }
 
     #[test]

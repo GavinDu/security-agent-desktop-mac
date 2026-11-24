@@ -41,10 +41,10 @@ test('authenticated read-only catalog and pairing GETs use the real-peer rate bu
   assert.match(middleware, /let is_tool_post\s*=/);
   assert.match(middleware, /request\.method\(\) == Method::POST/);
   assert.match(middleware, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/chat"\)/);
-  assert.match(middleware, /let is_catalog_get\s*=/);
-  assert.match(middleware, /request\.method\(\) == Method::GET/);
-  assert.match(middleware, /matches!\(request\.uri\(\)\.path\(\), "\/tools" \| "\/pairing"\)/);
-  assert.match(middleware, /if !is_tool_post && !is_catalog_get/);
+  // The authenticated real-peer quota now covers all non-health paths,
+  // including catalog GETs, unsupported methods and 404 fallbacks.
+  assert.doesNotMatch(middleware, /if !is_tool_post && !is_catalog_get/);
+  assert.match(middleware, /state\.source_rate_limiter\.allow\(source\.ip\(\)\)/);
   const admit = middleware.indexOf('source_rate_limiter.allow(source.ip())');
   const avoidPermit = middleware.indexOf('if !is_tool_post {', admit);
   const costlyPermit = middleware.indexOf('dispatch_permits.clone().try_acquire_owned()', admit);
