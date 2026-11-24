@@ -360,6 +360,9 @@ mod tests {
         // to remove an abandoned UUID. It cannot grant authorization.
         let pending = gate.pending.lock().unwrap_err().into_inner();
         assert!(pending.is_empty());
+        // Release the recovered cleanup-only guard before calling resolve.
+        // Holding it across the next mutex acquisition would deadlock.
+        drop(pending);
         assert!(!gate.resolve(id, true).await);
     }
 
