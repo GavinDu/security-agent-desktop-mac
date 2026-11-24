@@ -7,6 +7,13 @@ use crate::{
 use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 
+// Hiding the trusted window in the tray is not destruction. A genuinely
+// destroyed main WebView cannot display future Ask prompts, even while the
+// backend's broadcast forwarding task still owns an event subscription.
+fn is_trusted_main_destroyed(label: &str, event: &WindowEvent) -> bool {
+    label == "main" && matches!(event, WindowEvent::Destroyed)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -27,6 +34,14 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+            }
+            // Only actual trusted main WebView destruction is terminal:
+            // neither CloseRequested-to-tray nor another window's lifecycle
+            // may revoke the inbox. No public command or HTTP route exists.
+            if is_trusted_main_destroyed(window.label(), event) {
+                if let Some(state) = window.app_handle().try_state::<Arc<AgentState>>() {
+                    let _ = state.gate.cancel_pending_for_shutdown();
                 }
             }
         })
@@ -113,4 +128,30 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_real_main_window_destruction_closes_approval_inbox() {
+        assert!(is_trusted_main_destroyed("main", &WindowEvent::Destroyed));
+        assert!(!is_trusted_main_destroyed(
+            "second",
+            &WindowEvent::Destroyed
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "main",
+            &WindowEvent::Focused(true)
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "main",
+            &WindowEvent::Focused(false)
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "second",
+            &WindowEvent::Focused(false)
+        ));
+    }
 }
