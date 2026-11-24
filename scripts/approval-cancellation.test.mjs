@@ -8,7 +8,10 @@ test('canceled ask/approval futures revoke their pending ID through synchronous 
   assert.match(source, /impl Drop for PendingApprovalGuard<'_>/);
   assert.match(source, /pending\.remove\(&self\.id\)/);
   assert.match(source, /let _pending_guard = PendingApprovalGuard \{ gate: self, id \}/);
-  assert.match(source, /sync::\{Arc, Mutex, RwLock\}/);
+  // Both plain mutex and atomic close state live in the std sync module.
+  // Do not bind a security regression to rustfmt's import layout.
+  assert.match(source, /atomic::\{AtomicBool, Ordering\}/);
+  assert.match(source, /Arc, Mutex, RwLock/);
   assert.doesNotMatch(source, /tokio::sync::\{broadcast, oneshot, Mutex\}/);
   assert.match(source, /fn cancelled_approval_future_drops_pending_id_without_waiting_for_timeout/);
   assert.match(source, /fn unavailable_desktop_approval_listener_cleans_pending_id/);
