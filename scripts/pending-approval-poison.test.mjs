@@ -8,9 +8,12 @@ test('pending-approval resolution denies poisoned locks instead of panicking (#2
     source.indexOf('pub async fn resolve('),
     source.indexOf('#[cfg(test)]\nmod tests')
   );
-  assert.match(resolver, /let sender = match self\.pending\.lock\(\)\s*\{/);
-  assert.match(resolver, /Ok\(mut pending\) => pending\.remove\(&id\)/);
-  assert.match(resolver, /Err\(_\) => return false/);
+  // Poison must deny before a sender can be used, whether the resolver
+  // sends within a mutex guard (for shutdown ordering) or after extraction.
+  assert.match(resolver, /let Ok\(mut pending\) = self\.pending\.lock\(\) else \{\s*return false;/);
+  assert.match(resolver, /match pending\.remove\(&id\)/);
+  assert.match(resolver, /Some\(tx\) => tx\.send\(allow\)\.is_ok\(\)/);
+  assert.match(resolver, /self\.shutting_down\.load\(Ordering::SeqCst\)/);
   assert.doesNotMatch(resolver, /expect\("approval lock poisoned"\)/);
   assert.match(source, /fn poisoned_pending_registry_never_resolves_or_broadcasts_a_grant/);
   assert.match(source, /assert!\(!gate\.resolve\(id, true\)\.await\)/);

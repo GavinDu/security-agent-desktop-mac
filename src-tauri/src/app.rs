@@ -96,6 +96,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Security Agent Tauri launch failed")
         .run(|app, event| {
+            // This is Tauri's trusted process-lifecycle event, not a WebView
+            // command. Hiding main in the tray does NOT close the inbox.
+            if matches!(&event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<Arc<AgentState>>() {
+                    let _ = state.gate.cancel_pending_for_shutdown();
+                }
+            }
             // macOS sends NSApplicationDelegate applicationShouldHandleReopen
             // when Finder/Dock reactivates the already running app. Reuse the
             // same trusted main WebView; never create a new privileged window.
