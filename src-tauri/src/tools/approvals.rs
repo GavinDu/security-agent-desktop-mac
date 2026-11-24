@@ -167,11 +167,13 @@ impl ApprovalGate {
     }
 
     pub async fn resolve(&self, id: Uuid, allow: bool) -> bool {
-        let sender = self
-            .pending
-            .lock()
-            .expect("approval lock poisoned")
-            .remove(&id);
+        // A poisoned pending registry is an unknown authorization state.
+        // Never recover this lock to approve a tool, and never panic on a
+        // malformed/stale UI response. Drop cleanup may still remove entries.
+        let sender = match self.pending.lock() {
+            Ok(mut pending) => pending.remove(&id),
+            Err(_) => return false,
+        };
         match sender {
             Some(tx) => tx.send(allow).is_ok(),
             None => false,
@@ -317,6 +319,48 @@ mod tests {
             }
         }
         assert!(gate.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poisoned_pending_registry_never_resolves_or_broadcasts_a_grant() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        let live_gate = gate.clone();
+        let waiting = tokio::spawn(async move {
+            live_gate
+                .require("bash__run", "must never approve after poison")
+                .await
+        });
+        let id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
+        assert_eq!(gate.pending.lock().unwrap().len(), 1);
+
+        let poisoned = gate.clone();
+        let thread = std::thread::spawn(move || {
+            let _guard = poisoned.pending.lock().unwrap();
+            panic!("test-only pending registry poison fixture");
+        });
+        assert!(thread.join().is_err());
+
+        assert!(!gate.resolve(id, true).await);
+        assert!(!gate.resolve(id, false).await);
+        assert_eq!(
+            gate.require("bash__run", "must not be announced")
+                .await
+                .unwrap_err(),
+            "Approval system unavailable"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        waiting.abort();
+        let _ = waiting.await;
+        // Only the RAII drop cleanup may recover poisoned registry state
+        // to remove an abandoned UUID. It cannot grant authorization.
+        let pending = gate.pending.lock().unwrap_err().into_inner();
+        assert!(pending.is_empty());
+        assert!(!gate.resolve(id, true).await);
     }
 
     #[tokio::test]
