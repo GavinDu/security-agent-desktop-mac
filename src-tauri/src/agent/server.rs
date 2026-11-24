@@ -731,7 +731,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saturated_post.status(), StatusCode::TOO_MANY_REQUESTS);
-        let bytes = saturated_post.into_body().collect().await.unwrap().to_bytes();
+        let bytes = saturated_post
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Health request rate limit reached"));
         assert!(!body.contains("health-method-secret-marker"));
