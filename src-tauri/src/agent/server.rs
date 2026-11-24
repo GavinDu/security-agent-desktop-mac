@@ -156,7 +156,10 @@ async fn authorize(
         )
             .into_response();
     }
-    if request.uri().path() != "/health" {
+    // The only bearer-free readiness contract is GET /health.
+    // Axum can synthesize HEAD from GET; unsupported methods still need a
+    // bearer before their eventual 405. Never exempt a path alone.
+    if request.method() != Method::GET || request.uri().path() != "/health" {
         let provided = request
             .headers()
             .get(header::AUTHORIZATION)
@@ -191,11 +194,11 @@ async fn limit_tool_dispatch(
     request: Request,
     next: Next,
 ) -> Response {
-    let is_health_get = request.method() == Method::GET && request.uri().path() == "/health";
-    if is_health_get {
-        // A probe needs no bearer, but the *outer* middleware already checks
-        // the real TCP source and requested Host. Separate this budget from
-        // authenticated tools so unauthenticated floods cannot starve them.
+    if request.uri().path() == "/health" {
+        // Only GET /health is bearer-free. All other health methods already
+        // passed the outer bearer check and must still consume this separate
+        // real-TCP-source budget, including eventual HTTP 405 responses.
+        // Such traffic never spends the authenticated tool/dispatch quotas.
         if !state.health_rate_limiter.allow(source.ip()) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -605,6 +608,159 @@ mod tests {
             49001,
         )));
         assert_eq!(app.oneshot(tools).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn only_get_health_is_bearer_free_and_every_health_method_spends_probe_budget() {
+        use crate::agent::rate_limit::HEALTH_REQUESTS_PER_WINDOW;
+        let state = AgentState::new(
+            "health-method-secret-marker".into(),
+            "10.8.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let make = |method: &str, source: &str, host: &str, bearer: Option<&str>| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri("/health")
+                .header("host", host)
+                .header("x-forwarded-for", "10.8.0.3");
+            if let Some(token) = bearer {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let mut request = request.body(Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 49999)));
+            request
+        };
+        // Source and literal Host are authoritative even for wrong methods.
+        assert_eq!(
+            app.clone()
+                .oneshot(make("POST", "192.168.1.2", "10.8.0.1:8080", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make("HEAD", "10.8.0.2", "attacker.test:8080", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for method in ["HEAD", "POST", "PUT"] {
+            for token in [None, Some("incorrect-secret")] {
+                let response = app
+                    .clone()
+                    .oneshot(make(method, "10.8.0.2", "10.8.0.1:8080", token))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let body = String::from_utf8(bytes.to_vec()).unwrap();
+                assert!(!body.contains("health-method-secret-marker"));
+                assert!(!body.contains("attacker.test"));
+                assert!(!body.contains("10.8.0.2"));
+            }
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(make("GET", "10.8.0.2", "10.8.0.1:8080", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(make(
+                    "HEAD",
+                    "10.8.0.2",
+                    "10.8.0.1:8080",
+                    Some("health-method-secret-marker"),
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        // Known wrong-method 405s must not bypass per-source admission.
+        for _ in 0..(HEALTH_REQUESTS_PER_WINDOW - 2) {
+            assert_eq!(
+                app.clone()
+                    .oneshot(make(
+                        "POST",
+                        "10.8.0.2",
+                        "10.8.0.1:8080",
+                        Some("health-method-secret-marker"),
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+        }
+        let saturated = app
+            .clone()
+            .oneshot(make(
+                "HEAD",
+                "10.8.0.2",
+                "10.8.0.1:8080",
+                Some("health-method-secret-marker"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        // HTTP HEAD carries no body, even for our 429 JSON error.
+        let bytes = saturated.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.is_empty());
+        // The same exhausted method/path quota also rejects POST with a
+        // sanitized JSON error body (not suppressed by HEAD semantics).
+        let saturated_post = app
+            .clone()
+            .oneshot(make(
+                "POST",
+                "10.8.0.2",
+                "10.8.0.1:8080",
+                Some("health-method-secret-marker"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(saturated_post.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = saturated_post
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("Health request rate limit reached"));
+        assert!(!body.contains("health-method-secret-marker"));
+        // A forged forwarding header cannot spend a second source's budget.
+        assert_eq!(
+            app.clone()
+                .oneshot(make("GET", "10.8.0.3", "10.8.0.1:8080", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        // Authenticated catalog remains on its original, separate budget.
+        let mut catalog = Request::builder()
+            .uri("/tools")
+            .header("host", "10.8.0.1:8080")
+            .header("authorization", "Bearer health-method-secret-marker")
+            .body(Body::empty())
+            .unwrap();
+        catalog.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            50000,
+        )));
+        assert_eq!(app.oneshot(catalog).await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]

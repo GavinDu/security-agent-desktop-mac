@@ -16,7 +16,10 @@ test('outer source and Host authorize precede a separate health admission (#203)
   assert.match(authorize, /state\.source_allowed\(source\.ip\(\)\)/);
   assert.match(authorize, /host_authority_allowed\(request\.headers\(\), request\.uri\(\), state\.bind\)/);
   const inner = source.slice(source.indexOf('async fn limit_tool_dispatch('), source.indexOf('async fn health('));
-  assert.match(inner, /request\.method\(\) == Method::GET && request\.uri\(\)\.path\(\) == "\/health"/);
+  // Every method at /health shares the bounded readiness bucket.
+  // Only outer authorize may exempt GET from bearer authentication.
+  assert.match(inner, /if request\.uri\(\)\.path\(\) == "\/health"/);
+  assert.match(authorize, /request\.method\(\) != Method::GET \|\| request\.uri\(\)\.path\(\) != "\/health"/);
   assert.match(inner, /state\.health_rate_limiter\.allow\(source\.ip\(\)\)/);
   assert.match(inner, /Health request rate limit reached/);
   assert.ok(inner.indexOf('health_rate_limiter.allow') < inner.indexOf('source_rate_limiter.allow'));
