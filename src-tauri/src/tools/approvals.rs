@@ -133,15 +133,15 @@ impl ApprovalGate {
             Policy::Ask => {
                 let id = Uuid::new_v4();
                 let (sender, receiver) = oneshot::channel();
-                {
-                    // Short synchronous critical section; never hold it over
-                    // event delivery, a desktop response or a timeout.
+                let delivered = {
+                    // All synchronous: insertion AND preview publication must
+                    // precede a successful Exit cancellation. Otherwise a
+                    // drained, stale UUID could publish a misleading late UI
+                    // preview after shutdown. Never await under this mutex.
                     let mut pending = self
                         .pending
                         .lock()
                         .map_err(|_| "Approval system unavailable")?;
-                    // The check under the same pending lock linearizes an Ask
-                    // insertion against the trusted Exit cancellation.
                     if self.shutting_down.load(Ordering::SeqCst) {
                         return Err("Approval system shutting down".into());
                     }
@@ -149,19 +149,18 @@ impl ApprovalGate {
                         return Err("Too many pending tool approvals".into());
                     }
                     pending.insert(id, sender);
-                }
+                    self.events
+                        .send(ApprovalRequest {
+                            id: id.to_string(),
+                            tool: tool.into(),
+                            preview: preview.chars().take(1500).collect(),
+                        })
+                        .is_ok()
+                };
                 let _pending_guard = PendingApprovalGuard { gate: self, id };
-                // The absence of a desktop subscriber must deny the request, not allow it.
-                if self
-                    .events
-                    .send(ApprovalRequest {
-                        id: id.to_string(),
-                        tool: tool.into(),
-                        preview: preview.chars().take(1500).collect(),
-                    })
-                    .is_err()
-                {
-                    // RAII guard removes the pending entry on return.
+                if !delivered {
+                    // RAII removes the pending entry if no desktop receiver
+                    // was listening; no tools can be auto-approved.
                     return Err("No desktop approval listener is connected".into());
                 }
                 let answer = tokio::time::timeout(Duration::from_secs(60), receiver).await;
