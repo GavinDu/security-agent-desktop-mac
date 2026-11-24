@@ -67,6 +67,9 @@ pub struct AgentState {
     pub gate: Arc<ApprovalGate>,
     pub dispatch_permits: Arc<Semaphore>,
     pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
+    /// Separate unauthenticated readiness budget, so probe floods cannot
+    /// steal authenticated tool/catalog request admission.
+    pub(crate) health_rate_limiter: rate_limit::SourceRateLimiter,
     /// Serialize every native root-grant mutation before filesystem validation.
     pub(crate) root_mutations: Arc<Mutex<RootGrantRevision>>,
     pub(crate) root_validation_slots: Arc<Semaphore>,
@@ -99,6 +102,9 @@ impl AgentState {
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             source_rate_limiter: rate_limit::SourceRateLimiter::default(),
+            health_rate_limiter: rate_limit::SourceRateLimiter::with_limit(
+                rate_limit::HEALTH_REQUESTS_PER_WINDOW,
+            ),
             root_mutations: Arc::new(Mutex::new(RootGrantRevision::new())),
             root_validation_slots: Arc::new(Semaphore::new(MAX_ROOT_VALIDATION_WORKERS)),
             settings: Mutex::new(settings),

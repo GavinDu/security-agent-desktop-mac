@@ -8,6 +8,9 @@ use std::{
 };
 
 pub const REQUESTS_PER_WINDOW: u32 = 60;
+/// The unauthenticated readiness probe has an independent, bounded budget.
+/// It may not consume the 60/min authenticated tool/catalog allowance.
+pub const HEALTH_REQUESTS_PER_WINDOW: u32 = 300;
 pub const WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_SOURCES: usize = 256;
 
@@ -19,12 +22,27 @@ struct SourceWindow {
 
 /// Shared by all Axum routes served by one AgentState. A std mutex is held
 /// for a few in-memory operations only, never across async/tool work.
-#[derive(Default)]
 pub struct SourceRateLimiter {
     windows: Mutex<HashMap<IpAddr, SourceWindow>>,
+    max_per_window: u32,
+}
+
+impl Default for SourceRateLimiter {
+    fn default() -> Self {
+        Self::with_limit(REQUESTS_PER_WINDOW)
+    }
 }
 
 impl SourceRateLimiter {
+    /// Use a separate instance for unauthenticated health traffic. A zero
+    /// budget denies all requests rather than accidentally allowing them.
+    pub(crate) fn with_limit(max_per_window: u32) -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            max_per_window,
+        }
+    }
+
     pub fn allow(&self, peer: IpAddr) -> bool {
         self.allow_at(peer, Instant::now())
     }
@@ -43,7 +61,7 @@ impl SourceRateLimiter {
                 };
                 return true;
             }
-            if window.used >= REQUESTS_PER_WINDOW {
+            if window.used >= self.max_per_window {
                 return false;
             }
             window.used += 1;
@@ -59,6 +77,9 @@ impl SourceRateLimiter {
             }
         }
 
+        if self.max_per_window == 0 {
+            return false;
+        }
         windows.insert(
             peer,
             SourceWindow {
@@ -74,6 +95,27 @@ impl SourceRateLimiter {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn independent_health_budget_is_bounded_and_does_not_spend_tool_allowance() {
+        let health = SourceRateLimiter::with_limit(HEALTH_REQUESTS_PER_WINDOW);
+        let tools = SourceRateLimiter::default();
+        let peer: IpAddr = "10.8.0.2".parse().unwrap();
+        let now = Instant::now();
+        for _ in 0..HEALTH_REQUESTS_PER_WINDOW {
+            assert!(health.allow_at(peer, now));
+        }
+        assert!(!health.allow_at(peer, now));
+        for _ in 0..REQUESTS_PER_WINDOW {
+            assert!(tools.allow_at(peer, now));
+        }
+        assert!(!tools.allow_at(peer, now));
+        assert!(health.allow_at(peer, now + WINDOW));
+        assert!(tools.allow_at(peer, now + WINDOW));
+        let disabled = SourceRateLimiter::with_limit(0);
+        assert!(!disabled.allow_at(peer, now));
+        assert_eq!(disabled.windows.lock().unwrap().len(), 0);
+    }
 
     #[test]
     fn one_source_gets_exactly_sixty_requests_before_rejection_and_recovers() {
