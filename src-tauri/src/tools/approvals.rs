@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::sync::{broadcast, oneshot};
@@ -29,6 +29,8 @@ pub struct ApprovalRequest {
 pub struct ApprovalGate {
     policies: RwLock<HashMap<String, Policy>>,
     pending: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
+    /// Monotonic lifecycle close; never accept a new approval after Exit.
+    shutting_down: AtomicBool,
     events: broadcast::Sender<ApprovalRequest>,
 }
 
@@ -58,6 +60,7 @@ impl ApprovalGate {
         Arc::new(Self {
             policies: RwLock::new(policies),
             pending: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
             events,
         })
     }
@@ -121,6 +124,9 @@ impl ApprovalGate {
     }
 
     pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Approval system shutting down".into());
+        }
         match self.policy(tool) {
             Policy::Auto => Ok(()),
             Policy::Disable => Err("Tool disabled by policy".into()),
@@ -134,6 +140,11 @@ impl ApprovalGate {
                         .pending
                         .lock()
                         .map_err(|_| "Approval system unavailable")?;
+                    // The check under the same pending lock linearizes an Ask
+                    // insertion against the trusted Exit cancellation.
+                    if self.shutting_down.load(Ordering::SeqCst) {
+                        return Err("Approval system shutting down".into());
+                    }
                     if pending.len() >= MAX_PENDING_APPROVALS {
                         return Err("Too many pending tool approvals".into());
                     }
@@ -166,15 +177,35 @@ impl ApprovalGate {
         }
     }
 
-    pub async fn resolve(&self, id: Uuid, allow: bool) -> bool {
-        // A poisoned pending registry is an unknown authorization state.
-        // Never recover this lock to approve a tool, and never panic on a
-        // malformed/stale UI response. Drop cleanup may still remove entries.
-        let sender = match self.pending.lock() {
-            Ok(mut pending) => pending.remove(&id),
-            Err(_) => return false,
+    /// Close only from trusted native process Exit, not exposed via IPC/HTTP.
+    /// Once closed, no pending approvals can be inserted or resolved.
+    /// Drop each oneshot *outside* the mutex so awakened cleanup cannot
+    /// encounter our own retained guard. The map already caps this at 32.
+    pub(crate) fn cancel_pending_for_shutdown(&self) -> Result<usize, String> {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let senders = {
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "Approval system unavailable".to_owned())?;
+            std::mem::take(&mut *pending)
         };
-        match sender {
+        let canceled = senders.len();
+        drop(senders);
+        Ok(canceled)
+    }
+
+    pub async fn resolve(&self, id: Uuid, allow: bool) -> bool {
+        // Native Exit and response delivery share the pending mutex as the
+        // linearization point. Never send "allow" after shutdown is committed.
+        // Never recover poisoned pending state to authorize tool execution.
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return false;
+        }
+        match pending.remove(&id) {
             Some(tx) => tx.send(allow).is_ok(),
             None => false,
         }
@@ -364,6 +395,70 @@ mod tests {
         // Holding it across the next mutex acquisition would deadlock.
         drop(pending);
         assert!(!gate.resolve(id, true).await);
+    }
+
+    #[tokio::test]
+    async fn trusted_exit_cancels_thirty_two_pending_asks_and_rejects_late_replies() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        let mut workers = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_PENDING_APPROVALS {
+            let awaiting = gate.clone();
+            workers.push(tokio::spawn(async move {
+                awaiting.require("bash__run", "shutdown test").await
+            }));
+            ids.push(Uuid::parse_str(&events.recv().await.unwrap().id).unwrap());
+        }
+        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert_eq!(gate.cancel_pending_for_shutdown().unwrap(), MAX_PENDING_APPROVALS);
+        assert_eq!(gate.cancel_pending_for_shutdown().unwrap(), 0);
+        for worker in workers {
+            assert_eq!(
+                worker.await.unwrap().unwrap_err(),
+                "Approval channel was closed"
+            );
+        }
+        assert!(gate.pending.lock().unwrap().is_empty());
+        for id in ids {
+            assert!(!gate.resolve(id, true).await);
+        }
+        assert_eq!(
+            gate.require("bash__run", "late Ask").await.unwrap_err(),
+            "Approval system shutting down"
+        );
+        assert_eq!(
+            gate.require("filesystem__read_file", "late Auto")
+                .await
+                .unwrap_err(),
+            "Approval system shutting down"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn poisoned_pending_shutdown_fails_closed_without_recovery_to_approve() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let poisoned = gate.clone();
+        let fixture = std::thread::spawn(move || {
+            let _guard = poisoned.pending.lock().unwrap();
+            panic!("fixed pending shutdown poison fixture");
+        });
+        assert!(fixture.join().is_err());
+        assert_eq!(
+            gate.cancel_pending_for_shutdown().unwrap_err(),
+            "Approval system unavailable"
+        );
+        assert_eq!(
+            gate.require("filesystem__read_file", "must deny")
+                .await
+                .unwrap_err(),
+            "Approval system shutting down"
+        );
+        assert!(!gate.resolve(Uuid::new_v4(), true).await);
     }
 
     #[tokio::test]
