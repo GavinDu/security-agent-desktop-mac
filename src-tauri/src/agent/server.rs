@@ -735,9 +735,10 @@ mod tests {
             .header("authorization", "Bearer health-method-secret-marker")
             .body(Body::empty())
             .unwrap();
-        catalog
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::new("10.8.0.2".parse().unwrap(), 50000)));
+        catalog.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            "10.8.0.2".parse().unwrap(),
+            50000,
+        )));
         assert_eq!(app.oneshot(catalog).await.unwrap().status(), StatusCode::OK);
     }
 
