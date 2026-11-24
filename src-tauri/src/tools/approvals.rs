@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::Duration,
 };
 use tokio::sync::{broadcast, oneshot};
@@ -410,7 +413,10 @@ mod tests {
             ids.push(Uuid::parse_str(&events.recv().await.unwrap().id).unwrap());
         }
         assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
-        assert_eq!(gate.cancel_pending_for_shutdown().unwrap(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.cancel_pending_for_shutdown().unwrap(),
+            MAX_PENDING_APPROVALS
+        );
         assert_eq!(gate.cancel_pending_for_shutdown().unwrap(), 0);
         for worker in workers {
             assert_eq!(
