@@ -137,9 +137,21 @@ mod tests {
     #[test]
     fn only_real_main_window_destruction_closes_approval_inbox() {
         assert!(is_trusted_main_destroyed("main", &WindowEvent::Destroyed));
-        assert!(!is_trusted_main_destroyed("second", &WindowEvent::Destroyed));
-        assert!(!is_trusted_main_destroyed("main", &WindowEvent::Focused(true)));
-        assert!(!is_trusted_main_destroyed("main", &WindowEvent::Focused(false)));
-        assert!(!is_trusted_main_destroyed("second", &WindowEvent::Focused(false)));
+        assert!(!is_trusted_main_destroyed(
+            "second",
+            &WindowEvent::Destroyed
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "main",
+            &WindowEvent::Focused(true)
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "main",
+            &WindowEvent::Focused(false)
+        ));
+        assert!(!is_trusted_main_destroyed(
+            "second",
+            &WindowEvent::Focused(false)
+        ));
     }
 }
