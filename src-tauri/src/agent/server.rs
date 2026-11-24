@@ -247,7 +247,10 @@ async fn limit_tool_dispatch(
 
 // Keep 404 responses constant: no reflection of URI, Host or credentials.
 async fn unknown_route() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, Json(json!({"error":"Unknown route"})))
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error":"Unknown route"})),
+    )
 }
 
 async fn health(State(state): State<Arc<AgentState>>) -> Json<Value> {
@@ -789,10 +792,9 @@ mod tests {
                 builder = builder.header("authorization", "Bearer unknown-route-test-bearer");
             }
             let mut request = builder.body(Body::empty()).unwrap();
-            request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-                source.parse().unwrap(),
-                48999,
-            )));
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(source.parse().unwrap(), 48999)));
             request
         };
         let occupied = state
@@ -811,7 +813,13 @@ mod tests {
         ] {
             assert_eq!(
                 app.clone()
-                    .oneshot(make(method.clone(), path, "10.8.0.2", "10.8.0.1:8080", false))
+                    .oneshot(make(
+                        method.clone(),
+                        path,
+                        "10.8.0.2",
+                        "10.8.0.1:8080",
+                        false
+                    ))
                     .await
                     .unwrap()
                     .status(),
@@ -819,7 +827,13 @@ mod tests {
             );
             assert_eq!(
                 app.clone()
-                    .oneshot(make(method.clone(), path, "10.8.0.2", "evil.test:8080", true))
+                    .oneshot(make(
+                        method.clone(),
+                        path,
+                        "10.8.0.2",
+                        "evil.test:8080",
+                        true
+                    ))
                     .await
                     .unwrap()
                     .status(),
@@ -855,7 +869,11 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), *expected, "request #{n}: {method} {path}");
+            assert_eq!(
+                response.status(),
+                *expected,
+                "request #{n}: {method} {path}"
+            );
             if *method == Method::GET {
                 let bytes = response.into_body().collect().await.unwrap().to_bytes();
                 let body: Value = serde_json::from_slice(&bytes).unwrap();
