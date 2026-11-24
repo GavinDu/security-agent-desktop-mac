@@ -163,7 +163,7 @@ impl AgentSettings {
             return Err("Oversized settings.json".into());
         }
         let settings: Self =
-            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings.json: {e}"))?;
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid settings.json".to_owned())?;
         if !settings.only_known_tool_policies() {
             return Err("Invalid settings.json".into());
         }
@@ -519,6 +519,28 @@ mod tests {
             fs::read(outside.join("settings.json")).unwrap(),
             b"outside-sentinel"
         );
+    }
+
+    #[test]
+    fn invalid_settings_json_diagnostics_never_echo_untrusted_field_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for invalid in [
+            r#"{"allowed_roots":[],"policies":{},"/Users/private/SECRET_TOKEN_MARKER":true}"#,
+            r#"{"allowed_roots":[],"policies":{"bash__run":"SECRET_TOKEN_MARKER"}}"#,
+            r#"{"allowed_roots":[],"policies":{},"SECRET_TOKEN_MARKER":"#,
+        ] {
+            fs::write(&path, invalid).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let failure = AgentSettings::load_at(&path).unwrap_err();
+            assert_eq!(failure, "Invalid settings.json");
+            assert!(!failure.contains("SECRET_TOKEN_MARKER"));
+            assert!(!failure.contains("/Users/private/"));
+        }
     }
 
     #[test]
