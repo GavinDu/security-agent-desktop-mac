@@ -715,7 +715,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+        // HTTP HEAD carries no body, even for our 429 JSON error.
         let bytes = saturated.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.is_empty());
+        // The same exhausted method/path quota also rejects POST with a
+        // sanitized JSON error body (not suppressed by HEAD semantics).
+        let saturated_post = app
+            .clone()
+            .oneshot(make(
+                "POST",
+                "10.8.0.2",
+                "10.8.0.1:8080",
+                Some("health-method-secret-marker"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(saturated_post.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = saturated_post.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("Health request rate limit reached"));
         assert!(!body.contains("health-method-secret-marker"));
