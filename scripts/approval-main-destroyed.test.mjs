@@ -26,9 +26,9 @@ test('main-only predicate is tested for Destroyed, Focused, and foreign window (
   const app = await readFile('src-tauri/src/app.rs', 'utf8');
   assert.match(app, /fn only_real_main_window_destruction_closes_approval_inbox\(\)/);
   assert.match(app, /is_trusted_main_destroyed\("main", &WindowEvent::Destroyed\)/);
-  assert.match(app, /is_trusted_main_destroyed\("second", &WindowEvent::Destroyed\)/);
-  assert.match(app, /is_trusted_main_destroyed\("main", &WindowEvent::Focused\(true\)\)/);
-  assert.match(app, /is_trusted_main_destroyed\("main", &WindowEvent::Focused\(false\)\)/);
+  assert.match(app, /is_trusted_main_destroyed\(\s*"second",\s*&WindowEvent::Destroyed\s*\)/);
+  assert.match(app, /is_trusted_main_destroyed\(\s*"main",\s*&WindowEvent::Focused\(true\)\s*\)/);
+  assert.match(app, /is_trusted_main_destroyed\(\s*"main",\s*&WindowEvent::Focused\(false\)\s*\)/);
   const gate = await readFile('src-tauri/src/tools/approvals.rs', 'utf8');
   assert.match(gate, /fn cancel_pending_for_shutdown\(&self\) -> Result<usize, String>/);
   assert.match(gate, /self\.shutting_down\.store\(true, Ordering::SeqCst\)/);
