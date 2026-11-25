@@ -978,15 +978,9 @@ mod tests {
         assert_eq!(denied, "Directory Clear request already active");
         drop(clear);
         // Clear still has its independent slot, even with every Grant slot held.
-        commit_serialized_roots(
-            &state,
-            Vec::new(),
-            None,
-            |_| Ok(Vec::new()),
-            |_| Ok(()),
-        )
-        .await
-        .unwrap();
+        commit_serialized_roots(&state, Vec::new(), None, |_| Ok(Vec::new()), |_| Ok(()))
+            .await
+            .unwrap();
         assert_ne!(state.root_mutations.lock().await.token(), revision);
         drop(grants);
         assert_eq!(
