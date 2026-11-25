@@ -222,8 +222,35 @@ mod tests {
         assert!(store.pending.lock().unwrap().is_empty());
         let ticket = store.prepare(owner, call.clone()).await.unwrap();
         store.discard_all().unwrap();
-        assert!(store.redeem(owner, ticket, |_| panic!("discarded")).is_err());
+        assert!(store
+            .redeem(owner, ticket, |_| panic!("discarded"))
+            .is_err());
         assert!(store.prepare(owner, call).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn synchronous_handoff_retains_writer_exclusion_until_callback_returns() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Poll, Waker},
+        };
+
+        let (_root, registry, call) = fixture();
+        let store = NativeFileTickets::new(Arc::clone(&registry));
+        let owner = Uuid::new_v4();
+        let ticket = store.prepare(owner, call).await.unwrap();
+        let mut writer = pin!(registry.reserve_root_publication());
+        store
+            .redeem(owner, ticket, |value| {
+                assert_eq!(value["content"], "NATIVE_TICKET_CANARY");
+                let mut cx = Context::from_waker(Waker::noop());
+                assert!(matches!(writer.as_mut().poll(&mut cx), Poll::Pending));
+            })
+            .unwrap();
+        let _writer = tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -234,10 +261,14 @@ mod tests {
         let first = store.prepare(owner, call.clone()).await.unwrap();
         let second = store.prepare(owner, call.clone()).await.unwrap();
         registry.suspend_for_clear();
-        assert!(store.redeem(owner, first, |_| panic!("pending Clear")).is_err());
+        assert!(store
+            .redeem(owner, first, |_| panic!("pending Clear"))
+            .is_err());
         registry.finish_clear();
         registry.begin_shutdown();
-        assert!(store.redeem(owner, second, |_| panic!("shutdown")).is_err());
+        assert!(store
+            .redeem(owner, second, |_| panic!("shutdown"))
+            .is_err());
         assert!(store.prepare(owner, call).await.is_err());
     }
 }
