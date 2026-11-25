@@ -1165,6 +1165,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn accepted_clear_survives_terminal_shutdown_and_releases_request_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "private").unwrap();
+        let state = AgentState::new(
+            "root-shutdown-accepted-clear-fixture".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![root.path().to_string_lossy().into_owned()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker_state = Arc::clone(&state);
+        let request = tokio::spawn(async move {
+            commit_serialized_roots_with_timeout(
+                &worker_state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                move |_| {
+                    let _ = entered_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Fixture commit expired".to_owned())?;
+                    Ok(())
+                },
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                Duration::from_millis(100),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Shutdown cannot undo an accepted transaction or reopen admission.
+        state.registry.begin_shutdown();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(outcome, ROOT_COMMIT_UNKNOWN);
+        assert_eq!(state.root_clear_requests.available_permits(), 0);
+        assert!(state.root_mutations.try_lock().is_err());
+        let denied = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |_| panic!("shutdown must reject new validation"),
+            |_| panic!("shutdown must reject new persistence"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory permission service is shutting down");
+        let read_error = state
+            .registry
+            .invoke(ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!({"path":file}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(read_error, denied);
+
+        release_tx.send(()).unwrap();
+        let revision = tokio::time::timeout(Duration::from_secs(2), state.root_mutations.lock())
+            .await
+            .unwrap();
+        assert_ne!(revision.token(), before);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        drop(revision);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.root_clear_requests.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            state.registry.ensure_no_pending_clear().unwrap_err(),
+            denied
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn accepted_root_commit_ack_timeout_is_unknown_until_worker_finishes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().to_string_lossy().into_owned();
