@@ -386,7 +386,10 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(denied, "Directory permission revocation pending; retry Clear");
+        assert_eq!(
+            denied,
+            "Directory permission revocation pending; retry Clear"
+        );
         let grant = commit_serialized_roots(
             &state,
             vec![root.path().to_string_lossy().into_owned()],
@@ -396,7 +399,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(grant, "Directory permission revocation pending; retry Clear");
+        assert_eq!(
+            grant,
+            "Directory permission revocation pending; retry Clear"
+        );
         // A timed-out writer must not resume later and double-publish. A
         // separate retry owns the only accepted durable publication.
         let writes = Arc::clone(&persist_count);
