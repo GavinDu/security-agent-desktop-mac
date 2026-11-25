@@ -407,11 +407,24 @@ impl ToolRegistry {
     async fn admit_scoped_read(
         &self,
     ) -> Result<(OwnedSemaphorePermit, OwnedRwLockReadGuard<()>), String> {
+        self.admit_scoped_read_with_timeout(FILE_WORKER_WAIT).await
+    }
+
+    async fn admit_scoped_read_with_timeout(
+        &self,
+        max_wait: Duration,
+    ) -> Result<(OwnedSemaphorePermit, OwnedRwLockReadGuard<()>), String> {
         self.ensure_no_pending_clear()?;
         let slot = Arc::clone(&self.read_slots)
             .try_acquire_owned()
             .map_err(|_| "Approved file read capacity exceeded".to_owned())?;
-        let admission = Arc::clone(&self.root_admission).read_owned().await;
+        // No FD worker exists yet. An expired queued reader drops both its
+        // FIFO wait position and its capacity slot without touching a file.
+        let admission = tokio::time::timeout(max_wait, async {
+            Arc::clone(&self.root_admission).read_owned().await
+        })
+        .await
+        .map_err(|_| "Approved file read admission timed out".to_owned())?;
         // Recheck after the await: the Clear may have timed out while this
         // reader was queued. Dropping both guards on denial is automatic.
         self.ensure_no_pending_clear()?;
@@ -1107,6 +1120,34 @@ mod tests {
             "Directory permission service is shutting down"
         );
         assert!(registry.admit_scoped_read().await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_queued_file_reader_returns_slot_without_fd_admission() {
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let writer = registry.reserve_root_publication().await;
+        let failure = registry
+            .admit_scoped_read_with_timeout(Duration::from_millis(35))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure, "Approved file read admission timed out");
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS
+        );
+        drop(writer);
+
+        let next = registry.admit_scoped_read().await.unwrap();
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS - 1
+        );
+        drop(next);
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS
+        );
     }
 
     #[tokio::test]

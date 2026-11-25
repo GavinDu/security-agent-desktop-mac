@@ -58,6 +58,8 @@ pub const MAX_CONCURRENT_TOOL_REQUESTS: usize = 16;
 // A canceled Tokio future does not stop a blocking NFS/openat syscall.
 // Each stalled native Grant validation retains a worker-owned slot until it exits.
 pub(crate) const MAX_ROOT_VALIDATION_WORKERS: usize = 4;
+// Bound native mutation callers independently of the blocking validator budget.
+pub(crate) const MAX_ROOT_GRANT_REQUESTS: usize = 8;
 
 pub struct AgentState {
     pub token: String,
@@ -73,6 +75,8 @@ pub struct AgentState {
     /// Serialize every native root-grant mutation before filesystem validation.
     pub(crate) root_mutations: Arc<Mutex<RootGrantRevision>>,
     pub(crate) root_validation_slots: Arc<Semaphore>,
+    pub(crate) root_grant_requests: Arc<Semaphore>,
+    pub(crate) root_clear_requests: Arc<Semaphore>,
     pub settings: Mutex<AgentSettings>,
     listener_error: RwLock<Option<String>>,
 }
@@ -107,6 +111,8 @@ impl AgentState {
             ),
             root_mutations: Arc::new(Mutex::new(RootGrantRevision::new())),
             root_validation_slots: Arc::new(Semaphore::new(MAX_ROOT_VALIDATION_WORKERS)),
+            root_grant_requests: Arc::new(Semaphore::new(MAX_ROOT_GRANT_REQUESTS)),
+            root_clear_requests: Arc::new(Semaphore::new(1)),
             settings: Mutex::new(settings),
             listener_error: RwLock::new(None),
         }))

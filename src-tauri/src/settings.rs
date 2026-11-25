@@ -174,6 +174,18 @@ impl AgentSettings {
         self.save_at(&file_path()?)
     }
 
+    // Native integration fixtures exercise the real persistence path without
+    // modifying the developer's actual Application Support settings.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn save_fixture_at(&self, path: &Path) -> Result<(), String> {
+        self.save_at(path)
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn load_fixture_at(path: &Path) -> Result<Self, String> {
+        Self::load_at(path)
+    }
+
     fn save_at(&self, path: &Path) -> Result<(), String> {
         // Refuse invalid names before any filesystem mutation. Do not persist
         // dormant authority for future tool names.
