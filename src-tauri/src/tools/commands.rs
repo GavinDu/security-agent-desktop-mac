@@ -169,6 +169,14 @@ where
     }
     // Only the dedicated empty-set revocation call may omit a revision.
     revision.ensure_can_advance()?;
+    let clearing = roots.is_empty();
+    if clearing {
+        // Once trusted Clear starts under the revision gate, cancellation,
+        // timeout or persistence failure cannot reopen old file admissions.
+        state.registry.suspend_for_clear();
+    } else {
+        state.registry.ensure_no_pending_clear()?;
+    }
     // Reserve capacity BEFORE scheduling a potentially uninterruptible native
     // directory validation. Empty Clear bypasses Grant capacity, preserving
     // the owner's ability to revoke when remote-path validators are stuck.
@@ -202,7 +210,11 @@ where
     )
     .await
     .map_err(|_| {
-        "Directory permission change not committed; retry after active reads finish".to_owned()
+        if clearing {
+            "Directory permission revocation pending; retry Clear".to_owned()
+        } else {
+            "Directory permission change not committed; retry after active reads finish".to_owned()
+        }
     })?;
     // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
     // fair write permit. Cancellation cannot cut save/live publication apart.
@@ -211,6 +223,11 @@ where
         let _root_write_admission = root_write_admission;
         let mut settings = state.settings.blocking_lock();
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
+        // Keep both guards until the successful empty publication clears
+        // the latch. No failed persistence path may clear it.
+        if clearing {
+            state.registry.finish_clear();
+        }
         // No await/cancellation point between save, live publish and CAS.
         revision.advance();
         Ok::<(), String>(())
@@ -344,7 +361,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             failure,
-            "Directory permission change not committed; retry after active reads finish"
+            "Directory permission revocation pending; retry Clear"
         );
         assert_eq!(persist_count.load(Ordering::SeqCst), 0);
         // Timeout must cancel the queued writer and release the revision lock.
@@ -356,6 +373,36 @@ mod tests {
         assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
 
         drop(held_admission);
+        // Dropping the timed-out writer must not reopen old permissions.
+        assert_eq!(
+            state.registry.ensure_no_pending_clear().unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        let denied = state
+            .registry
+            .invoke(ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!({"path": root.path().join("old.txt")}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            "Directory permission revocation pending; retry Clear"
+        );
+        let grant = commit_serialized_roots(
+            &state,
+            vec![root.path().to_string_lossy().into_owned()],
+            Some(original_revision.clone()),
+            |_| panic!("pending Clear must prevent validation"),
+            |_| panic!("pending Clear must prevent persistence"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            grant,
+            "Directory permission revocation pending; retry Clear"
+        );
         // A timed-out writer must not resume later and double-publish. A
         // separate retry owns the only accepted durable publication.
         let writes = Arc::clone(&persist_count);
@@ -380,7 +427,75 @@ mod tests {
         .unwrap();
         assert_eq!(persist_count.load(Ordering::SeqCst), 1);
         assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert!(state.registry.ensure_no_pending_clear().is_ok());
         assert_ne!(state.root_mutations.lock().await.token(), original_revision);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn canceled_or_failed_clear_keeps_admission_suspended_until_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-clear-suspension-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path.clone()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        let held = state.registry.reserve_root_publication().await;
+        let caller_state = Arc::clone(&state);
+        let caller = tokio::spawn(async move {
+            commit_serialized_roots(
+                &caller_state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                |_| panic!("blocked canceled Clear cannot persist"),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.registry.ensure_no_pending_clear().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert!(state.registry.ensure_no_pending_clear().is_err());
+        assert_eq!(state.root_mutations.lock().await.token(), before);
+
+        let failed = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Err("private disk error".into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed, "Cannot persist approved roots");
+        assert!(state.registry.ensure_no_pending_clear().is_err());
+        assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
+        assert_eq!(state.root_mutations.lock().await.token(), before);
+
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(state.registry.ensure_no_pending_clear().is_ok());
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert_ne!(state.root_mutations.lock().await.token(), before);
     }
 
     #[tokio::test(flavor = "current_thread")]

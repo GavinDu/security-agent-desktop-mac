@@ -6,7 +6,7 @@ use std::{
     fs::File,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, OnceLock, RwLock,
     },
     time::Duration,
@@ -250,6 +250,8 @@ pub struct ToolRegistry {
     // Private process-local monotonic grant generation, not a caller-supplied
     // revision token. Used to reject already-revoked completed read results.
     root_generation: AtomicU64,
+    // A trusted Clear that cannot finish must not reopen old admissions.
+    clear_pending: AtomicBool,
     gate: Arc<ApprovalGate>,
 }
 
@@ -264,6 +266,7 @@ impl ToolRegistry {
             read_slots: Arc::new(Semaphore::new(MAX_ADMITTED_FILE_READS)),
             path_preflight_slots: Arc::new(Semaphore::new(MAX_ADMITTED_PATH_PREFLIGHTS)),
             root_generation: AtomicU64::new(0),
+            clear_pending: AtomicBool::new(false),
             gate,
         }
     }
@@ -312,11 +315,31 @@ impl ToolRegistry {
         self.commit_roots_transaction(roots, || Ok(()))
     }
 
+    // Called only while the native root mutation revision guard is held.
+    // Cancellation or a failed save leaves the process-local latch set.
+    pub(crate) fn suspend_for_clear(&self) {
+        self.clear_pending.store(true, Ordering::SeqCst);
+    }
+
+    // Only after successful durable empty-root publication, while both
+    // native mutation and fair publication guards are still held.
+    pub(crate) fn finish_clear(&self) {
+        self.clear_pending.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn ensure_no_pending_clear(&self) -> Result<(), String> {
+        if self.clear_pending.load(Ordering::SeqCst) {
+            return Err("Directory permission revocation pending; retry Clear".to_owned());
+        }
+        Ok(())
+    }
+
     /// Called after the admitted pinned worker releases its read permit and
     /// BEFORE the shared ToolRegistry returns a successful JSON result to
     /// either native IPC or authenticated HTTP. A later Clear/Grant invalidates
     /// the result even when the underlying FD read itself completed safely.
     fn ensure_current_file_result(&self, expected_generation: u64) -> Result<(), String> {
+        self.ensure_no_pending_clear()?;
         if self.root_generation.load(Ordering::Acquire) != expected_generation {
             return Err("File read authorization changed".to_owned());
         }
@@ -329,10 +352,14 @@ impl ToolRegistry {
     async fn admit_scoped_read(
         &self,
     ) -> Result<(OwnedSemaphorePermit, OwnedRwLockReadGuard<()>), String> {
+        self.ensure_no_pending_clear()?;
         let slot = Arc::clone(&self.read_slots)
             .try_acquire_owned()
             .map_err(|_| "Approved file read capacity exceeded".to_owned())?;
         let admission = Arc::clone(&self.root_admission).read_owned().await;
+        // Recheck after the await: the Clear may have timed out while this
+        // reader was queued. Dropping both guards on denial is automatic.
+        self.ensure_no_pending_clear()?;
         Ok((slot, admission))
     }
 
@@ -423,17 +450,21 @@ impl ToolRegistry {
         requested: PathBuf,
         require_directory: bool,
     ) -> Result<PathBuf, String> {
+        self.ensure_no_pending_clear()?;
         let roots = Arc::clone(&self.roots);
         let root_admission = Arc::clone(&self.root_admission);
-        self.offload_path_check(move || {
-            let resolved = Self::allowed_path_against(&roots, &root_admission, &requested)?;
-            // Directory metadata is also potentially blocking on slow mounts.
-            if require_directory && !resolved.is_dir() {
-                return Err("cwd must be a directory".into());
-            }
-            Ok(resolved)
-        })
-        .await
+        let resolved = self
+            .offload_path_check(move || {
+                let resolved = Self::allowed_path_against(&roots, &root_admission, &requested)?;
+                // Directory metadata is also potentially blocking on slow mounts.
+                if require_directory && !resolved.is_dir() {
+                    return Err("cwd must be a directory".into());
+                }
+                Ok(resolved)
+            })
+            .await?;
+        self.ensure_no_pending_clear()?;
+        Ok(resolved)
     }
 
     // Ask may wait 60 seconds. Recheck live grant and policy AFTER the wait
@@ -784,6 +815,37 @@ mod tests {
         assert_eq!(
             later.await.unwrap().unwrap_err(),
             "Path outside granted roots"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_reader_cannot_escape_pending_clear_after_writer_drops() {
+        use std::{future::Future, task::Poll};
+
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let writer = registry.reserve_root_publication().await;
+        let generation = registry.root_generation.load(Ordering::Acquire);
+        let mut queued = Box::pin(registry.admit_scoped_read());
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        registry.suspend_for_clear();
+        drop(writer);
+
+        assert_eq!(
+            queued.await.unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        assert_eq!(
+            registry.ensure_current_file_result(generation).unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS
         );
     }
 
