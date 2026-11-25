@@ -115,6 +115,7 @@ pub fn run() {
             // command. Hiding main in the tray does NOT close the inbox.
             if matches!(&event, tauri::RunEvent::Exit) {
                 if let Some(state) = app.try_state::<Arc<AgentState>>() {
+                    state.registry.begin_shutdown();
                     let _ = state.gate.cancel_pending_for_shutdown();
                 }
             }
