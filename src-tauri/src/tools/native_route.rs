@@ -5,6 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 const TRUSTED_ORIGIN: &str = "tauri://localhost";
+#[cfg(test)]
 const REDEEM_URI: &str = "security-agent-file://localhost/redeem";
 const DENIED: &[u8] = br#"{"error":"File read authorization changed"}"#;
 
@@ -53,9 +54,18 @@ fn response(status: StatusCode, body: Vec<u8>, trusted: bool) -> Response<Vec<u8
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
-    headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static("no-store"));
-    headers.insert("x-content-type-options", header::HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        "x-content-type-options",
+        header::HeaderValue::from_static("nosniff"),
+    );
     headers.insert(header::VARY, header::HeaderValue::from_static("Origin"));
     if trusted {
         headers.insert(
@@ -122,7 +132,9 @@ mod tests {
             |response| {
                 assert_eq!(response.status(), StatusCode::FORBIDDEN);
                 assert_eq!(response.body(), DENIED);
-                assert!(!response.headers().contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+                assert!(!response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
             },
         );
     }
@@ -132,16 +144,25 @@ mod tests {
         let id = Uuid::new_v4();
         denied_before_redeem("other", true, valid(id));
         denied_before_redeem("main", false, valid(id));
-        for origin in ["null", "https://example.com", "tauri://localhost.evil", "tauri://localhost/"] {
+        for origin in [
+            "null",
+            "https://example.com",
+            "tauri://localhost.evil",
+            "tauri://localhost/",
+        ] {
             let mut request = valid(id);
-            request.headers_mut().insert(header::ORIGIN, origin.parse().unwrap());
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, origin.parse().unwrap());
             denied_before_redeem("main", true, request);
         }
         let mut request = valid(id);
         request.headers_mut().remove(header::ORIGIN);
         denied_before_redeem("main", true, request);
         let mut request = valid(id);
-        request.headers_mut().append(header::ORIGIN, TRUSTED_ORIGIN.parse().unwrap());
+        request
+            .headers_mut()
+            .append(header::ORIGIN, TRUSTED_ORIGIN.parse().unwrap());
         denied_before_redeem("main", true, request);
         for uri in [
             "security-agent-file://evil/redeem",
@@ -161,11 +182,15 @@ mod tests {
         }
         for credential in [header::AUTHORIZATION, header::COOKIE] {
             let mut request = valid(id);
-            request.headers_mut().insert(credential, "secret".parse().unwrap());
+            request
+                .headers_mut()
+                .insert(credential, "secret".parse().unwrap());
             denied_before_redeem("main", true, request);
         }
         let mut request = valid(id);
-        request.headers_mut().append(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        request
+            .headers_mut()
+            .append(header::CONTENT_TYPE, "text/plain".parse().unwrap());
         denied_before_redeem("main", true, request);
         let mut request = valid(id);
         request.headers_mut().remove(header::CONTENT_TYPE);
@@ -202,8 +227,13 @@ mod tests {
                 assert!(!delivered.replace(true));
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-                assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], TRUSTED_ORIGIN);
-                assert!(!response.headers().contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+                assert_eq!(
+                    response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                    TRUSTED_ORIGIN
+                );
+                assert!(!response
+                    .headers()
+                    .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
                 let value: Value = serde_json::from_slice(response.body()).unwrap();
                 assert_eq!(value["content"].as_str().unwrap().len(), 64 * 1024);
             },
@@ -221,7 +251,10 @@ mod tests {
             |response| {
                 assert_eq!(response.status(), StatusCode::FORBIDDEN);
                 assert_eq!(response.body(), DENIED);
-                assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], TRUSTED_ORIGIN);
+                assert_eq!(
+                    response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                    TRUSTED_ORIGIN
+                );
                 assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             },
         );
