@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     http::{header, Method, Request, Response, StatusCode},
@@ -75,6 +75,9 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
         ToolRegistry::canonical_roots(&[root.to_string_lossy().into_owned()]).unwrap(),
         ApprovalGate::new(HashMap::new()),
     ));
+    // The stale denial must be observed strictly before the 30s ticket TTL.
+    // Measure from before either ticket is created, not from window launch.
+    let prepared_at = Instant::now();
     let (session, script) = tauri::async_runtime::block_on(async {
         let session = Arc::new(NativeFileSession::new(Arc::clone(&registry)));
         let call = ToolCall {
@@ -167,6 +170,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                             1 => status == StatusCode::FORBIDDEN,
                             2 => {
                                 handler_cleared.load(Ordering::SeqCst)
+                                    && prepared_at.elapsed() < Duration::from_secs(25)
                                     && status == StatusCode::FORBIDDEN
                             }
                             _ => false,
@@ -175,8 +179,9 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                             handler_phase.fetch_add(1, Ordering::SeqCst);
                         }
                         eprintln!(
-                            "registry handoff probe: phase={current}, status={}, trusted={trusted_document}",
-                            status.as_u16()
+                            "registry handoff probe: phase={current}, status={}, trusted={trusted_document}, age_ms={}",
+                            status.as_u16(),
+                            prepared_at.elapsed().as_millis()
                         );
                         // This is the real Tauri/Wry responder, inside the
                         // registry-backed ticket's synchronous guard.
