@@ -266,6 +266,8 @@ pub struct ToolRegistry {
     root_generation: AtomicU64,
     // A trusted Clear that cannot finish must not reopen old admissions.
     clear_pending: AtomicBool,
+    // Monotonic process-local terminal admission latch, independent of Clear.
+    shutting_down: AtomicBool,
     // Bound completed HTTP file results even if clients never poll the body.
     http_delivery_slots: Arc<Semaphore>,
     gate: Arc<ApprovalGate>,
@@ -283,6 +285,7 @@ impl ToolRegistry {
             path_preflight_slots: Arc::new(Semaphore::new(MAX_ADMITTED_PATH_PREFLIGHTS)),
             root_generation: AtomicU64::new(0),
             clear_pending: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             http_delivery_slots: Arc::new(Semaphore::new(16)),
             gate,
         }
@@ -344,7 +347,19 @@ impl ToolRegistry {
         self.clear_pending.store(false, Ordering::SeqCst);
     }
 
+    pub(crate) fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn ensure_running(&self) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Directory permission service is shutting down".to_owned());
+        }
+        Ok(())
+    }
+
     pub(crate) fn ensure_no_pending_clear(&self) -> Result<(), String> {
+        self.ensure_running()?;
         if self.clear_pending.load(Ordering::SeqCst) {
             return Err("Directory permission revocation pending; retry Clear".to_owned());
         }
@@ -1070,6 +1085,41 @@ mod tests {
             "Directory permission generation exhausted"
         );
         assert!(!persisted, "overflow must fail before disk persistence");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_shutdown_denies_new_root_work_even_after_clear_finishes() {
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let (generation, delivery_slot) = registry.reserve_http_file_delivery().unwrap();
+        let (slot, gate) = registry.admit_scoped_read().await.unwrap();
+        registry.begin_shutdown();
+        registry.begin_shutdown();
+        assert!(registry.admit_scoped_read().await.is_err());
+        assert!(registry.reserve_http_file_delivery().is_err());
+        assert!(registry.try_http_file_handoff(generation).is_err());
+        assert!(registry
+            .allowed_path_for_tool(PathBuf::from("/fixture"), false)
+            .await
+            .is_err());
+        // The already admitted worker remains authoritative until it exits.
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS - 1
+        );
+        drop(slot);
+        drop(gate);
+        drop(delivery_slot);
+        let writer = registry.reserve_root_publication().await;
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        registry.finish_clear();
+        drop(writer);
+        assert_eq!(
+            registry.ensure_no_pending_clear().unwrap_err(),
+            "Directory permission service is shutting down"
+        );
+        assert!(registry.admit_scoped_read().await.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
