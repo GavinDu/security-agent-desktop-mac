@@ -277,9 +277,11 @@ mod tests {
             .unwrap()
             .unwrap();
         store.discard_all().unwrap();
-        assert!(approval
-            .resolve(Uuid::parse_str(&event.id).unwrap(), true)
-            .await);
+        assert!(
+            approval
+                .resolve(Uuid::parse_str(&event.id).unwrap(), true)
+                .await
+        );
         assert_eq!(pending.await.unwrap().unwrap_err(), DENIED);
         assert!(store.pending.lock().unwrap().is_empty());
     }
