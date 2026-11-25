@@ -1244,9 +1244,10 @@ mod tests {
         assert!(registry.admit_scoped_read().await.is_err());
 
         release_tx.send(()).unwrap();
-        let writer = tokio::time::timeout(Duration::from_secs(2), registry.reserve_root_publication())
-            .await
-            .unwrap();
+        let writer =
+            tokio::time::timeout(Duration::from_secs(2), registry.reserve_root_publication())
+                .await
+                .unwrap();
         registry
             .commit_roots_transaction(Vec::new(), || Ok(()))
             .unwrap();
