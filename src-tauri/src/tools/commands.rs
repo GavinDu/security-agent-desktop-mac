@@ -109,6 +109,7 @@ const ROOT_PUBLICATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 const ROOT_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 // A deadline for the caller only; the accepted worker retains both guards.
 const ROOT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+const ROOT_COMMIT_UNKNOWN: &str = "Directory permission change outcome unknown; read back settings";
 
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
@@ -218,8 +219,8 @@ where
     // its guards. It may still commit; the caller must not assume rollback.
     tokio::time::timeout(max_commit_ack_wait, commit)
         .await
-        .map_err(|_| "Directory permission change outcome unknown; read back settings".to_owned())?
-        .map_err(|_| "Directory permission change outcome unknown; read back settings".to_owned())?
+        .map_err(|_| ROOT_COMMIT_UNKNOWN.to_owned())?
+        .map_err(|_| ROOT_COMMIT_UNKNOWN.to_owned())?
 }
 
 #[tauri::command]
@@ -844,12 +845,12 @@ mod tests {
             "Directory permission change outcome unknown; read back settings"
         );
         assert!(state.root_mutations.try_lock().is_err());
-        let blocked_reader = tokio::time::timeout(
+        let blocked_writer = tokio::time::timeout(
             Duration::from_millis(35),
             state.registry.reserve_root_publication(),
         )
         .await;
-        assert!(blocked_reader.is_err());
+        assert!(blocked_writer.is_err());
         release_tx.send(()).unwrap();
         let revision = tokio::time::timeout(Duration::from_secs(2), state.root_mutations.lock())
             .await
