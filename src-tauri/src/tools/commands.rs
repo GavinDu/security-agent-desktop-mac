@@ -183,6 +183,7 @@ where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
     P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
 {
+    state.registry.ensure_running()?;
     // Acquire before launching the cancellable validator, preserving the
     // existing FIFO admission order and revision/CAS semantics.
     // A prior accepted commit may retain the mutex indefinitely. Bound this
@@ -194,6 +195,7 @@ where
     .map_err(|_| {
         "Directory permission request not accepted; previous change may be pending".to_owned()
     })?;
+    state.registry.ensure_running()?;
     if !roots.is_empty() || expected_root_revision.is_some() {
         revision.ensure_current(
             expected_root_revision
@@ -235,6 +237,7 @@ where
     .map_err(|_| "Directory permission validation not committed; retry".to_owned())?
     .map_err(|_| "Cannot validate approved roots".to_owned())??;
 
+    state.registry.ensure_running()?;
     // Reserve fair writer intent after successful validation but BEFORE
     // accepting commit ownership. If the caller cancels while this awaits
     // older FD reads, no grant is published; pending writers block new reads.
@@ -250,6 +253,7 @@ where
             "Directory permission change not committed; retry after active reads finish".to_owned()
         }
     })?;
+    state.registry.ensure_running()?;
     // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
     // fair write permit. Cancellation cannot cut save/live publication apart.
     let state = Arc::clone(state);
@@ -989,6 +993,29 @@ mod tests {
                 .unwrap()["content"],
             "published"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_shutdown_rejects_unaccepted_root_changes() {
+        let state = AgentState::new(
+            "root-shutdown-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        state.registry.begin_shutdown();
+        let error = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |_| panic!("shutdown request must not validate"),
+            |_| panic!("shutdown request must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Directory permission service is shutting down");
+        assert_eq!(state.root_mutations.lock().await.token(), before);
     }
 
     #[tokio::test(flavor = "current_thread")]
