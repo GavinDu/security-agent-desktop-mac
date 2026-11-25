@@ -335,5 +335,4 @@ mod tests {
             assert_eq!(reply.body(), DENIED);
         });
     }
-
 }
