@@ -453,15 +453,16 @@ impl ToolRegistry {
         self.ensure_no_pending_clear()?;
         let roots = Arc::clone(&self.roots);
         let root_admission = Arc::clone(&self.root_admission);
-        let resolved = self.offload_path_check(move || {
-            let resolved = Self::allowed_path_against(&roots, &root_admission, &requested)?;
-            // Directory metadata is also potentially blocking on slow mounts.
-            if require_directory && !resolved.is_dir() {
-                return Err("cwd must be a directory".into());
-            }
-            Ok(resolved)
-        })
-        .await?;
+        let resolved = self
+            .offload_path_check(move || {
+                let resolved = Self::allowed_path_against(&roots, &root_admission, &requested)?;
+                // Directory metadata is also potentially blocking on slow mounts.
+                if require_directory && !resolved.is_dir() {
+                    return Err("cwd must be a directory".into());
+                }
+                Ok(resolved)
+            })
+            .await?;
         self.ensure_no_pending_clear()?;
         Ok(resolved)
     }
