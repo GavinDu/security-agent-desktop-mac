@@ -188,7 +188,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
             },
         )
         .setup(move |app| {
-            let config = app
+            let mut config = app
                 .config()
                 .app
                 .windows
@@ -196,6 +196,9 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Missing fixture window config"))?
                 .clone();
+            config.url = tauri::WebviewUrl::CustomProtocol(
+                tauri::Url::parse("tauri://localhost/index.html").unwrap(),
+            );
             let handle = app.handle().clone();
             let session = Arc::clone(&setup_session);
             let phase = Arc::clone(&setup_phase);
@@ -232,7 +235,9 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let code = app.run_return(|_, _| {});
     let _ = session.close();
     if code == 0 && passed.load(Ordering::SeqCst) {
-        println!("registry handoff probe: real 64 KiB read, replay denial and post-Clear denial verified");
+        println!(
+            "registry handoff probe: real 64 KiB read, replay denial and post-Clear denial verified"
+        );
         0
     } else {
         1
