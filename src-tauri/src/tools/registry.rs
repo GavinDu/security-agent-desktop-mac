@@ -819,6 +819,37 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
+    async fn queued_reader_cannot_escape_pending_clear_after_writer_drops() {
+        use std::{future::Future, task::Poll};
+
+        let registry = ToolRegistry::new(Vec::new(), ApprovalGate::new(HashMap::new()));
+        let writer = registry.reserve_root_publication().await;
+        let generation = registry.root_generation.load(Ordering::Acquire);
+        let mut queued = Box::pin(registry.admit_scoped_read());
+        std::future::poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        registry.suspend_for_clear();
+        drop(writer);
+
+        assert_eq!(
+            queued.await.unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        assert_eq!(
+            registry.ensure_current_file_result(generation).unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     async fn hundred_late_read_arrivals_cannot_overtake_root_revocation() {
         use std::{future::Future, task::Poll};
 
