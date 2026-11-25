@@ -789,6 +789,82 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
+    async fn hundred_late_read_arrivals_cannot_overtake_root_revocation() {
+        use std::{future::Future, task::Poll};
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("safe.txt");
+        std::fs::write(&file, "old content").unwrap();
+        let file = file.canonicalize().unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        let (first_slot, first_gate) = registry.admit_scoped_read().await.unwrap();
+        let mut writer = Box::pin(registry.reserve_root_publication());
+        // Poll exactly once to establish FIFO writer intent without sleeps.
+        std::future::poll_fn(|cx| {
+            assert!(writer.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let mut queued = Vec::new();
+        let mut rejected = 0;
+        for _ in 0..100 {
+            let mut arrival = Box::pin(registry.admit_scoped_read());
+            let waiting = std::future::poll_fn(|cx| {
+                Poll::Ready(match arrival.as_mut().poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(Err(error)) => {
+                        assert_eq!(error, "Approved file read capacity exceeded");
+                        false
+                    }
+                    Poll::Ready(Ok(_)) => panic!("late reader overtook writer intent"),
+                })
+            })
+            .await;
+            if waiting {
+                queued.push(arrival);
+            } else {
+                rejected += 1;
+            }
+        }
+        assert_eq!(queued.len(), MAX_ADMITTED_FILE_READS - 1);
+        assert_eq!(rejected, 100 - queued.len());
+        assert_eq!(registry.read_slots.available_permits(), 0);
+        drop(first_gate);
+        drop(first_slot);
+
+        let writer_guard = tokio::time::timeout(Duration::from_secs(2), writer)
+            .await
+            .unwrap();
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        drop(writer_guard);
+
+        for arrival in queued {
+            let (_slot, _guard) = tokio::time::timeout(Duration::from_secs(2), arrival)
+                .await
+                .unwrap()
+                .unwrap();
+            let denied = ToolRegistry::scoped_read_with_lease(
+                &registry.roots,
+                &file,
+                crate::tools::pinned_read::read_scoped_file,
+            )
+            .unwrap_err();
+            assert_eq!(denied, "Path outside granted roots");
+        }
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     async fn completed_file_result_denied_after_root_clear_before_json_return() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("canary.txt");
