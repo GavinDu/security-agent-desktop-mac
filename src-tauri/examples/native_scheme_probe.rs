@@ -11,7 +11,7 @@ mod probe {
     };
     use tauri::{
         http::{header, Method, Request, Response, StatusCode},
-        Manager, WebviewWindowBuilder,
+        WebviewWindowBuilder,
     };
 
     const ORIGIN: &str = "tauri://localhost";
@@ -20,7 +20,8 @@ mod probe {
     const SIZE: usize = 64 * 1024;
     const DOCUMENT: &str = r#"<!doctype html>
 <meta charset="utf-8">
-<script nonce="probe-only">
+<script src="/probe.js"></script>"#;
+    const SCRIPT: &str = r#"
 (async () => {
   try {
     const r = await fetch('security-agent-file://localhost/redeem', {
@@ -38,15 +39,27 @@ mod probe {
     location.replace('tauri://localhost/probe-fail');
   }
 })();
-</script>"#;
+"#;
 
     fn fixture_document(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+        eprintln!("native scheme probe: fixture document handler called");
+        if request.method() == Method::GET
+            && request.uri().to_string() == "tauri://localhost/probe.js"
+        {
+            eprintln!("native scheme probe: fixture script requested");
+            return Response::builder()
+                .header(header::CONTENT_TYPE, "application/javascript")
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(SCRIPT.as_bytes().to_vec())
+                .unwrap();
+        }
         let allowed = request.method() == Method::GET
             && matches!(
                 request.uri().to_string().as_str(),
-                "tauri://localhost/" | "tauri://localhost/index.html"
+                "tauri://localhost" | "tauri://localhost/" | "tauri://localhost/index.html"
             );
         if !allowed {
+            eprintln!("native scheme probe: fixture document request rejected");
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Vec::new())
@@ -57,7 +70,7 @@ mod probe {
             .header(header::CACHE_CONTROL, "no-store")
             .header(
                 "Content-Security-Policy",
-                "default-src 'none'; script-src 'nonce-probe-only'; connect-src security-agent-file:; frame-src 'none'; base-uri 'none'; form-action 'none'",
+                "default-src 'none'; script-src 'self'; connect-src security-agent-file:; frame-src 'none'; base-uri 'none'; form-action 'none'",
             )
             .body(DOCUMENT.as_bytes().to_vec())
             .unwrap()
@@ -134,10 +147,16 @@ mod probe {
                 let handle = app.handle().clone();
                 let seen = Arc::clone(&setup_seen);
                 let delivered = Arc::clone(&setup_delivered);
-                WebviewWindowBuilder::from_config(app, &config)?
+                eprintln!("native scheme probe: building fixture window");
+                let window = WebviewWindowBuilder::from_config(app, &config)?
                     .visible(true)
-                    .on_navigation(move |url| match url.as_str() {
-                        "tauri://localhost/" | "tauri://localhost/index.html" => true,
+                    .on_page_load(|_, payload| {
+                        eprintln!("native scheme probe: page load {:?}", payload.event());
+                    })
+                    .on_navigation(move |url| {
+                        eprintln!("native scheme probe: navigation callback");
+                        match url.as_str() {
+                            "tauri://localhost" | "tauri://localhost/" | "tauri://localhost/index.html" => true,
                         "tauri://localhost/probe-pass" => {
                             let ok = seen.load(Ordering::SeqCst);
                             delivered.store(ok, Ordering::SeqCst);
@@ -148,10 +167,13 @@ mod probe {
                             handle.exit(1);
                             false
                         }
-                        _ => false,
+                            _ => false,
+                        }
                     })
                     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                     .build()?;
+                eprintln!("native scheme probe: fixture window created");
+                window.show()?;
                 Ok(())
             })
             .build(tauri::generate_context!())
@@ -164,7 +186,12 @@ mod probe {
             eprintln!("native scheme probe: no completed synthetic response before watchdog");
             std::process::exit(2);
         });
-        let code = app.run_return(|_, _| {});
+        eprintln!("native scheme probe: entering native event loop");
+        let code = app.run_return(|_, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                eprintln!("native scheme probe: native event loop ready");
+            }
+        });
         if code == 0 && delivered.load(Ordering::SeqCst) {
             println!("native scheme probe: strict origin and 64 KiB synthetic JS receipt verified");
             0
