@@ -334,6 +334,98 @@ mod tests {
     use crate::tools::approvals::ApprovalGate;
     use serde_json::json;
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_apfs_root_clear_persists_and_revokes_within_normal_budget() {
+        use std::{
+            ffi::{CStr, CString},
+            os::unix::ffi::OsStrExt,
+            time::Instant,
+        };
+
+        let data = tempfile::tempdir().unwrap();
+        let settings_dir = tempfile::tempdir().unwrap();
+        let data_path = data.path().canonicalize().unwrap();
+        let settings_path = settings_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("settings.json");
+        // Verify the actual fixture filesystem, not a simulated APFS label.
+        for directory in [&data_path, settings_path.parent().unwrap()] {
+            let c_path = CString::new(directory.as_os_str().as_bytes()).unwrap();
+            let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: valid C path and writable statfs buffer, read only on success.
+            assert_eq!(unsafe { libc::statfs(c_path.as_ptr(), fs.as_mut_ptr()) }, 0);
+            let fs = unsafe { fs.assume_init() };
+            let filesystem = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) };
+            assert_eq!(filesystem.to_bytes(), b"apfs", "fixture must run on APFS");
+        }
+        let canary = data_path.join("canary.txt");
+        std::fs::write(&canary, "APFS_FIXTURE_CANARY").unwrap();
+        let initial = AgentSettings {
+            allowed_roots: vec![data_path.to_string_lossy().into_owned()],
+            ..AgentSettings::default()
+        };
+        initial.save_fixture_at(&settings_path).unwrap();
+        let state = AgentState::new(
+            "apfs-root-acceptance-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::load_fixture_at(&settings_path).unwrap(),
+        )
+        .unwrap();
+        let original = state.root_mutations.lock().await.token();
+        let call = ToolCall {
+            name: "filesystem__read_file".into(),
+            arguments: json!({"path":canary}),
+        };
+        assert_eq!(
+            state.registry.invoke(call.clone()).await.unwrap()["content"],
+            "APFS_FIXTURE_CANARY"
+        );
+        let started = Instant::now();
+        let save_path = settings_path.clone();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            commit_serialized_roots(
+                &state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                move |settings| settings.save_fixture_at(&save_path),
+            ),
+        )
+        .await
+        .expect("uncontended APFS fixture exceeded normal acceptance budget")
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(10));
+        eprintln!(
+            "Uncontended APFS Clear completed in {} ms",
+            elapsed.as_millis()
+        );
+        let current = state.root_mutations.lock().await.token();
+        assert_ne!(original, current);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        let reloaded = AgentSettings::load_fixture_at(&settings_path).unwrap();
+        assert!(reloaded.allowed_roots.is_empty());
+        assert_eq!(
+            state.registry.invoke(call.clone()).await.unwrap_err(),
+            "Path outside granted roots"
+        );
+        let restarted = AgentState::new(
+            "apfs-restarted-fixture-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            reloaded,
+        )
+        .unwrap();
+        assert_ne!(restarted.root_mutations.lock().await.token(), current);
+        assert_eq!(
+            restarted.registry.invoke(call).await.unwrap_err(),
+            "Path outside granted roots"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn unaccepted_root_writer_times_out_without_publishing_and_retry_recovers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
