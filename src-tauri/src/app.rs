@@ -1,9 +1,11 @@
 use crate::{
     agent::{self, AgentState},
-    navigation, secrets,
+    secrets,
     settings::AgentSettings,
     tools, tray,
 };
+#[cfg(not(target_os = "macos"))]
+use crate::navigation;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 
@@ -40,6 +42,13 @@ pub fn run() {
             // neither CloseRequested-to-tray nor another window's lifecycle
             // may revoke the inbox. No public command or HTTP route exists.
             if is_trusted_main_destroyed(window.label(), event) {
+                #[cfg(target_os = "macos")]
+                if let Some(host) = window
+                    .app_handle()
+                    .try_state::<Arc<tools::native_host::NativeFileHost>>()
+                {
+                    host.close();
+                }
                 if let Some(state) = window.app_handle().try_state::<Arc<AgentState>>() {
                     let _ = state.gate.cancel_pending_for_shutdown();
                 }
@@ -81,8 +90,27 @@ pub fn run() {
                 .ok_or_else(|| std::io::Error::other("Missing main window config"))?
                 .clone();
             app.manage(state.clone());
-            let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
-                .on_navigation(navigation::trusted_main_document)
+            let builder = tauri::WebviewWindowBuilder::from_config(app, &window_config)?;
+            #[cfg(target_os = "macos")]
+            let builder = {
+                // This only stages lifecycle ownership. Native sensitive
+                // IPC and the custom scheme remain unregistered.
+                let host = tauri::async_runtime::block_on(async {
+                    Arc::new(tools::native_host::NativeFileHost::new(Arc::clone(
+                        &state.registry,
+                    )))
+                });
+                app.manage(Arc::clone(&host));
+                let navigation_host = Arc::clone(&host);
+                builder
+                    .on_navigation(move |url| navigation_host.on_navigation(url))
+                    .on_page_load(move |window, payload| {
+                        host.on_page_load(window.label(), payload.url(), payload.event());
+                    })
+            };
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.on_navigation(navigation::trusted_main_document);
+            let window = builder
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
             window.set_title("Security Agent")?;
@@ -114,6 +142,10 @@ pub fn run() {
             // This is Tauri's trusted process-lifecycle event, not a WebView
             // command. Hiding main in the tray does NOT close the inbox.
             if matches!(&event, tauri::RunEvent::Exit) {
+                #[cfg(target_os = "macos")]
+                if let Some(host) = app.try_state::<Arc<tools::native_host::NativeFileHost>>() {
+                    host.close();
+                }
                 if let Some(state) = app.try_state::<Arc<AgentState>>() {
                     state.registry.begin_shutdown();
                     let _ = state.gate.cancel_pending_for_shutdown();
