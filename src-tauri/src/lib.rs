@@ -11,3 +11,6 @@ mod tray;
 mod vpn;
 
 pub use app::run;
+
+#[cfg(all(target_os = "macos", feature = "native-webkit-fixture"))]
+pub use tools::native_probe::run as run_native_registry_probe;
