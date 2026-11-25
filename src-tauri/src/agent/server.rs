@@ -1,5 +1,9 @@
-use crate::{agent::AgentState, tools::registry::ToolCall};
+use crate::{
+    agent::AgentState,
+    tools::registry::{ToolCall, ToolRegistry},
+};
 use axum::{
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Request, State},
     http::{header, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
@@ -9,7 +13,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
@@ -289,6 +300,87 @@ fn remote_file_read_denied() -> Response {
         .into_response()
 }
 
+// HTTP file results must survive the handler/serialization gap without
+// becoming an unbounded cache. The permit travels with the body until its
+// first poll or drop; the generation is trusted and never supplied by JSON.
+struct FileDelivery {
+    registry: Arc<ToolRegistry>,
+    generation: u64,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl FileDelivery {
+    fn reserve(state: &AgentState, name: &str) -> Result<Option<Self>, String> {
+        if name != "filesystem__read_file" {
+            return Ok(None);
+        }
+        let (generation, slot) = state.registry.reserve_http_file_delivery()?;
+        Ok(Some(Self {
+            registry: Arc::clone(&state.registry),
+            generation,
+            _slot: slot,
+        }))
+    }
+}
+
+struct FencedFileBody {
+    pending: Option<(Bytes, FileDelivery)>,
+}
+
+impl http_body::Body for FencedFileBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Infallible>>> {
+        let Some((data, delivery)) = self.pending.take() else {
+            return Poll::Ready(None);
+        };
+        // The first frame handoff is the linearization boundary, NOT socket
+        // delivery or client receipt. Reject rather than wait in poll_frame.
+        let _guard = match delivery.registry.try_http_file_handoff(delivery.generation) {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
+                    b"{\"error\":\"File read authorization changed\"}",
+                )))))
+            }
+        };
+        Poll::Ready(Some(Ok(http_body::Frame::data(data))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.pending.is_none()
+    }
+}
+
+fn tool_success(value: Value, delivery: Option<FileDelivery>) -> Response {
+    let Some(delivery) = delivery else {
+        return (StatusCode::OK, Json(value)).into_response();
+    };
+    // No Content-Length or exact size hint: the first poll may substitute a
+    // fixed redacted error after response headers have already been sent.
+    let body = FencedFileBody {
+        pending: Some((Bytes::from(value.to_string()), delivery)),
+    };
+    let mut response = Response::new(Body::new(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn delivery_error(error: String) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response()
+}
+
 async fn list_tools(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AgentState>>,
@@ -312,8 +404,12 @@ async fn invoke_tool(
     if tunnel_file_read_forbidden(source, &call.name) {
         return remote_file_read_denied();
     }
+    let delivery = match FileDelivery::reserve(&state, &call.name) {
+        Ok(delivery) => delivery,
+        Err(error) => return delivery_error(error),
+    };
     match state.registry.invoke(call).await {
-        Ok(data) => (StatusCode::OK, Json(json!({"result":data}))).into_response(),
+        Ok(data) => tool_success(json!({"result":data}), delivery),
         Err(message) => (StatusCode::BAD_REQUEST, Json(json!({"error":message}))).into_response(),
     }
 }
@@ -341,12 +437,15 @@ async fn chat(
             return remote_file_read_denied();
         }
         let name = call.name.clone();
+        let delivery = match FileDelivery::reserve(&state, &name) {
+            Ok(delivery) => delivery,
+            Err(error) => return delivery_error(error),
+        };
         return match state.registry.invoke(call).await {
-            Ok(output) => (
-                StatusCode::OK,
-                Json(json!({"message":request.message,"tool_name":name,"tool_result":output})),
-            )
-                .into_response(),
+            Ok(output) => tool_success(
+                json!({"message":request.message,"tool_name":name,"tool_result":output}),
+                delivery,
+            ),
             Err(error) => (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error":error,"tool_name":name})),
@@ -408,6 +507,122 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loopback_file_response_first_frame_denies_after_clear() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "PRIVATE_FILE_CANARY").unwrap();
+        let state = AgentState::new(
+            "http-file-fence-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![root.path().to_string_lossy().into_owned()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        state.gate.set_policy(
+            "filesystem__read_file",
+            crate::tools::approvals::Policy::Auto,
+        );
+        let app = router(Arc::clone(&state));
+        let request = |route: &str| {
+            let call = json!({
+                "name":"filesystem__read_file",
+                "arguments":{"path":file}
+            });
+            let payload = if route == "/chat" {
+                json!({"message":"read","tool_call":call})
+            } else {
+                call
+            };
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(route)
+                .header("authorization", "Bearer http-file-fence-token")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))));
+            request
+        };
+
+        // A frame already handed off cannot be retracted by later Clear.
+        let control = app.clone().oneshot(request("/tools")).await.unwrap();
+        assert_eq!(control.status(), StatusCode::OK);
+        let delivered = control.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&delivered).contains("PRIVATE_FILE_CANARY"));
+
+        // Both real handlers finish without polling their response bodies.
+        let tools = app.clone().oneshot(request("/tools")).await.unwrap();
+        let chat = app.oneshot(request("/chat")).await.unwrap();
+        for response in [&tools, &chat] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        }
+
+        let writer = state.registry.reserve_root_publication().await;
+        state
+            .registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        drop(writer);
+
+        for response in [tools, chat] {
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({"error":"File read authorization changed"})
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_FILE_CANARY"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_file_delivery_capacity_returns_on_drop_and_pending_clear_denies() {
+        let state = AgentState::new(
+            "http-file-capacity-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let mut bodies = Vec::new();
+        for _ in 0..16 {
+            let delivery = FileDelivery::reserve(&state, "filesystem__read_file").unwrap();
+            bodies.push(tool_success(
+                json!({"result":"PRIVATE_FILE_CANARY"}),
+                delivery,
+            ));
+        }
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+        drop(bodies.pop());
+        let delivery = FileDelivery::reserve(&state, "filesystem__read_file").unwrap();
+        let response = tool_success(json!({"result":"PRIVATE_FILE_CANARY"}), delivery);
+        state.registry.suspend_for_clear();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"File read authorization changed"})
+        );
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+        drop(bodies);
+        let writer = state.registry.reserve_root_publication().await;
+        state
+            .registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        state.registry.finish_clear();
+        drop(writer);
+        let mut slots = Vec::new();
+        for _ in 0..16 {
+            slots.push(FileDelivery::reserve(&state, "filesystem__read_file").unwrap());
+        }
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+    }
 
     #[test]
     fn literal_host_policy_rejects_foreign_duplicate_and_absolute_authorities() {
