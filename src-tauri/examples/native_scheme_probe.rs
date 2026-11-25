@@ -156,17 +156,19 @@ mod probe {
                     .on_navigation(move |url| {
                         eprintln!("native scheme probe: navigation callback");
                         match url.as_str() {
-                            "tauri://localhost" | "tauri://localhost/" | "tauri://localhost/index.html" => true,
-                        "tauri://localhost/probe-pass" => {
-                            let ok = seen.load(Ordering::SeqCst);
-                            delivered.store(ok, Ordering::SeqCst);
-                            handle.exit(if ok { 0 } else { 1 });
-                            false
-                        }
-                        "tauri://localhost/probe-fail" => {
-                            handle.exit(1);
-                            false
-                        }
+                            "tauri://localhost"
+                            | "tauri://localhost/"
+                            | "tauri://localhost/index.html" => true,
+                            "tauri://localhost/probe-pass" => {
+                                let ok = seen.load(Ordering::SeqCst);
+                                delivered.store(ok, Ordering::SeqCst);
+                                handle.exit(if ok { 0 } else { 1 });
+                                false
+                            }
+                            "tauri://localhost/probe-fail" => {
+                                handle.exit(1);
+                                false
+                            }
                             _ => false,
                         }
                     })
