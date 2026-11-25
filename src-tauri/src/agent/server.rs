@@ -508,6 +508,123 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn loopback_file_response_first_frame_denies_after_clear() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "PRIVATE_FILE_CANARY").unwrap();
+        let state = AgentState::new(
+            "http-file-fence-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![root.path().to_string_lossy().into_owned()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        state.gate.set_policy(
+            "filesystem__read_file",
+            crate::tools::approvals::Policy::Auto,
+        );
+        let app = router(Arc::clone(&state));
+        let request = |route: &str| {
+            let call = json!({
+                "name":"filesystem__read_file",
+                "arguments":{"path":file}
+            });
+            let payload = if route == "/chat" {
+                json!({"message":"read","tool_call":call})
+            } else {
+                call
+            };
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(route)
+                .header("authorization", "Bearer http-file-fence-token")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                41000,
+            ))));
+            request
+        };
+
+        // A frame already handed off cannot be retracted by later Clear.
+        let control = app.clone().oneshot(request("/tools")).await.unwrap();
+        assert_eq!(control.status(), StatusCode::OK);
+        let delivered = control.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&delivered).contains("PRIVATE_FILE_CANARY"));
+
+        // Both real handlers finish without polling their response bodies.
+        let tools = app.clone().oneshot(request("/tools")).await.unwrap();
+        let chat = app.oneshot(request("/chat")).await.unwrap();
+        for response in [&tools, &chat] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        }
+
+        let writer = state.registry.reserve_root_publication().await;
+        state
+            .registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        drop(writer);
+
+        for response in [tools, chat] {
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({"error":"File read authorization changed"})
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_FILE_CANARY"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_file_delivery_capacity_returns_on_drop_and_pending_clear_denies() {
+        let state = AgentState::new(
+            "http-file-capacity-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let mut bodies = Vec::new();
+        for _ in 0..16 {
+            let delivery = FileDelivery::reserve(&state, "filesystem__read_file").unwrap();
+            bodies.push(tool_success(
+                json!({"result":"PRIVATE_FILE_CANARY"}),
+                delivery,
+            ));
+        }
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+        drop(bodies.pop());
+        let delivery = FileDelivery::reserve(&state, "filesystem__read_file").unwrap();
+        let response = tool_success(json!({"result":"PRIVATE_FILE_CANARY"}), delivery);
+        state.registry.suspend_for_clear();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"File read authorization changed"})
+        );
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+        drop(bodies);
+        let writer = state.registry.reserve_root_publication().await;
+        state
+            .registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        state.registry.finish_clear();
+        drop(writer);
+        let mut slots = Vec::new();
+        for _ in 0..16 {
+            slots.push(FileDelivery::reserve(&state, "filesystem__read_file").unwrap());
+        }
+        assert!(FileDelivery::reserve(&state, "filesystem__read_file").is_err());
+    }
+
     #[test]
     fn literal_host_policy_rejects_foreign_duplicate_and_absolute_authorities() {
         use axum::http::{HeaderMap, HeaderValue, Uri};
