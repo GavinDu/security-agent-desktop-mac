@@ -158,6 +158,17 @@ where
     P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
 {
     state.registry.ensure_running()?;
+    // Reserve a bounded caller slot before joining the revision queue.
+    // Clear has its own one-request budget, independent of queued Grants.
+    let request_slot = if roots.is_empty() {
+        Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .map_err(|_| "Directory Clear request already active".to_owned())?
+    } else {
+        Arc::clone(&state.root_grant_requests)
+            .try_acquire_owned()
+            .map_err(|_| "Directory grant request capacity exceeded".to_owned())?
+    };
     // Acquire before launching the cancellable validator, preserving the
     // existing FIFO admission order and revision/CAS semantics.
     // A prior accepted commit may retain the mutex indefinitely. Bound this
@@ -233,6 +244,7 @@ where
     let state = Arc::clone(state);
     let commit = tokio::task::spawn_blocking(move || {
         let _root_write_admission = root_write_admission;
+        let _request_slot = request_slot;
         let mut settings = state.settings.blocking_lock();
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
         // Keep both guards until the successful empty publication clears
@@ -923,6 +935,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn root_request_budget_preserves_clear_escape_from_grant_saturation() {
+        let state = AgentState::new(
+            "root-request-capacity-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let revision = state.root_mutations.lock().await.token();
+        let mut grants = Vec::new();
+        for _ in 0..crate::agent::MAX_ROOT_GRANT_REQUESTS {
+            grants.push(
+                Arc::clone(&state.root_grant_requests)
+                    .try_acquire_owned()
+                    .unwrap(),
+            );
+        }
+        let denied = commit_serialized_roots(
+            &state,
+            vec![root.path().to_string_lossy().into_owned()],
+            Some(revision.clone()),
+            |_| panic!("saturated Grant must not validate"),
+            |_| panic!("saturated Grant must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory grant request capacity exceeded");
+
+        let clear = Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .unwrap();
+        let denied = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |_| panic!("duplicate Clear must not validate"),
+            |_| panic!("duplicate Clear must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory Clear request already active");
+        drop(clear);
+        // Clear still has its independent slot, even with every Grant slot held.
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |_| Ok(Vec::new()),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(state.root_mutations.lock().await.token(), revision);
+        drop(grants);
+        assert_eq!(
+            state.root_grant_requests.available_permits(),
+            crate::agent::MAX_ROOT_GRANT_REQUESTS
+        );
+        assert_eq!(state.root_clear_requests.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn terminal_shutdown_rejects_unaccepted_root_changes() {
         let state = AgentState::new(
             "root-shutdown-test-token".into(),
@@ -1054,6 +1128,10 @@ mod tests {
             "Directory permission change outcome unknown; read back settings"
         );
         assert!(state.root_mutations.try_lock().is_err());
+        assert_eq!(state.root_clear_requests.available_permits(), 0);
+        assert!(Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .is_err());
         let blocked_writer = tokio::time::timeout(
             Duration::from_millis(35),
             state.registry.reserve_root_publication(),
