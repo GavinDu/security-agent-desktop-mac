@@ -159,7 +159,15 @@ where
 {
     // Acquire before launching the cancellable validator, preserving the
     // existing FIFO admission order and revision/CAS semantics.
-    let mut revision = Arc::clone(&state.root_mutations).lock_owned().await;
+    // A prior accepted commit may retain the mutex indefinitely. Bound this
+    // caller's unaccepted FIFO wait independently of writer admission.
+    let mut revision = tokio::time::timeout(max_admission_wait, async {
+        Arc::clone(&state.root_mutations).lock_owned().await
+    })
+    .await
+    .map_err(|_| {
+        "Directory permission request not accepted; previous change may be pending".to_owned()
+    })?;
     if !roots.is_empty() || expected_root_revision.is_some() {
         revision.ensure_current(
             expected_root_revision
@@ -793,6 +801,65 @@ mod tests {
                 .unwrap()["content"],
             "published"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_native_mutation_times_out_before_validation_or_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-queue-deadline-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let held = Arc::clone(&state.root_mutations).lock_owned().await;
+        let before = held.token();
+        let denied = commit_serialized_roots_with_timeout(
+            &state,
+            vec![path],
+            Some(before.clone()),
+            |_| panic!("unaccepted queued Grant cannot validate"),
+            |_| panic!("unaccepted queued Grant cannot persist"),
+            Duration::from_millis(35),
+            ROOT_VALIDATION_TIMEOUT,
+            ROOT_COMMIT_ACK_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            denied,
+            "Directory permission request not accepted; previous change may be pending"
+        );
+        let clear = commit_serialized_roots_with_timeout(
+            &state,
+            Vec::new(),
+            None,
+            |_| panic!("unaccepted queued Clear cannot validate"),
+            |_| panic!("unaccepted queued Clear cannot persist"),
+            Duration::from_millis(35),
+            ROOT_VALIDATION_TIMEOUT,
+            ROOT_COMMIT_ACK_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(clear, denied);
+        assert_eq!(held.token(), before);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        drop(held);
+
+        // Neither timed-out request may resume after the earlier owner exits.
+        assert_eq!(state.root_mutations.lock().await.token(), before);
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(state.root_mutations.lock().await.token(), before);
     }
 
     #[tokio::test(flavor = "current_thread")]
