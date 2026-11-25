@@ -544,10 +544,9 @@ mod tests {
                 .header("content-type", "application/json")
                 .body(Body::from(payload.to_string()))
                 .unwrap();
-            request.extensions_mut().insert(ConnectInfo(SocketAddr::from((
-                [127, 0, 0, 1],
-                41000,
-            ))));
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))));
             request
         };
 
