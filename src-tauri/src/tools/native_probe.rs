@@ -71,12 +71,10 @@ fn trusted(ctx: &tauri::UriSchemeContext<'_, Wry>) -> bool {
 }
 
 pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
-    let registry = Arc::new(
-        ToolRegistry::new(
-            ToolRegistry::canonical_roots(&[root.to_string_lossy().into_owned()]).unwrap(),
-            ApprovalGate::new(HashMap::new()),
-        ),
-    );
+    let registry = Arc::new(ToolRegistry::new(
+        ToolRegistry::canonical_roots(&[root.to_string_lossy().into_owned()]).unwrap(),
+        ApprovalGate::new(HashMap::new()),
+    ));
     let (session, script) = tauri::async_runtime::block_on(async {
         let session = Arc::new(NativeFileSession::new(Arc::clone(&registry)));
         let call = ToolCall {
