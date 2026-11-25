@@ -252,6 +252,8 @@ pub struct ToolRegistry {
     root_generation: AtomicU64,
     // A trusted Clear that cannot finish must not reopen old admissions.
     clear_pending: AtomicBool,
+    // Bound completed HTTP file results even if clients never poll the body.
+    http_delivery_slots: Arc<Semaphore>,
     gate: Arc<ApprovalGate>,
 }
 
@@ -267,6 +269,7 @@ impl ToolRegistry {
             path_preflight_slots: Arc::new(Semaphore::new(MAX_ADMITTED_PATH_PREFLIGHTS)),
             root_generation: AtomicU64::new(0),
             clear_pending: AtomicBool::new(false),
+            http_delivery_slots: Arc::new(Semaphore::new(16)),
             gate,
         }
     }
@@ -344,6 +347,29 @@ impl ToolRegistry {
             return Err("File read authorization changed".to_owned());
         }
         Ok(())
+    }
+
+    // Capture a conservative server-side generation BEFORE tool invocation.
+    // Any intervening root change, even before FD admission, denies delivery.
+    pub(crate) fn reserve_http_file_delivery(&self) -> Result<(u64, OwnedSemaphorePermit), String> {
+        self.ensure_no_pending_clear()?;
+        let slot = Arc::clone(&self.http_delivery_slots)
+            .try_acquire_owned()
+            .map_err(|_| "File response capacity exceeded".to_owned())?;
+        Ok((self.root_generation.load(Ordering::Acquire), slot))
+    }
+
+    // The HTTP body owns the same registry instance as its original read.
+    // The shared fair gate linearizes first frame handoff against publication.
+    pub(crate) fn try_http_file_handoff(
+        &self,
+        generation: u64,
+    ) -> Result<OwnedRwLockReadGuard<()>, String> {
+        let guard = Arc::clone(&self.root_admission)
+            .try_read_owned()
+            .map_err(|_| "File read authorization changed".to_owned())?;
+        self.ensure_current_file_result(generation)?;
+        Ok(guard)
     }
 
     /// No new FD worker may overtake a queued trusted Clear/Grant. Capacity
