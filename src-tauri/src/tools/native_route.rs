@@ -36,8 +36,7 @@ fn request_ticket(
     }
     let mut types = request.headers().get_all(header::CONTENT_TYPE).iter();
     let content_type = types.next()?.to_str().ok()?;
-    if !matches!(content_type, "text/plain" | "text/plain;charset=UTF-8")
-        || types.next().is_some()
+    if !matches!(content_type, "text/plain" | "text/plain;charset=UTF-8") || types.next().is_some()
     {
         return None;
     }
