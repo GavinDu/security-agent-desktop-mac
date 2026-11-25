@@ -107,6 +107,8 @@ fn persist_root_grants(
 const ROOT_PUBLICATION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
 // Validation can block on remote filesystems before writer admission begins.
 const ROOT_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
+// A deadline for the caller only; the accepted worker retains both guards.
+const ROOT_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn commit_serialized_roots<V, P>(
     state: &Arc<AgentState>,
@@ -127,6 +129,7 @@ where
         persist,
         ROOT_PUBLICATION_ADMISSION_TIMEOUT,
         ROOT_VALIDATION_TIMEOUT,
+        ROOT_COMMIT_ACK_TIMEOUT,
     )
     .await
 }
@@ -147,6 +150,7 @@ async fn commit_serialized_roots_with_timeout<V, P>(
     persist: P,
     max_admission_wait: Duration,
     max_validation_wait: Duration,
+    max_commit_ack_wait: Duration,
 ) -> Result<(), String>
 where
     V: FnOnce(Vec<String>) -> Result<Vec<GrantedRoot>, String> + Send + 'static,
@@ -202,16 +206,20 @@ where
     // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
     // fair write permit. Cancellation cannot cut save/live publication apart.
     let state = Arc::clone(state);
-    tokio::task::spawn_blocking(move || {
+    let commit = tokio::task::spawn_blocking(move || {
         let _root_write_admission = root_write_admission;
         let mut settings = state.settings.blocking_lock();
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
         // No await/cancellation point between save, live publish and CAS.
         revision.advance();
         Ok::<(), String>(())
-    })
-    .await
-    .map_err(|_| "Cannot commit approved roots".to_owned())?
+    });
+    // Dropping the JoinHandle on timeout detaches the accepted worker, not
+    // its guards. It may still commit; the caller must not assume rollback.
+    tokio::time::timeout(max_commit_ack_wait, commit)
+        .await
+        .map_err(|_| "Directory permission change outcome unknown; read back settings".to_owned())?
+        .map_err(|_| "Directory permission change outcome unknown; read back settings".to_owned())?
 }
 
 #[tauri::command]
@@ -329,6 +337,7 @@ mod tests {
             },
             Duration::from_millis(35),
             ROOT_VALIDATION_TIMEOUT,
+            ROOT_COMMIT_ACK_TIMEOUT,
         )
         .await
         .unwrap_err();
@@ -362,6 +371,7 @@ mod tests {
                 },
                 Duration::from_secs(1),
                 ROOT_VALIDATION_TIMEOUT,
+                ROOT_COMMIT_ACK_TIMEOUT,
             ),
         )
         .await
@@ -411,6 +421,7 @@ mod tests {
                 },
                 Duration::from_secs(1),
                 Duration::from_millis(35),
+                ROOT_COMMIT_ACK_TIMEOUT,
             )
             .await
         });
@@ -444,6 +455,7 @@ mod tests {
                 },
                 Duration::from_secs(1),
                 Duration::from_secs(1),
+                ROOT_COMMIT_ACK_TIMEOUT,
             ),
         )
         .await
@@ -506,6 +518,7 @@ mod tests {
                     |_| panic!("timed-out validator must never persist"),
                     Duration::from_secs(1),
                     Duration::from_millis(35),
+                    ROOT_COMMIT_ACK_TIMEOUT,
                 )
                 .await
             });
@@ -528,6 +541,7 @@ mod tests {
             |_| panic!("capacity exhaustion must prevent persistence"),
             Duration::from_secs(1),
             Duration::from_millis(35),
+            ROOT_COMMIT_ACK_TIMEOUT,
         )
         .await
         .unwrap_err();
@@ -543,6 +557,7 @@ mod tests {
             |_| Ok(()),
             Duration::from_secs(1),
             Duration::from_secs(1),
+            ROOT_COMMIT_ACK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -777,6 +792,70 @@ mod tests {
                 .unwrap()["content"],
             "published"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_root_commit_ack_timeout_is_unknown_until_worker_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-ack-deadline-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let previous = state.root_mutations.lock().await.token();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker_state = Arc::clone(&state);
+        let request = tokio::spawn(async move {
+            commit_serialized_roots_with_timeout(
+                &worker_state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                move |_| {
+                    let _ = accepted_tx.send(());
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| "Fixture commit expired".to_owned())?;
+                    Ok(())
+                },
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                Duration::from_millis(100),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            outcome,
+            "Directory permission change outcome unknown; read back settings"
+        );
+        assert!(state.root_mutations.try_lock().is_err());
+        let blocked_reader = tokio::time::timeout(
+            Duration::from_millis(35),
+            state.registry.reserve_root_publication(),
+        )
+        .await;
+        assert!(blocked_reader.is_err());
+        release_tx.send(()).unwrap();
+        let revision = tokio::time::timeout(Duration::from_secs(2), state.root_mutations.lock())
+            .await
+            .unwrap();
+        assert_ne!(revision.token(), previous);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
     }
 
     #[tokio::test]
