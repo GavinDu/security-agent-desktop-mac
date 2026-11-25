@@ -244,8 +244,8 @@ where
     let state = Arc::clone(state);
     let commit = tokio::task::spawn_blocking(move || {
         let _root_write_admission = root_write_admission;
-        let _request_slot = request_slot;
         let mut settings = state.settings.blocking_lock();
+        let _request_slot = request_slot;
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
         // Keep both guards until the successful empty publication clears
         // the latch. No failed persistence path may clear it.
