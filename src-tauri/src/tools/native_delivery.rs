@@ -4,7 +4,10 @@ use super::registry::{ToolCall, ToolRegistry};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::OwnedSemaphorePermit;
@@ -28,6 +31,7 @@ struct PendingFile {
 pub(crate) struct NativeFileTickets {
     registry: Arc<ToolRegistry>,
     pending: Mutex<HashMap<Uuid, PendingFile>>,
+    closed: AtomicBool,
 }
 
 impl NativeFileTickets {
@@ -35,6 +39,7 @@ impl NativeFileTickets {
         Self {
             registry,
             pending: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -50,7 +55,7 @@ impl NativeFileTickets {
     }
 
     pub(crate) async fn prepare(&self, owner: Uuid, call: ToolCall) -> Result<Uuid, String> {
-        if call.name != "filesystem__read_file" {
+        if self.closed.load(Ordering::SeqCst) || call.name != "filesystem__read_file" {
             return Err(DENIED.to_owned());
         }
         self.purge_expired(Instant::now())?;
@@ -59,6 +64,9 @@ impl NativeFileTickets {
         let value = self.registry.invoke(call).await?;
         let _guard = self.registry.try_http_file_handoff(generation)?;
         let mut pending = self.pending.lock().map_err(|_| DENIED.to_owned())?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(DENIED.to_owned());
+        }
         let ticket = Uuid::new_v4();
         // Do not replace an outstanding result even on a random collision.
         if pending.contains_key(&ticket) {
@@ -108,15 +116,21 @@ impl NativeFileTickets {
             .registry
             .try_http_file_handoff(entry.generation)
             .map_err(|_| DENIED.to_owned())?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(DENIED.to_owned());
+        }
+        // The final closed check admits this callback. A later lifecycle
+        // close cannot retract an already admitted handoff.
         // The entry's capacity lease and the publication guard survive the
         // entire synchronous callback. Never return file bytes to the caller.
         handoff(entry.value);
         Ok(())
     }
 
-    /// Native lifecycle hooks can discard unused responses without waiting
-    /// for filesystem workers. An admitted handoff cannot be retracted.
+    /// Close this store permanently at lifecycle end; a fresh trusted owner
+    /// must create a new store. Pending prepares cannot repopulate it.
     pub(crate) fn discard_all(&self) -> Result<(), String> {
+        self.closed.store(true, Ordering::SeqCst);
         self.pending.lock().map_err(|_| DENIED.to_owned())?.clear();
         Ok(())
     }
@@ -225,7 +239,49 @@ mod tests {
         assert!(store
             .redeem(owner, ticket, |_| panic!("discarded"))
             .is_err());
-        assert!(store.prepare(owner, call).await.is_ok());
+        assert!(store.prepare(owner, call.clone()).await.is_err());
+        let replacement = NativeFileTickets::new(registry);
+        assert!(replacement.prepare(Uuid::new_v4(), call).await.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_native_store_cannot_be_repopulated_by_inflight_prepare() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "NATIVE_TICKET_CANARY").unwrap();
+        let mut policies = HashMap::new();
+        policies.insert("filesystem__read_file".into(), Policy::Ask);
+        let approval = ApprovalGate::new(policies);
+        let mut events = approval.subscribe();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            Arc::clone(&approval),
+        ));
+        let store = Arc::new(NativeFileTickets::new(registry));
+        let pending = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .prepare(
+                        Uuid::new_v4(),
+                        ToolCall {
+                            name: "filesystem__read_file".into(),
+                            arguments: json!({"path":file}),
+                        },
+                    )
+                    .await
+            })
+        };
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        store.discard_all().unwrap();
+        assert!(approval
+            .resolve(Uuid::parse_str(&event.id).unwrap(), true)
+            .await);
+        assert_eq!(pending.await.unwrap().unwrap_err(), DENIED);
+        assert!(store.pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -266,9 +322,7 @@ mod tests {
             .is_err());
         registry.finish_clear();
         registry.begin_shutdown();
-        assert!(store
-            .redeem(owner, second, |_| panic!("shutdown"))
-            .is_err());
+        assert!(store.redeem(owner, second, |_| panic!("shutdown")).is_err());
         assert!(store.prepare(owner, call).await.is_err());
     }
 }
