@@ -169,6 +169,14 @@ where
     }
     // Only the dedicated empty-set revocation call may omit a revision.
     revision.ensure_can_advance()?;
+    let clearing = roots.is_empty();
+    if clearing {
+        // Once trusted Clear starts under the revision gate, cancellation,
+        // timeout or persistence failure cannot reopen old file admissions.
+        state.registry.suspend_for_clear();
+    } else {
+        state.registry.ensure_no_pending_clear()?;
+    }
     // Reserve capacity BEFORE scheduling a potentially uninterruptible native
     // directory validation. Empty Clear bypasses Grant capacity, preserving
     // the owner's ability to revoke when remote-path validators are stuck.
@@ -211,6 +219,11 @@ where
         let _root_write_admission = root_write_admission;
         let mut settings = state.settings.blocking_lock();
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
+        // Keep both guards until the successful empty publication clears
+        // the latch. No failed persistence path may clear it.
+        if clearing {
+            state.registry.finish_clear();
+        }
         // No await/cancellation point between save, live publish and CAS.
         revision.advance();
         Ok::<(), String>(())
@@ -356,6 +369,30 @@ mod tests {
         assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
 
         drop(held_admission);
+        // Dropping the timed-out writer must not reopen old permissions.
+        assert_eq!(
+            state.registry.ensure_no_pending_clear().unwrap_err(),
+            "Directory permission revocation pending; retry Clear"
+        );
+        let denied = state
+            .registry
+            .invoke(ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!({"path": root.path().join("old.txt")}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(denied, "Directory permission revocation pending; retry Clear");
+        let grant = commit_serialized_roots(
+            &state,
+            vec![root.path().to_string_lossy().into_owned()],
+            Some(original_revision.clone()),
+            |_| panic!("pending Clear must prevent validation"),
+            |_| panic!("pending Clear must prevent persistence"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(grant, "Directory permission revocation pending; retry Clear");
         // A timed-out writer must not resume later and double-publish. A
         // separate retry owns the only accepted durable publication.
         let writes = Arc::clone(&persist_count);
@@ -380,6 +417,7 @@ mod tests {
         .unwrap();
         assert_eq!(persist_count.load(Ordering::SeqCst), 1);
         assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert!(state.registry.ensure_no_pending_clear().is_ok());
         assert_ne!(state.root_mutations.lock().await.token(), original_revision);
     }
 
