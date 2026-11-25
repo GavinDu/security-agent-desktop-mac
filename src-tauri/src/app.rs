@@ -1,11 +1,11 @@
+#[cfg(not(target_os = "macos"))]
+use crate::navigation;
 use crate::{
     agent::{self, AgentState},
     secrets,
     settings::AgentSettings,
     tools, tray,
 };
-#[cfg(not(target_os = "macos"))]
-use crate::navigation;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
 
