@@ -10,3 +10,7 @@ mod native_delivery;
 // Staged protocol contract: no registered native route until platform acceptance.
 #[cfg(test)]
 mod native_route;
+
+// Staged host session contract; no production WebView route.
+#[cfg(test)]
+mod native_session;
