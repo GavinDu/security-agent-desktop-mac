@@ -210,7 +210,11 @@ where
     )
     .await
     .map_err(|_| {
-        "Directory permission change not committed; retry after active reads finish".to_owned()
+        if clearing {
+            "Directory permission revocation pending; retry Clear".to_owned()
+        } else {
+            "Directory permission change not committed; retry after active reads finish".to_owned()
+        }
     })?;
     // COMMIT ACCEPTANCE: the worker now owns both the revision guard and the
     // fair write permit. Cancellation cannot cut save/live publication apart.
@@ -357,7 +361,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             failure,
-            "Directory permission change not committed; retry after active reads finish"
+            "Directory permission revocation pending; retry Clear"
         );
         assert_eq!(persist_count.load(Ordering::SeqCst), 0);
         // Timeout must cancel the queued writer and release the revision lock.
