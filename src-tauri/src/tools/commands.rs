@@ -184,6 +184,17 @@ where
     P: FnOnce(&AgentSettings) -> Result<(), String> + Send + 'static,
 {
     state.registry.ensure_running()?;
+    // Reserve a bounded caller slot before joining the revision queue.
+    // Clear has its own one-request budget, independent of queued Grants.
+    let request_slot = if roots.is_empty() {
+        Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .map_err(|_| "Directory Clear request already active".to_owned())?
+    } else {
+        Arc::clone(&state.root_grant_requests)
+            .try_acquire_owned()
+            .map_err(|_| "Directory grant request capacity exceeded".to_owned())?
+    };
     // Acquire before launching the cancellable validator, preserving the
     // existing FIFO admission order and revision/CAS semantics.
     // A prior accepted commit may retain the mutex indefinitely. Bound this
@@ -260,6 +271,7 @@ where
     let commit = tokio::task::spawn_blocking(move || {
         let _root_write_admission = root_write_admission;
         let mut settings = state.settings.blocking_lock();
+        let _request_slot = request_slot;
         persist_root_grants(&mut settings, &state.registry, resolved, persist)?;
         // Keep both guards until the successful empty publication clears
         // the latch. No failed persistence path may clear it.
@@ -405,6 +417,98 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(malformed, NATIVE_FILE_READ_DENIED);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_apfs_root_clear_persists_and_revokes_within_normal_budget() {
+        use std::{
+            ffi::{CStr, CString},
+            os::unix::ffi::OsStrExt,
+            time::Instant,
+        };
+
+        let data = tempfile::tempdir().unwrap();
+        let settings_dir = tempfile::tempdir().unwrap();
+        let data_path = data.path().canonicalize().unwrap();
+        let settings_path = settings_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("settings.json");
+        // Verify the actual fixture filesystem, not a simulated APFS label.
+        for directory in [data_path.as_path(), settings_path.parent().unwrap()] {
+            let c_path = CString::new(directory.as_os_str().as_bytes()).unwrap();
+            let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: valid C path and writable statfs buffer, read only on success.
+            assert_eq!(unsafe { libc::statfs(c_path.as_ptr(), fs.as_mut_ptr()) }, 0);
+            let fs = unsafe { fs.assume_init() };
+            let filesystem = unsafe { CStr::from_ptr(fs.f_fstypename.as_ptr()) };
+            assert_eq!(filesystem.to_bytes(), b"apfs", "fixture must run on APFS");
+        }
+        let canary = data_path.join("canary.txt");
+        std::fs::write(&canary, "APFS_FIXTURE_CANARY").unwrap();
+        let initial = AgentSettings {
+            allowed_roots: vec![data_path.to_string_lossy().into_owned()],
+            ..AgentSettings::default()
+        };
+        initial.save_fixture_at(&settings_path).unwrap();
+        let state = AgentState::new(
+            "apfs-root-acceptance-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::load_fixture_at(&settings_path).unwrap(),
+        )
+        .unwrap();
+        let original = state.root_mutations.lock().await.token();
+        let call = ToolCall {
+            name: "filesystem__read_file".into(),
+            arguments: json!({"path":canary}),
+        };
+        assert_eq!(
+            state.registry.invoke(call.clone()).await.unwrap()["content"],
+            "APFS_FIXTURE_CANARY"
+        );
+        let started = Instant::now();
+        let save_path = settings_path.clone();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            commit_serialized_roots(
+                &state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                move |settings| settings.save_fixture_at(&save_path),
+            ),
+        )
+        .await
+        .expect("uncontended APFS fixture exceeded normal acceptance budget")
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(10));
+        eprintln!(
+            "Uncontended APFS Clear completed in {} ms",
+            elapsed.as_millis()
+        );
+        let current = state.root_mutations.lock().await.token();
+        assert_ne!(original, current);
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        let reloaded = AgentSettings::load_fixture_at(&settings_path).unwrap();
+        assert!(reloaded.allowed_roots.is_empty());
+        assert_eq!(
+            state.registry.invoke(call.clone()).await.unwrap_err(),
+            "Path outside granted roots"
+        );
+        let restarted = AgentState::new(
+            "apfs-restarted-fixture-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            reloaded,
+        )
+        .unwrap();
+        assert_ne!(restarted.root_mutations.lock().await.token(), current);
+        assert_eq!(
+            restarted.registry.invoke(call).await.unwrap_err(),
+            "Path outside granted roots"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -996,6 +1100,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn root_request_budget_preserves_clear_escape_from_grant_saturation() {
+        let state = AgentState::new(
+            "root-request-capacity-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let revision = state.root_mutations.lock().await.token();
+        let mut grants = Vec::new();
+        for _ in 0..crate::agent::MAX_ROOT_GRANT_REQUESTS {
+            grants.push(
+                Arc::clone(&state.root_grant_requests)
+                    .try_acquire_owned()
+                    .unwrap(),
+            );
+        }
+        let denied = commit_serialized_roots(
+            &state,
+            vec![root.path().to_string_lossy().into_owned()],
+            Some(revision.clone()),
+            |_| panic!("saturated Grant must not validate"),
+            |_| panic!("saturated Grant must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory grant request capacity exceeded");
+
+        let clear = Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .unwrap();
+        let denied = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |_| panic!("duplicate Clear must not validate"),
+            |_| panic!("duplicate Clear must not persist"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied, "Directory Clear request already active");
+        drop(clear);
+        // Clear still has its independent slot, even with every Grant slot held.
+        commit_serialized_roots(&state, Vec::new(), None, |_| Ok(Vec::new()), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_ne!(state.root_mutations.lock().await.token(), revision);
+        drop(grants);
+        assert_eq!(
+            state.root_grant_requests.available_permits(),
+            crate::agent::MAX_ROOT_GRANT_REQUESTS
+        );
+        assert_eq!(state.root_clear_requests.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn terminal_shutdown_rejects_unaccepted_root_changes() {
         let state = AgentState::new(
             "root-shutdown-test-token".into(),
@@ -1127,6 +1287,10 @@ mod tests {
             "Directory permission change outcome unknown; read back settings"
         );
         assert!(state.root_mutations.try_lock().is_err());
+        assert_eq!(state.root_clear_requests.available_permits(), 0);
+        assert!(Arc::clone(&state.root_clear_requests)
+            .try_acquire_owned()
+            .is_err());
         let blocked_writer = tokio::time::timeout(
             Duration::from_millis(35),
             state.registry.reserve_root_publication(),
