@@ -10,7 +10,10 @@ const ui = readFileSync('webview/pages/app.ts', 'utf8');
 test('one live approval policy controls shared Tauri and HTTP catalog visibility (#150)', () => {
   assert.match(registry, /pub fn list\(&self\) -> Vec<Value> \{/);
   assert.match(registry, /\.filter\(\|tool\| \{[\s\S]*?self\.gate\.policy\(name\) != Policy::Disable/);
-  assert.match(commands, /pub async fn list_tools\([\s\S]*?state\.registry\.list\(\)/);
+  assert.match(commands, /pub async fn list_tools\([\s\S]*?native_tool_catalog\(&state\.registry\)/);
+  const nativeCatalog = commands.slice(commands.indexOf('fn native_tool_catalog('), commands.indexOf('async fn invoke_native_tool('));
+  assert.match(nativeCatalog, /registry\.list\(\)/);
+  assert.match(nativeCatalog, /tools\.retain\(\|tool\|[\s\S]*?native_tool_allowed\(name\)/);
   assert.match(server, /async fn list_tools\([\s\S]*?state\.registry\.list\(\)/);
   assert.match(server, /tools\.retain\(\|tool\|/);
 });

@@ -101,6 +101,10 @@ test('post-worker file result generation recheck rejects completed reads invalid
   assert.match(source, /fn root_generation_only_advances_after_successful_publication/);
   const command = await readFile('src-tauri/src/tools/commands.rs', 'utf8');
   const http = await readFile('src-tauri/src/agent/server.rs', 'utf8');
-  assert.match(command, /state\.registry\.invoke\(call\)\.await/);
+  assert.match(command, /invoke_native_tool\(&state\.registry, call\)\.await/);
+  const native = command.slice(command.indexOf('async fn invoke_native_tool('), command.indexOf('#[tauri::command]', command.indexOf('async fn invoke_native_tool(')));
+  assert.ok(native.indexOf('if !native_tool_allowed(&call.name)') < native.indexOf('registry.invoke(call).await'));
+  assert.match(command, /fn native_tool_allowed\(name: &str\) -> bool \{\s*name != "filesystem__read_file"/);
+  assert.match(command, /fn native_unfenced_file_read_is_hidden_and_denied_before_dispatch/);
   assert.match(http, /state\.registry\.invoke\(call\)\.await/);
 });
