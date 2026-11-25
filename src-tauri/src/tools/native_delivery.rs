@@ -10,10 +10,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 use uuid::Uuid;
 
 const TICKET_TTL: Duration = Duration::from_secs(30);
+const EXPIRY_SWEEP: Duration = Duration::from_secs(1);
 const DENIED: &str = "File read authorization changed";
 
 struct PendingFile {
@@ -32,6 +33,7 @@ pub(crate) struct NativeFileTickets {
     registry: Arc<ToolRegistry>,
     pending: Mutex<HashMap<Uuid, PendingFile>>,
     closed: AtomicBool,
+    expiry_stop: Arc<Notify>,
 }
 
 impl NativeFileTickets {
@@ -40,12 +42,46 @@ impl NativeFileTickets {
             registry,
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            expiry_stop: Arc::new(Notify::new()),
         }
     }
 
-    /// Evict expired results on access, even if the next read cannot reserve
-    /// capacity. An idle store may retain bounded expired values until its
-    /// next access or drop; the integration must also purge on lifecycle end.
+    /// Construct one managed store and one weakly-owned expiry worker on the
+    /// native host's Tokio runtime. No task is spawned per ticket, and the
+    /// worker cannot keep a destroyed store alive.
+    pub(crate) fn managed(registry: Arc<ToolRegistry>) -> Arc<Self> {
+        Self::managed_with_interval(registry, EXPIRY_SWEEP)
+    }
+
+    fn managed_with_interval(registry: Arc<ToolRegistry>, interval: Duration) -> Arc<Self> {
+        let store = Arc::new(Self::new(registry));
+        let weak = Arc::downgrade(&store);
+        let stop = Arc::clone(&store.expiry_stop);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.notified() => break,
+                    _ = tokio::time::sleep(interval) => {}
+                }
+                let Some(store) = weak.upgrade() else {
+                    break;
+                };
+                if store.closed.load(Ordering::SeqCst) {
+                    break;
+                }
+                if store.purge_expired(Instant::now()).is_err() {
+                    // Never recover a poisoned cache as an authorization source.
+                    let _ = store.discard_all();
+                    break;
+                }
+                // No strong store reference survives the next await.
+            }
+        });
+        store
+    }
+
+    /// Evict expired results on access as well as periodic sweeps. Expiry
+    /// acceptance is exact at redemption, independent of timer scheduling.
     fn purge_expired(&self, now: Instant) -> Result<(), String> {
         self.pending
             .lock()
@@ -131,8 +167,15 @@ impl NativeFileTickets {
     /// must create a new store. Pending prepares cannot repopulate it.
     pub(crate) fn discard_all(&self) -> Result<(), String> {
         self.closed.store(true, Ordering::SeqCst);
+        self.expiry_stop.notify_one();
         self.pending.lock().map_err(|_| DENIED.to_owned())?.clear();
         Ok(())
+    }
+}
+
+impl Drop for NativeFileTickets {
+    fn drop(&mut self) {
+        self.expiry_stop.notify_one();
     }
 }
 
@@ -309,6 +352,53 @@ mod tests {
         let _writer = tokio::time::timeout(Duration::from_secs(1), writer)
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_store_purges_idle_expired_ticket_and_releases_shared_capacity() {
+        let (_root, registry, call) = fixture();
+        let store = NativeFileTickets::managed_with_interval(
+            Arc::clone(&registry),
+            Duration::from_millis(10),
+        );
+        let owner = Uuid::new_v4();
+        let ticket = store.prepare(owner, call).await.unwrap();
+        {
+            let mut pending = store.pending.lock().unwrap();
+            pending.get_mut(&ticket).unwrap().expires = Instant::now();
+        }
+        // No prepare or redeem drives expiry here. The worker must reclaim
+        // the idle entry, including the registry's shared capacity permit.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !store.pending.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut slots = Vec::new();
+        for _ in 0..16 {
+            slots.push(registry.reserve_http_file_delivery().unwrap());
+        }
+        assert!(registry.reserve_http_file_delivery().is_err());
+        drop(slots);
+        store.discard_all().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_expiry_worker_does_not_keep_store_alive() {
+        let (_root, registry, call) = fixture();
+        let store = NativeFileTickets::managed(Arc::clone(&registry));
+        let ticket = store.prepare(Uuid::new_v4(), call).await.unwrap();
+        assert!(store.pending.lock().unwrap().contains_key(&ticket));
+        let weak = Arc::downgrade(&store);
+        drop(store);
+        assert!(weak.upgrade().is_none());
+        let mut slots = Vec::new();
+        for _ in 0..16 {
+            slots.push(registry.reserve_http_file_delivery().unwrap());
+        }
+        assert!(registry.reserve_http_file_delivery().is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
