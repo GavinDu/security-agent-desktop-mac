@@ -352,7 +352,7 @@ mod tests {
             .unwrap()
             .join("settings.json");
         // Verify the actual fixture filesystem, not a simulated APFS label.
-        for directory in [&data_path, settings_path.parent().unwrap()] {
+        for directory in [data_path.as_path(), settings_path.parent().unwrap()] {
             let c_path = CString::new(directory.as_os_str().as_bytes()).unwrap();
             let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
             // SAFETY: valid C path and writable statfs buffer, read only on success.
