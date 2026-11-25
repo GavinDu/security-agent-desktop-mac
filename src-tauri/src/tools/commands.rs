@@ -37,13 +37,39 @@ pub async fn get_agent_settings(
     })
 }
 
+// Tauri command replies and large Channel payloads can be dispatched after
+// the command returns. Until a verified native handoff fence exists, refuse
+// file contents on this surface rather than claim a registry-only fence.
+const NATIVE_FILE_READ_DENIED: &str =
+    "Native file read awaits a verified revocation response fence";
+
+fn native_tool_allowed(name: &str) -> bool {
+    name != "filesystem__read_file"
+}
+
+fn native_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
+    let mut tools = registry.list();
+    tools.retain(|tool| {
+        let name = tool["function"]["name"].as_str().unwrap_or_default();
+        native_tool_allowed(name)
+    });
+    tools
+}
+
+async fn invoke_native_tool(registry: &ToolRegistry, call: ToolCall) -> Result<Value, String> {
+    if !native_tool_allowed(&call.name) {
+        return Err(NATIVE_FILE_READ_DENIED.to_owned());
+    }
+    registry.invoke(call).await
+}
+
 #[tauri::command]
 pub async fn list_tools(
     window: WebviewWindow,
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Vec<Value>, String> {
     navigation::ensure_privileged_webview(&window)?;
-    Ok(state.registry.list())
+    Ok(native_tool_catalog(&state.registry))
 }
 
 #[tauri::command]
@@ -53,7 +79,7 @@ pub async fn invoke_tool(
     call: ToolCall,
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
-    state.registry.invoke(call).await
+    invoke_native_tool(&state.registry, call).await
 }
 
 #[tauri::command]
@@ -345,6 +371,53 @@ mod tests {
     use super::*;
     use crate::tools::approvals::ApprovalGate;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn native_unfenced_file_read_is_hidden_and_denied_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "PRIVATE_FILE_CANARY").unwrap();
+        let mut policies = std::collections::HashMap::new();
+        policies.insert("filesystem__read_file".into(), Policy::Auto);
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(policies),
+        );
+        assert!(registry
+            .list()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "filesystem__read_file"));
+        let native = native_tool_catalog(&registry);
+        assert!(native
+            .iter()
+            .all(|tool| tool["function"]["name"] != "filesystem__read_file"));
+        assert!(native
+            .iter()
+            .any(|tool| tool["function"]["name"] == "bash__run"));
+
+        let call = ToolCall {
+            name: "filesystem__read_file".into(),
+            arguments: json!({"path":file}),
+        };
+        let error = invoke_native_tool(&registry, call.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, NATIVE_FILE_READ_DENIED);
+        // The shared registry still supports approved reads for the fenced
+        // loopback HTTP path. The native boundary is what refuses the call.
+        let control = registry.invoke(call).await.unwrap();
+        assert_eq!(control["content"], "PRIVATE_FILE_CANARY");
+        let malformed = invoke_native_tool(
+            &registry,
+            ToolCall {
+                name: "filesystem__read_file".into(),
+                arguments: json!(null),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(malformed, NATIVE_FILE_READ_DENIED);
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "current_thread")]
