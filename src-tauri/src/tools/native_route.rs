@@ -106,6 +106,25 @@ pub(crate) fn dispatch(
     }
 }
 
+/// Connect the strict route to the actual registry-backed ticket store.
+/// The host supplies its own owner UUID; it is not parsed from the request.
+pub(crate) fn dispatch_ticket(
+    store: &super::native_delivery::NativeFileTickets,
+    owner: Uuid,
+    webview_label: &str,
+    trusted_document: bool,
+    request: &Request<Vec<u8>>,
+    respond: impl FnOnce(Response<Vec<u8>>),
+) {
+    dispatch(
+        webview_label,
+        trusted_document,
+        request,
+        |ticket, handoff| store.redeem(owner, ticket, handoff),
+        respond,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,4 +277,63 @@ mod tests {
             },
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn real_ticket_route_fences_large_results_and_replay_after_clear() {
+        use crate::tools::{
+            approvals::ApprovalGate,
+            native_delivery::NativeFileTickets,
+            registry::{ToolCall, ToolRegistry},
+        };
+        use std::{collections::HashMap, sync::Arc};
+
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("large.txt");
+        let canary = "z".repeat(64 * 1024);
+        std::fs::write(&file, &canary).unwrap();
+        let registry = Arc::new(ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        ));
+        let store = NativeFileTickets::new(Arc::clone(&registry));
+        let owner = Uuid::new_v4();
+        let call = ToolCall {
+            name: "filesystem__read_file".into(),
+            arguments: json!({"path":file}),
+        };
+        let first = store.prepare(owner, call.clone()).await.unwrap();
+        let stale = store.prepare(owner, call).await.unwrap();
+
+        dispatch_ticket(&store, owner, "other", true, &valid(first), |reply| {
+            assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+        });
+        dispatch_ticket(
+            &store,
+            Uuid::new_v4(),
+            "main",
+            true,
+            &valid(first),
+            |reply| assert_eq!(reply.status(), StatusCode::FORBIDDEN),
+        );
+        dispatch_ticket(&store, owner, "main", true, &valid(first), |reply| {
+            assert_eq!(reply.status(), StatusCode::OK);
+            let value: Value = serde_json::from_slice(reply.body()).unwrap();
+            assert_eq!(value["content"].as_str().unwrap(), canary);
+        });
+        dispatch_ticket(&store, owner, "main", true, &valid(first), |reply| {
+            assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+            assert_eq!(reply.body(), DENIED);
+        });
+
+        let writer = registry.reserve_root_publication().await;
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        drop(writer);
+        dispatch_ticket(&store, owner, "main", true, &valid(stale), |reply| {
+            assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+            assert_eq!(reply.body(), DENIED);
+        });
+    }
+
 }
