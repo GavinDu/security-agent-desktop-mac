@@ -1,7 +1,43 @@
 # Foundation — validation and architecture review
 
-The P0 foundation in Epic #8 is **not a signed/production desktop release**.
-Code presence is not evidence of native macOS success.
+The P0 foundation source-delivery Epic #8 is closed after explicit scope
+handoff to successor Epic #10 on 2026-11-24. This is **not a signed or
+production desktop release**, and physical acceptance remains outstanding.
+Code presence or hosted native CI is not evidence of physical macOS success.
+
+## Successor acceptance ownership (#10)
+
+| Issue | Independent acceptance | Evidence required |
+| --- | --- | --- |
+| #12 | Native window, tray, restart and loopback listener lifecycle | Physical Mac observations and redacted counts |
+| #72 | Normal and forced second-launch focus | Separate Dock/Finder and forced new-process outcomes; one listener |
+| #13 / #54 | Local-only WebView and IPC boundary | Actual hostile navigation, popups and untrusted-frame denial; no secret-reading test |
+| #55 | Keychain-authenticated local smoke and settings persistence | Both smoke modes, listener audit, restart evidence |
+
+All five issues remain open. Their acceptance is independent of Developer ID
+signing (#47), updater (#48), and uninstall (#49); none may be waived by a
+closed Foundation epic. Use #50 to consolidate release evidence without
+closing unfinished feature or device-integration work.
+
+For every physical case record the exact app commit, macOS version and
+architecture, developer or distribution bundle type, test ID, pass/fail/not
+run, and a redacted observation. For a failure attach a minimal reproduction
+and leave the affected issue open. Use a disposable local test account and
+non-sensitive fixtures; never attach bearer values, private keys, QR payloads,
+absolute personal paths or raw Keychain output. Do not weaken origin/ACL/CSP,
+add a privileged debug endpoint, disable the singleton guard, or bypass
+native CI to make a test pass. Normal tray hide must not latch shutdown;
+actual terminal main-window destruction and process exit must deny late or
+new approvals, as implemented in #215/PR #216. The event predicate regression
+is not physical evidence of AppKit/WKWebView event ordering.
+
+Latest verified handoff baseline: PR #216 merged at
+`4fb5d139825e3461fbe97fa77f47988ef6d48ef0`; exact PR head
+`32a936dc34f35a46292d81c0c55e910ba1b9249c`,
+[CI run 45438968240](https://github.com/GavinDu/security-agent-desktop-mac/actions/runs/45438968240)
+passed frontend, rustfmt, locked Linux Rust, native Apple Silicon macOS, and
+required-gates; verified developer DMG artifact 14943992604. Revalidate the
+artifact availability and record the actual installed build before testing.
 
 ## Baseline, setup and commands
 
