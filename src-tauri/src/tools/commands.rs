@@ -422,6 +422,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn canceled_or_failed_clear_keeps_admission_suspended_until_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let state = AgentState::new(
+            "root-clear-suspension-test-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![path.clone()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        let before = state.root_mutations.lock().await.token();
+        let held = state.registry.reserve_root_publication().await;
+        let caller_state = Arc::clone(&state);
+        let caller = tokio::spawn(async move {
+            commit_serialized_roots(
+                &caller_state,
+                Vec::new(),
+                None,
+                |roots| ToolRegistry::canonical_roots(&roots),
+                |_| panic!("blocked canceled Clear cannot persist"),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.registry.ensure_no_pending_clear().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        drop(held);
+        assert!(state.registry.ensure_no_pending_clear().is_err());
+        assert_eq!(state.root_mutations.lock().await.token(), before);
+
+        let failed = commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Err("private disk error".into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failed, "Cannot persist approved roots");
+        assert!(state.registry.ensure_no_pending_clear().is_err());
+        assert_eq!(state.settings.lock().await.allowed_roots, vec![path]);
+        assert_eq!(state.root_mutations.lock().await.token(), before);
+
+        commit_serialized_roots(
+            &state,
+            Vec::new(),
+            None,
+            |roots| ToolRegistry::canonical_roots(&roots),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(state.registry.ensure_no_pending_clear().is_ok());
+        assert!(state.settings.lock().await.allowed_roots.is_empty());
+        assert_ne!(state.root_mutations.lock().await.token(), before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn stalled_native_grant_validation_times_out_but_clear_remains_authoritative() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
