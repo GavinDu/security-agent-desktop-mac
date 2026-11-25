@@ -25,7 +25,21 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_ADMITTED_FILE_READS: usize = 32;
 // Metadata syscalls may block on network mounts even before read admission.
 const MAX_ADMITTED_PATH_PREFLIGHTS: usize = 16;
+// This bounds the caller, never the lifetime of a blocking kernel syscall.
+const FILE_WORKER_WAIT: Duration = Duration::from_secs(10);
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
+
+async fn wait_for_file_worker<T>(
+    worker: tokio::task::JoinHandle<T>,
+    max_wait: Duration,
+    timeout_error: &'static str,
+) -> Result<Result<T, tokio::task::JoinError>, String> {
+    // Dropping the JoinHandle detaches the blocking worker; it does not
+    // release any slots, pinned descriptors or admission guards it owns.
+    tokio::time::timeout(max_wait, worker)
+        .await
+        .map_err(|_| timeout_error.to_owned())
+}
 
 #[cfg(unix)]
 const MAX_ACTIVE_SHELLS: usize = 8;
@@ -463,11 +477,15 @@ impl ToolRegistry {
         let slot = Arc::clone(&self.path_preflight_slots)
             .try_acquire_owned()
             .map_err(|_| "Approved path check capacity exceeded".to_owned())?;
-        tokio::task::spawn_blocking(move || {
-            let _slot = slot;
-            check()
-        })
-        .await
+        wait_for_file_worker(
+            tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                check()
+            }),
+            FILE_WORKER_WAIT,
+            "Approved path check timed out; worker may still be active",
+        )
+        .await?
         .map_err(|_| "Approved path check task failed".to_owned())?
     }
 
@@ -559,16 +577,20 @@ impl ToolRegistry {
                 #[cfg(unix)]
                 let read_path = path.clone();
                 #[cfg(unix)]
-                let text = tokio::task::spawn_blocking(move || {
-                    // Owned guard and capacity remain held even if requester
-                    // drops its JoinHandle before this FD read completes.
-                    let _read_slot = read_slot;
-                    let _read_gate = read_gate;
-                    Self::scoped_read_with_lease(&roots, &read_path, |fd, relative| {
-                        crate::tools::pinned_read::read_scoped_file(fd, relative)
-                    })
-                })
-                .await
+                let text = wait_for_file_worker(
+                    tokio::task::spawn_blocking(move || {
+                        // Owned guard and capacity remain held even if requester
+                        // drops its JoinHandle before this FD read completes.
+                        let _read_slot = read_slot;
+                        let _read_gate = read_gate;
+                        Self::scoped_read_with_lease(&roots, &read_path, |fd, relative| {
+                            crate::tools::pinned_read::read_scoped_file(fd, relative)
+                        })
+                    }),
+                    FILE_WORKER_WAIT,
+                    "Approved file read timed out; worker may still be active",
+                )
+                .await?
                 .map_err(|_| "Approved file read task failed")??;
                 #[cfg(unix)]
                 self.ensure_current_file_result(read_generation)?;
@@ -1191,6 +1213,79 @@ mod tests {
         })
         .await
         .expect("finished metadata workers must release the bound");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_file_worker_keeps_fd_lease_and_capacity_until_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "private").unwrap();
+        let file = file.canonicalize().unwrap();
+        let registry = ToolRegistry::new(
+            ToolRegistry::canonical_roots(&[root.path().to_string_lossy().into_owned()]).unwrap(),
+            ApprovalGate::new(HashMap::new()),
+        );
+        let (slot, gate) = registry.admit_scoped_read().await.unwrap();
+        let roots = Arc::clone(&registry.roots);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let _gate = gate;
+            ToolRegistry::scoped_read_with_lease(&roots, &file, |fd, relative| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| "Fixture expired".to_owned())?;
+                crate::tools::pinned_read::read_scoped_file(fd, relative)
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let timeout = wait_for_file_worker(
+            worker,
+            Duration::from_millis(35),
+            "Approved file read timed out; worker may still be active",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            timeout,
+            "Approved file read timed out; worker may still be active"
+        );
+        assert_eq!(
+            registry.read_slots.available_permits(),
+            MAX_ADMITTED_FILE_READS - 1
+        );
+        registry.suspend_for_clear();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(35),
+            registry.reserve_root_publication(),
+        )
+        .await
+        .is_err());
+        assert!(registry.admit_scoped_read().await.is_err());
+
+        release_tx.send(()).unwrap();
+        let writer =
+            tokio::time::timeout(Duration::from_secs(2), registry.reserve_root_publication())
+                .await
+                .unwrap();
+        registry
+            .commit_roots_transaction(Vec::new(), || Ok(()))
+            .unwrap();
+        registry.finish_clear();
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while registry.read_slots.available_permits() != MAX_ADMITTED_FILE_READS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[cfg(unix)]
