@@ -811,8 +811,7 @@ mod tests {
         ));
         assert!(parse_object_arguments::<ReadInput>(json!({"path": "/safe"})).is_ok());
         assert!(
-            parse_object_arguments::<RunInput>(json!({"command": "true", "cwd": "/safe"}))
-                .is_ok()
+            parse_object_arguments::<RunInput>(json!({"command": "true", "cwd": "/safe"})).is_ok()
         );
     }
 
