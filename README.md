@@ -71,7 +71,7 @@ For detailed review and Mac smoke cases see
 | GET /health | Service heartbeat, socket source-IP checked |
 | GET /tools | OpenAI-format tool catalog; bearer auth |
 | POST /tools | Executes a named tool with the approval policy |
-| POST /chat | Deterministic dispatch using a tool_call field; **no LLM yet** |
+| POST /chat | Explicit deterministic tool dispatch, or opt-in local text inference |
 | GET /pairing | 501 after auth; peer enrollment not active |
 
 A POST /tools body looks like:
@@ -81,8 +81,30 @@ A POST /tools body looks like:
 ```
 
 POST /chat accepts the same object under a tool_call property, plus
-an optional message. Chat without a tool_call returns HTTP 501 rather
-than claiming to have called a model.
+an optional message. Chat without a tool_call returns HTTP 501 unless a local model is explicitly configured.
+
+### Opt-in local text inference
+
+Start a trusted OpenAI-compatible model server on `127.0.0.1:11434`, with
+the model already available, then launch the desktop with the selected model:
+
+```sh
+SECURITY_AGENT_LOCAL_MODEL=qwen3:8b npm run dev
+```
+
+Use the existing authenticated loopback `/chat` endpoint with a body such as
+`{"message":"Explain this concept"}`. Successful responses contain `message`
+and `finish_reason`; a `length` finish indicates a truncated answer. The app
+sends only the current prompt and configured model ID to the fixed local
+`/v1/chat/completions` endpoint, never the agent bearer or automatic tool data.
+The local server is an explicit trust boundary: it may itself log prompts or
+contact upstream services. Verify its configuration before sending private data.
+No external endpoint selection, redirects, inherited proxy, remote-phone
+inference, automatic model tool calls or chat history are supported. Limits:
+16 KiB prompt, 128 KiB provider body, 32 KiB answer, 1024 requested output
+tokens, two concurrent local calls and a 30-second caller deadline. A canceled
+request cannot guarantee cancellation of computation inside the model server.
+Unset the environment variable and restart to disable the provider.
 
 ## VPN status
 
@@ -102,7 +124,7 @@ Wildcards and LAN bindings are rejected. For next phases see
 
 ## Known limitations
 
-- No model inference, MCP transport, real WireGuard service, QR pairing,
+- No provider-driven tool loop, MCP transport, real WireGuard service, QR pairing,
   browser tool, quick-ask, schedules, signed updater or production release.
 - Canonical-path restrictions handle traversal and existing symlink
   escapes, but a hostile symlink-swap race needs an openat-style
