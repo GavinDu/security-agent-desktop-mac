@@ -7,6 +7,10 @@ pub mod server;
 #[allow(dead_code)]
 pub(crate) mod tool_loop;
 
+// Staged real HTTP planner, no production tool execution route.
+#[allow(dead_code)]
+pub(crate) mod structured_planner;
+
 use crate::{
     settings::AgentSettings,
     tools::{approvals::ApprovalGate, registry::ToolRegistry},
