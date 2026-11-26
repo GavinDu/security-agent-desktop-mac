@@ -1,8 +1,7 @@
-import { listen } from '@tauri-apps/api/event';
+import { mountApprovalInbox } from './approval-inbox';
 import { mountLocalChat } from './local-chat';
-import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
+import { connectorBridge } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
-import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
 import { RootWriteCoordinator } from '../bridges/root-write';
 import { RootSnapshotCoordinator } from '../bridges/root-snapshot';
 
@@ -11,14 +10,10 @@ const el = (id: string): HTMLElement => {
   if (!element) throw new Error('Missing element: ' + id);
   return element;
 };
-const allow = el('allow') as HTMLButtonElement;
-const deny = el('deny') as HTMLButtonElement;
 const rootInput = el('rootPath') as HTMLInputElement;
 const grantRootButton = el('grantRoot') as HTMLButtonElement;
 const clearRootsButton = el('clearRoots') as HTMLButtonElement;
 const bashPolicy = el('bashPolicy') as HTMLSelectElement;
-let pending: ApprovalEvent | null = null;
-const approvalReplies = new ApprovalReplyCoordinator();
 let configuredRoots: string[] = [];
 // Never display a speculative change as an acknowledged permission state.
 const policyWrites = new PolicyWriteCoordinator();
@@ -92,38 +87,6 @@ async function refresh(): Promise<void> {
       clearRootsButton.disabled = !rootSnapshots.canRevoke;
       el('roots').textContent = 'Directory permissions unavailable. Retry refresh or Clear Roots.';
     }
-  }
-}
-
-async function respond(approved: boolean): Promise<void> {
-  const current = pending;
-  if (!current || approvalReplies.inFlight) return;
-  allow.disabled = true;
-  deny.disabled = true;
-  try {
-    const result = await approvalReplies.tryRespond(
-      current.id, approved, connectorBridge.respondApproval
-    );
-    // An older reply must never erase a newer approval event.
-    if (pending?.id !== current.id) return;
-    if (result === 'accepted') {
-      pending = null;
-      el('approval-text').textContent = approved ? 'Approved once.' : 'Denied.';
-    } else if (result === 'expired') {
-      pending = null;
-      el('approval-text').textContent = 'Approval expired or no longer pending.';
-    }
-  } catch {
-    // Do not interpolate arbitrary native/IPC error messages or claim a
-    // permission was granted when the backend reply was not acknowledged.
-    if (pending?.id === current.id) {
-      el('approval-text').textContent = 'Approval response failed; retry or deny.';
-    }
-  } finally {
-    // On IPC error, the same outstanding request may be retried. If a new
-    // event arrived while waiting, only that new request may be answered.
-    allow.disabled = !pending;
-    deny.disabled = !pending;
   }
 }
 
@@ -202,8 +165,6 @@ el('previewPeer').addEventListener('click', () => {
       }
     });
 });
-allow.addEventListener('click', () => void respond(true));
-deny.addEventListener('click', () => void respond(false));
 grantRootButton.addEventListener('click', () => {
   const root = rootInput.value.trim();
   if (root && rootSnapshots.canWrite) void updateRoots([...configuredRoots, root]);
@@ -250,12 +211,7 @@ async function saveBashPolicy(): Promise<void> {
   if (persisted) await refresh();
 }
 bashPolicy.addEventListener('change', () => void saveBashPolicy());
-void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {
-  pending = event.payload;
-  el('approval-text').textContent = pending.tool + ': ' + pending.preview;
-  allow.disabled = approvalReplies.inFlight;
-  deny.disabled = approvalReplies.inFlight;
-});
+mountApprovalInbox();
 mountLocalChat();
 void refresh();
 // Status polling must not overwrite a user's in-progress permissions edits.
