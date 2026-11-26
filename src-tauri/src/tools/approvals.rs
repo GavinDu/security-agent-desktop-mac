@@ -164,7 +164,9 @@ impl ApprovalGate {
                 // The caller must supply losslessly escaped printable bytes.
                 if tool.is_empty()
                     || tool.len() > 64
-                    || !tool.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    || !tool
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                     || preview.is_empty()
                     || preview.len() > MAX_APPROVAL_PREVIEW_BYTES
                     || !preview.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
@@ -282,8 +284,12 @@ mod tests {
         let snapshot = gate.pending_snapshot().unwrap();
         assert_eq!(snapshot.len(), 2);
         assert!(snapshot.windows(2).all(|w| w[0].id < w[1].id));
-        assert!(snapshot.iter().any(|x| x.id == a.id && x.preview == "first"));
-        assert!(snapshot.iter().any(|x| x.id == b.id && x.preview == "second"));
+        assert!(snapshot
+            .iter()
+            .any(|x| x.id == a.id && x.preview == "first"));
+        assert!(snapshot
+            .iter()
+            .any(|x| x.id == b.id && x.preview == "second"));
         let id = Uuid::parse_str(&a.id).unwrap();
         assert!(gate.resolve(id, false).await);
         assert!(first.await.unwrap().is_err());
