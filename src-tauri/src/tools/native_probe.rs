@@ -47,15 +47,29 @@ window.runRegistryProbe = async () => {
     // No frame may be loaded from even the same bundled origin.
     const frame = document.createElement('iframe');
     frame.src = 'tauri://localhost/probe-frame';
+    const violation = new Promise(resolve => {
+      const listener = event => {
+        if (event.effectiveDirective === 'frame-src') {
+          document.removeEventListener('securitypolicyviolation', listener);
+          resolve(true);
+        }
+      };
+      document.addEventListener('securitypolicyviolation', listener);
+      setTimeout(() => {
+        document.removeEventListener('securitypolicyviolation', listener);
+        resolve(false);
+      }, 2000);
+    });
     document.body.appendChild(frame);
-    await new Promise(resolve => setTimeout(resolve, 100));
+    const blocked = await violation;
     frame.remove();
-    if (window.probeFrameRan) throw new Error('frame executed');
+    if (!blocked) throw new Error('frame CSP denial not observed');
     if (!(await fetch('/probe-frame-status', {cache:'no-store'})).ok)
       throw new Error('frame request reached fixture');
 
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-    if (!uuid.test(tickets.first) || !uuid.test(tickets.stale) || tickets.first === tickets.stale)
+    if (typeof tickets.first !== 'string' || typeof tickets.stale !== 'string' ||
+        !uuid.test(tickets.first) || !uuid.test(tickets.stale) || tickets.first === tickets.stale)
       throw new Error('IPC did not return opaque tickets');
     const first = await redeem(tickets.first);
     if (!first.ok || (await first.json()).content !== 'x'.repeat(65536))
