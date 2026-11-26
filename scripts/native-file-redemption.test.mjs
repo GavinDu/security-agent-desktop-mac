@@ -27,9 +27,12 @@ test('native file redemption sends only a canonical ticket in a credential-free 
 
 test('malformed tickets never reach native transport', async () => {
   for (const value of [null, {}, '', ticket + '\n', ticket + '?x=1', 'A'.repeat(36)]) {
+    let calls = 0;
     await assert.rejects(redeemNativeFile(async () => value, async () => {
-      assert.fail('malformed ticket dispatched');
+      calls++;
+      return new Response('{}');
     }), denied);
+    assert.equal(calls, 0);
   }
 });
 
@@ -49,17 +52,27 @@ test('denial, malformed response and transport failure are fixed and never retri
 });
 
 test('aborted preparation cannot dispatch a ticket and aborted response cannot return bytes', async () => {
+  let prepares = 0;
+  let fetches = 0;
+  const unexpectedFetch = async () => {
+    fetches++;
+    return new Response('{}');
+  };
   const before = new AbortController();
   before.abort();
   await assert.rejects(redeemNativeFile(async () => {
-    assert.fail('aborted preparation invoked');
-  }, async () => assert.fail('aborted fetch'), before.signal), denied);
+    prepares++;
+    return ticket;
+  }, unexpectedFetch, before.signal), denied);
+  assert.equal(prepares, 0);
+  assert.equal(fetches, 0);
 
   const during = new AbortController();
   await assert.rejects(redeemNativeFile(async () => {
     during.abort();
     return ticket;
-  }, async () => assert.fail('aborted fetch'), during.signal), denied);
+  }, unexpectedFetch, during.signal), denied);
+  assert.equal(fetches, 0);
 
   const after = new AbortController();
   await assert.rejects(redeemNativeFile(async () => ticket, async (_url, init) => {
