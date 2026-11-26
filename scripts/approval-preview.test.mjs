@@ -7,9 +7,10 @@ test('Ask never silently truncates a tool preview before approval', async () => 
   const registry = await readFile('src-tauri/src/tools/registry.rs', 'utf8');
   const ask = gate.indexOf('Policy::Ask => {');
   const limit = gate.indexOf('preview.len() > MAX_APPROVAL_PREVIEW_BYTES', ask);
-  const insert = gate.indexOf('pending.insert(id, sender)', ask);
-  const emit = gate.indexOf('preview: preview.to_owned()', insert);
-  assert.ok(ask > 0 && limit > ask && insert > limit && emit > insert);
+  const preview = gate.indexOf('preview: preview.to_owned()', limit);
+  const insert = gate.indexOf('pending.insert(', preview);
+  const emit = gate.indexOf('self.events.send(request)', insert);
+  assert.ok(ask > 0 && limit > ask && preview > limit && insert > preview && emit > insert);
   assert.doesNotMatch(gate, /preview\.chars\(\)\.take\(/);
   assert.match(registry, /std::ascii::escape_default\(byte\)/);
   assert.match(registry, /escaped_preview\(input\.command\.as_bytes\(\)\)/);

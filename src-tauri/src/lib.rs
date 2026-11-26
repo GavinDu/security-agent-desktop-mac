@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod account_credentials;
 #[cfg(target_os = "macos")]
 mod activation;
 mod agent;
