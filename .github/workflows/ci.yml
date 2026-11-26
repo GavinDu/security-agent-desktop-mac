@@ -123,6 +123,8 @@ jobs:
         run: cargo run --locked --manifest-path src-tauri/Cargo.toml --example native_scheme_probe
       - name: Verify registry-backed native WebKit response fence
         run: cargo run --locked --manifest-path src-tauri/Cargo.toml --features native-webkit-fixture --example native_registry_probe
+      - name: Verify native WebKit canceled request recovery
+        run: cargo run --locked --manifest-path src-tauri/Cargo.toml --example native_cancel_probe
       - name: Build unsigned macOS DMG
         run: npm run build
       - name: Verify the mounted DMG application, bundle identity and Apple Silicon binary
