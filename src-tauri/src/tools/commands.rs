@@ -3,7 +3,7 @@ use crate::{
     navigation,
     settings::AgentSettings,
     tools::{
-        approvals::Policy,
+        approvals::{ApprovalRequest, Policy},
         pinned_read::GrantedRoot,
         registry::{ToolCall, ToolRegistry},
     },
@@ -108,6 +108,16 @@ pub async fn get_agent_status(
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
     Ok(state.status_snapshot().await)
+}
+
+/// Read-only, authoritative inbox; no equivalent HTTP route.
+#[tauri::command]
+pub fn list_pending_approvals(
+    window: WebviewWindow,
+    state: State<'_, Arc<AgentState>>,
+) -> Result<Vec<ApprovalRequest>, String> {
+    navigation::ensure_privileged_webview(&window)?;
+    state.gate.pending_snapshot()
 }
 
 #[tauri::command]
