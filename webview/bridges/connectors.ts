@@ -3,6 +3,7 @@
  * This is original code; no Proton auth, Mail, or hosted account coupling.
  */
 import { invoke } from '@tauri-apps/api/core';
+import { redeemNativeFile } from './native-file';
 
 export interface ToolSpec {
   type: 'function';
@@ -31,7 +32,9 @@ export interface ConnectorBridge {
 export const connectorBridge: ConnectorBridge = {
   list: () => invoke('list_tools'),
   settings: () => invoke('get_agent_settings'),
-  invoke: (call) => invoke('invoke_tool', { call }),
+  invoke: (call) => call.name === 'filesystem__read_file'
+    ? redeemNativeFile(() => invoke('prepare_native_file', { call }))
+    : invoke('invoke_tool', { call }),
   setPolicy: (tool, policy) => invoke('set_tool_policy', { tool, policy }),
   setAllowedRoots: (roots, expectedRootRevision) => invoke('set_allowed_roots', { roots, expectedRootRevision }),
   clearAllowedRoots: () => invoke('clear_allowed_roots'),

@@ -17,11 +17,20 @@ fn is_trusted_main_destroyed(label: &str, event: &WindowEvent) -> bool {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.register_asynchronous_uri_scheme_protocol(
+        "security-agent-file",
+        |ctx, request, responder| {
+            tools::native_transport::redeem(ctx, request, |response| responder.respond(response));
+        },
+    );
+    builder
         .invoke_handler(tauri::generate_handler![
             tools::commands::list_tools,
             tools::commands::get_agent_settings,
             tools::commands::invoke_tool,
+            tools::commands::prepare_native_file,
             tools::commands::get_agent_status,
             tools::commands::respond_approval,
             tools::commands::set_tool_policy,
@@ -93,8 +102,7 @@ pub fn run() {
             let builder = tauri::WebviewWindowBuilder::from_config(app, &window_config)?;
             #[cfg(target_os = "macos")]
             let builder = {
-                // This only stages lifecycle ownership. Native sensitive
-                // IPC and the custom scheme remain unregistered.
+                // Bind native file capability to the first trusted document.
                 let host = tauri::async_runtime::block_on(async {
                     Arc::new(tools::native_host::NativeFileHost::new(Arc::clone(
                         &state.registry,
