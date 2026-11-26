@@ -670,14 +670,15 @@ mod tests {
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| authority.read(&session, &reference));
             entered_rx.recv().unwrap();
-            assert!(matches!(
+            let held = matches!(
                 authority.state.try_lock(),
                 Err(std::sync::TryLockError::WouldBlock)
-            ));
+            );
             let transition = scope.spawn(|| authority.activate(AccountId::issue()));
             release_tx.send(()).unwrap();
             assert_eq!(reader.join().unwrap().unwrap().expose(), "fixture");
             let next = transition.join().unwrap().unwrap();
+            assert!(held);
             assert_eq!(
                 authority.read(&session, &reference).err(),
                 Some(CredentialError::ScopeMismatch)
