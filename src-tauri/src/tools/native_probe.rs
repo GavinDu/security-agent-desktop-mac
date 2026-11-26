@@ -100,6 +100,7 @@ window.runRegistryProbe = async () => {
   }
 };
 window.runReloadProbe = async ticket => {
+  let failure = 'probe-fail-reload-fetch';
   try {
     const call = {name:'filesystem__read_file', arguments:{path:__CANARY_PATH__}};
     const result = await fetch('security-agent-file://localhost/redeem', {
@@ -107,12 +108,13 @@ window.runReloadProbe = async ticket => {
       headers:{'Content-Type':'text/plain'}, body:ticket
     }).then(r => !r.ok, () => true);
     if (!result) throw new Error('old ticket accepted after reload');
+    failure = 'probe-fail-reload-ipc';
     const denied = await window.__TAURI_INTERNALS__.invoke('prepare_native_file', {call})
       .then(() => false, error => error === 'File read authorization changed');
     if (!denied) throw new Error('fresh prepare not denied after reload');
     location.replace('tauri://localhost/probe-pass');
   } catch (_) {
-    location.replace('tauri://localhost/probe-fail');
+    location.replace('tauri://localhost/' + failure);
   }
 };
 "#;
@@ -287,15 +289,26 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                     let expected = match current {
                         0 => status == StatusCode::OK,
                         1 if reload_mode => {
+                            let finished = handler_finished.load(Ordering::SeqCst);
+                            let closed = handler_host.active().is_none();
+                            let not_cleared = !handler_cleared.load(Ordering::SeqCst);
+                            let generation_live = handler_registry
+                                .try_http_file_handoff(initial_generation)
+                                .is_ok();
+                            let unexpired = age.is_some_and(|age| age < Duration::from_secs(25));
+                            let redacted = response.body().as_slice()
+                                == br#"{"error":"File read authorization changed"}"#;
+                            eprintln!(
+                                "registry handoff probe: reload retained={retained}, finished={finished}, closed={closed}, not_cleared={not_cleared}, generation_live={generation_live}, unexpired={unexpired}, redacted={redacted}"
+                            );
                             retained
-                                && handler_finished.load(Ordering::SeqCst)
-                                && handler_host.active().is_none()
-                                && !handler_cleared.load(Ordering::SeqCst)
-                                && handler_registry.try_http_file_handoff(initial_generation).is_ok()
-                                && age.is_some_and(|age| age < Duration::from_secs(25))
+                                && finished
+                                && closed
+                                && not_cleared
+                                && generation_live
+                                && unexpired
                                 && status == StatusCode::FORBIDDEN
-                                && response.body().as_slice()
-                                    == br#"{\"error\":\"File read authorization changed\"}"#
+                                && redacted
                         }
                         1 => status == StatusCode::FORBIDDEN,
                         2 => {
@@ -360,11 +373,19 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                         };
                         nav_host.close();
                         let ok = ok && nav_host.active().is_none();
+                        eprintln!(
+                            "registry handoff probe: JS pass; phase={}, final_ok={ok}",
+                            phase.load(Ordering::SeqCst)
+                        );
                         passed.store(ok, Ordering::SeqCst);
                         handle.exit(if ok { 0 } else { 1 });
                         false
                     }
-                    "tauri://localhost/probe-fail" => {
+                    "tauri://localhost/probe-fail"
+                    | "tauri://localhost/probe-fail-reload-fetch"
+                    | "tauri://localhost/probe-fail-reload-ipc" => {
+                        // Only fixed fixture-controlled stage labels are printed.
+                        eprintln!("registry handoff probe: failure stage={}", url.path());
                         nav_host.close();
                         handle.exit(1);
                         false
