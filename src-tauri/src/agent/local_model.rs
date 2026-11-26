@@ -146,7 +146,10 @@ async fn complete_native_text(
     message: &str,
 ) -> Result<Completion, String> {
     let provider = provider.ok_or("No local inference provider configured")?;
-    provider.complete(message).await.map_err(|error| error.to_string())
+    provider
+        .complete(message)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn transport_error(error: reqwest::Error) -> ModelError {
@@ -231,7 +234,10 @@ mod tests {
         let router = Router::new().route(
             "/v1/chat/completions",
             post(|Json(body): Json<Value>| async move {
-                assert_eq!(body["messages"], json!([{"role": "user", "content": "hello"}]));
+                assert_eq!(
+                    body["messages"],
+                    json!([{"role": "user", "content": "hello"}])
+                );
                 assert!(body.get("tools").is_none());
                 Json(json!({"choices": [{
                     "message": {"role": "assistant", "content": "native fixture"},
@@ -240,16 +246,22 @@ mod tests {
             }),
         );
         let (provider, task) = fixture(router).await;
-        let answer = complete_native_text(Some(&provider), "hello").await.unwrap();
+        let answer = complete_native_text(Some(&provider), "hello")
+            .await
+            .unwrap();
         assert_eq!(answer.message, "native fixture");
         assert_eq!(answer.finish_reason, "length");
         assert_eq!(
-            complete_native_text(Some(&provider), " ").await.unwrap_err(),
+            complete_native_text(Some(&provider), " ")
+                .await
+                .unwrap_err(),
             "Invalid model prompt"
         );
         let _slots = provider.slots.try_acquire_many(2).unwrap();
         assert_eq!(
-            complete_native_text(Some(&provider), "hello").await.unwrap_err(),
+            complete_native_text(Some(&provider), "hello")
+                .await
+                .unwrap_err(),
             "Local inference capacity exceeded"
         );
         task.abort();
