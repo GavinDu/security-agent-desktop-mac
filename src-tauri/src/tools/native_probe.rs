@@ -21,6 +21,7 @@ const DOCUMENT: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <script src="/probe.js"></script>"#;
 const SCRIPT: &str = r#"
+const reloadMode = __RELOAD_MODE__;
 window.runRegistryProbe = async () => {
   const redeem = ticket => fetch('security-agent-file://localhost/redeem', {
     method: 'POST', credentials: 'omit', cache: 'no-store',
@@ -74,6 +75,15 @@ window.runRegistryProbe = async () => {
     const first = await redeem(tickets.first);
     if (!first.ok || (await first.json()).content !== 'x'.repeat(65536))
       throw new Error('initial delivery failed');
+    if (reloadMode) {
+      const saved = await fetch('/probe-save-reload', {
+        method:'POST', credentials:'omit', cache:'no-store',
+        headers:{'Content-Type':'text/plain'}, body:tickets.stale
+      });
+      if (!saved.ok) throw new Error('reload ticket not retained');
+      location.reload();
+      return;
+    }
     const replay = await redeem(tickets.first);
     if (replay.status !== 403 || (await replay.json()).error !== 'File read authorization changed')
       throw new Error('replay not denied');
@@ -84,6 +94,22 @@ window.runRegistryProbe = async () => {
       throw new Error('stale result not denied');
     // After Clear, new preparation must fail as well as pending redemption.
     if (!await denied(prepare())) throw new Error('post-Clear prepare accepted');
+    location.replace('tauri://localhost/probe-pass');
+  } catch (_) {
+    location.replace('tauri://localhost/probe-fail');
+  }
+};
+window.runReloadProbe = async ticket => {
+  try {
+    const call = {name:'filesystem__read_file', arguments:{path:__CANARY_PATH__}};
+    const result = await fetch('security-agent-file://localhost/redeem', {
+      method:'POST', credentials:'omit', cache:'no-store',
+      headers:{'Content-Type':'text/plain'}, body:ticket
+    }).then(r => !r.ok, () => true);
+    if (!result) throw new Error('old ticket accepted after reload');
+    const denied = await window.__TAURI_INTERNALS__.invoke('prepare_native_file', {call})
+      .then(() => false, error => error === 'File read authorization changed');
+    if (!denied) throw new Error('fresh prepare not denied after reload');
     location.replace('tauri://localhost/probe-pass');
   } catch (_) {
     location.replace('tauri://localhost/probe-fail');
@@ -122,11 +148,15 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let host = tauri::async_runtime::block_on(async {
         Arc::new(NativeFileHost::new(Arc::clone(&registry)))
     });
+    let reload_mode = std::env::var_os("SECURITY_AGENT_FIXTURE_RELOAD").is_some();
+    let reload_ticket = Arc::new(Mutex::new(None::<uuid::Uuid>));
+    let reload_finished = Arc::new(AtomicBool::new(false));
     let prepared_at = Arc::new(Mutex::new(None::<Instant>));
     let script = SCRIPT.replace(
         "__CANARY_PATH__",
         &serde_json::to_string(&root.join("canary.txt")).unwrap(),
-    );
+    )
+    .replace("__RELOAD_MODE__", if reload_mode { "true" } else { "false" });
     let clear_started = Arc::new(AtomicBool::new(false));
     let cleared = Arc::new(AtomicBool::new(false));
     let phase = Arc::new(AtomicUsize::new(0));
@@ -136,6 +166,12 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let fixture_registry = Arc::clone(&registry);
     let fixture_phase = Arc::clone(&phase);
     let fixture_cleared = Arc::clone(&cleared);
+    let fixture_ticket = Arc::clone(&reload_ticket);
+    let handler_ticket = Arc::clone(&reload_ticket);
+    let handler_finished = Arc::clone(&reload_finished);
+    let handler_host = Arc::clone(&host);
+    let setup_ticket = Arc::clone(&reload_ticket);
+    let setup_finished = Arc::clone(&reload_finished);
     let setup_age = Arc::clone(&prepared_at);
     let handler_phase = Arc::clone(&phase);
     let handler_cleared = Arc::clone(&cleared);
@@ -176,8 +212,27 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                         Vec::new(),
                     ));
                 }
+                (&Method::POST, "tauri://localhost/probe-save-reload")
+                    if reload_mode && trusted(&ctx)
+                        && fixture_phase.load(Ordering::SeqCst) == 1 =>
+                {
+                    let parsed = std::str::from_utf8(request.body())
+                        .ok()
+                        .and_then(|raw| uuid::Uuid::parse_str(raw).ok());
+                    let mut slot = fixture_ticket.lock().unwrap();
+                    let accepted = slot.is_none() && parsed.is_some();
+                    if accepted {
+                        *slot = parsed;
+                    }
+                    drop(slot);
+                    responder.respond(reply(
+                        if accepted { StatusCode::OK } else { StatusCode::FORBIDDEN },
+                        "text/plain",
+                        Vec::new(),
+                    ));
+                }
                 (&Method::POST, "tauri://localhost/probe-clear")
-                    if trusted(&ctx)
+                    if !reload_mode && trusted(&ctx)
                         && fixture_phase.load(Ordering::SeqCst) == 2
                         && !clear_started.swap(true, Ordering::SeqCst) =>
                 {
@@ -212,11 +267,24 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
             move |ctx, request, responder| {
                 let trusted_document = trusted(&ctx);
                 let age = prepared_at.lock().unwrap().map(|start| start.elapsed());
+                let retained = handler_ticket.lock().unwrap().is_some_and(|ticket| {
+                    request.body().as_slice() == ticket.to_string().as_bytes()
+                });
                 native_transport::redeem(ctx, request, |response| {
                     let status = response.status();
                     let current = handler_phase.load(Ordering::SeqCst);
                     let expected = match current {
                         0 => status == StatusCode::OK,
+                        1 if reload_mode => {
+                            retained
+                                && handler_finished.load(Ordering::SeqCst)
+                                && handler_host.active().is_none()
+                                && !handler_cleared.load(Ordering::SeqCst)
+                                && age.is_some_and(|age| age < Duration::from_secs(25))
+                                && status == StatusCode::FORBIDDEN
+                                && response.body().as_slice()
+                                    == br#"{\"error\":\"File read authorization changed\"}"#
+                        }
                         1 => status == StatusCode::FORBIDDEN,
                         2 => {
                             handler_cleared.load(Ordering::SeqCst)
@@ -257,6 +325,10 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
             app.manage(Arc::clone(&setup_host));
             let nav_host = Arc::clone(&setup_host);
             let load_age = Arc::clone(&setup_age);
+            let load_ticket = Arc::clone(&setup_ticket);
+            let load_finished = Arc::clone(&setup_finished);
+            let load_phase = Arc::clone(&setup_phase);
+            let nav_finished = Arc::clone(&setup_finished);
             let load_host = Arc::clone(&setup_host);
             let phase = Arc::clone(&setup_phase);
             let passed = Arc::clone(&setup_passed);
@@ -267,7 +339,13 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                         nav_host.on_navigation(url)
                     }
                     "tauri://localhost/probe-pass" => {
-                        let ok = phase.load(Ordering::SeqCst) == 3 && nav_host.active().is_some();
+                        let ok = if reload_mode {
+                            phase.load(Ordering::SeqCst) == 2
+                                && nav_finished.load(Ordering::SeqCst)
+                                && nav_host.active().is_none()
+                        } else {
+                            phase.load(Ordering::SeqCst) == 3 && nav_host.active().is_some()
+                        };
                         nav_host.close();
                         let ok = ok && nav_host.active().is_none();
                         passed.store(ok, Ordering::SeqCst);
@@ -289,6 +367,16 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                             *load_age.lock().unwrap() = Some(Instant::now());
                             eprintln!("registry handoff probe: host lifecycle active; starting production IPC");
                             window.eval("window.runRegistryProbe()").expect("Start fixture script");
+                        } else if reload_mode && load_phase.load(Ordering::SeqCst) == 1 {
+                            let ticket = *load_ticket.lock().unwrap();
+                            if let Some(ticket) = ticket {
+                                load_finished.store(true, Ordering::SeqCst);
+                                eprintln!("registry handoff probe: replacement document finished with host closed");
+                                let script = format!("window.runReloadProbe({})", serde_json::to_string(&ticket).unwrap());
+                                window.eval(&script).expect("Start reload denial fixture");
+                            } else {
+                                window.app_handle().exit(1);
+                            }
                         } else {
                             window.app_handle().exit(1);
                         }
@@ -309,9 +397,13 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let code = app.run_return(|_, _| {});
     host.close();
     if code == 0 && passed.load(Ordering::SeqCst) {
-        println!(
-            "registry handoff probe: strict IPC/route/frame denial, real 64 KiB read, replay and post-Clear denial verified"
-        );
+        if reload_mode {
+            println!("registry handoff probe: actual reload denies retained ticket and fresh preparation without Clear");
+        } else {
+            println!(
+                "registry handoff probe: strict IPC/route/frame denial, real 64 KiB read, replay and post-Clear denial verified"
+            );
+        }
         0
     } else {
         1
