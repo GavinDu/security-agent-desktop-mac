@@ -13,6 +13,7 @@ use uuid::Uuid;
 /// Upper bound shared by all awaiting Ask approvals (IPC and HTTP).
 /// Invalid/excess submissions must fail *before* a preview is broadcast.
 const MAX_PENDING_APPROVALS: usize = 32;
+const MAX_APPROVAL_PREVIEW_BYTES: usize = 8192;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -134,6 +135,14 @@ impl ApprovalGate {
             Policy::Auto => Ok(()),
             Policy::Disable => Err("Tool disabled by policy".into()),
             Policy::Ask => {
+                // Never authorize a suffix that the user could not review.
+                // The caller must supply losslessly escaped printable bytes.
+                if preview.is_empty()
+                    || preview.len() > MAX_APPROVAL_PREVIEW_BYTES
+                    || !preview.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+                {
+                    return Err("Approval preview cannot be displayed completely".into());
+                }
                 let id = Uuid::new_v4();
                 let (sender, receiver) = oneshot::channel();
                 let delivered = {
@@ -156,7 +165,7 @@ impl ApprovalGate {
                         .send(ApprovalRequest {
                             id: id.to_string(),
                             tool: tool.into(),
-                            preview: preview.chars().take(1500).collect(),
+                            preview: preview.to_owned(),
                         })
                         .is_ok()
                 };
@@ -217,6 +226,44 @@ impl ApprovalGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn ask_preview_is_complete_or_denied_without_pending_event() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        for invalid in [
+            String::new(),
+            "x".repeat(MAX_APPROVAL_PREVIEW_BYTES + 1),
+            "hidden\nline".into(),
+            "bidi\u{202e}".into(),
+        ] {
+            assert_eq!(
+                gate.require("bash__run", &invalid).await.unwrap_err(),
+                "Approval preview cannot be displayed completely"
+            );
+        }
+        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let preview = format!("{}VISIBLE_SUFFIX", "x".repeat(2000));
+        let worker = {
+            let gate = gate.clone();
+            let preview = preview.clone();
+            tokio::spawn(async move { gate.require("bash__run", &preview).await })
+        };
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.preview, preview);
+        assert!(gate.resolve(Uuid::parse_str(&event.id).unwrap(), false).await);
+        assert!(worker.await.unwrap().is_err());
+        assert!(gate.pending.lock().unwrap().is_empty());
+
+        // No new restriction on the explicitly selected Auto policy.
+        gate.set_policy("bash__run", Policy::Auto);
+        assert!(gate.require("bash__run", &"x".repeat(9000)).await.is_ok());
+    }
+
     #[tokio::test]
     async fn defaults_are_least_privilege() {
         let gate = ApprovalGate::new(HashMap::new());
