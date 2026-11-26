@@ -33,6 +33,9 @@ window.runRegistryProbe = async () => {
     const call = {name:'filesystem__read_file', arguments:{path: __CANARY_PATH__}};
     const prepare = () => window.__TAURI_INTERNALS__.invoke('prepare_native_file', {call});
     const tickets = {first: await prepare(), stale: await prepare()};
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    if (!uuid.test(tickets.first) || !uuid.test(tickets.stale) || tickets.first === tickets.stale)
+      throw new Error('IPC did not return opaque tickets');
     const first = await redeem(tickets.first);
     if (!first.ok || (await first.json()).content !== 'x'.repeat(65536))
       throw new Error('initial delivery failed');
@@ -157,29 +160,29 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                 let trusted_document = trusted(&ctx);
                 let age = prepared_at.lock().unwrap().map(|start| start.elapsed());
                 native_transport::redeem(ctx, request, |response| {
-                        let status = response.status();
-                        let current = handler_phase.load(Ordering::SeqCst);
-                        let expected = match current {
-                            0 => status == StatusCode::OK,
-                            1 => status == StatusCode::FORBIDDEN,
-                            2 => {
-                                handler_cleared.load(Ordering::SeqCst)
-                                    && age.is_some_and(|age| age < Duration::from_secs(25))
-                                    && status == StatusCode::FORBIDDEN
-                            }
-                            _ => false,
-                        };
-                        if trusted_document && expected {
-                            handler_phase.fetch_add(1, Ordering::SeqCst);
+                    let status = response.status();
+                    let current = handler_phase.load(Ordering::SeqCst);
+                    let expected = match current {
+                        0 => status == StatusCode::OK,
+                        1 => status == StatusCode::FORBIDDEN,
+                        2 => {
+                            handler_cleared.load(Ordering::SeqCst)
+                                && age.is_some_and(|age| age < Duration::from_secs(25))
+                                && status == StatusCode::FORBIDDEN
                         }
-                        eprintln!(
-                            "registry handoff probe: phase={current}, status={}, trusted={trusted_document}, age_ms={}",
-                            status.as_u16(),
-                            age.map_or(u128::MAX, |age| age.as_millis())
-                        );
-                        // This is the real Tauri/Wry responder, inside the
-                        // registry-backed ticket's synchronous guard.
-                        responder.respond(response);
+                        _ => false,
+                    };
+                    if trusted_document && expected {
+                        handler_phase.fetch_add(1, Ordering::SeqCst);
+                    }
+                    eprintln!(
+                        "registry handoff probe: phase={current}, status={}, trusted={trusted_document}, age_ms={}",
+                        status.as_u16(),
+                        age.map_or(u128::MAX, |age| age.as_millis())
+                    );
+                    // This is the real Tauri/Wry responder, inside the
+                    // registry-backed ticket's synchronous guard.
+                    responder.respond(response);
                 });
             },
         )
