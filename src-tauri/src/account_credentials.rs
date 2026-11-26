@@ -149,7 +149,6 @@ fn delete<S: Store>(
     store.delete(SERVICE, &name)
 }
 
-
 // Staged authority for one trusted active local account. Its lock serializes
 // store operations and session transitions; do not run blocking Keychain
 // operations on an async runtime worker, or hold this lock across an await.
@@ -232,9 +231,10 @@ impl<S: Store> AccountAuthority<S> {
         let AuthorityState { store, active } = &mut *state;
         let active = active_for_mut(active, session)?;
         if active.slots.len() >= MAX_ACTIVE_CREDENTIALS
-            || active.slots.iter().any(|slot| {
-                slot.0.integration == integration && slot.0.purpose == purpose
-            })
+            || active
+                .slots
+                .iter()
+                .any(|slot| slot.0.integration == integration && slot.0.purpose == purpose)
         {
             return Err(CredentialError::ScopeMismatch);
         }
@@ -536,7 +536,9 @@ mod tests {
             Some(CredentialError::ScopeMismatch)
         );
         assert_eq!(
-            authority.install(&session, integration, Purpose::Mcp, &secret).err(),
+            authority
+                .install(&session, integration, Purpose::Mcp, &secret)
+                .err(),
             Some(CredentialError::ScopeMismatch)
         );
         assert_eq!(
@@ -564,7 +566,9 @@ mod tests {
             .install(&session, integration, Purpose::Model, &secret)
             .unwrap();
         assert_eq!(
-            authority.install(&session, integration, Purpose::Model, &secret).err(),
+            authority
+                .install(&session, integration, Purpose::Model, &secret)
+                .err(),
             Some(CredentialError::ScopeMismatch)
         );
         authority.state.lock().unwrap().store.unavailable.set(true);
@@ -601,7 +605,9 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            authority.install(&session, Uuid::new_v4(), Purpose::Mcp, &secret).err(),
+            authority
+                .install(&session, Uuid::new_v4(), Purpose::Mcp, &secret)
+                .err(),
             Some(CredentialError::ScopeMismatch)
         );
         std::thread::scope(|scope| {
@@ -619,5 +625,67 @@ mod tests {
             authority.activate(AccountId::issue()).err(),
             Some(CredentialError::StoreUnavailable)
         );
+    }
+
+    #[test]
+    fn store_access_serializes_with_account_transition() {
+        use std::sync::mpsc;
+
+        struct BlockingStore {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Store for BlockingStore {
+            fn read(&self, _: &str, _: &str) -> Result<String, CredentialError> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                Ok("fixture".into())
+            }
+
+            fn write(&self, _: &str, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+
+            fn delete(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let authority = AccountAuthority::new(BlockingStore {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let session = authority.activate(AccountId::issue()).unwrap();
+        let reference = authority
+            .install(
+                &session,
+                Uuid::new_v4(),
+                Purpose::Mcp,
+                &Secret::new("fixture".into()).unwrap(),
+            )
+            .unwrap();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| authority.read(&session, &reference));
+            entered_rx.recv().unwrap();
+            assert!(matches!(
+                authority.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            let transition = scope.spawn(|| authority.activate(AccountId::issue()));
+            release_tx.send(()).unwrap();
+            assert_eq!(reader.join().unwrap().unwrap().expose(), "fixture");
+            let next = transition.join().unwrap().unwrap();
+            assert_eq!(
+                authority.read(&session, &reference).err(),
+                Some(CredentialError::ScopeMismatch)
+            );
+            assert_eq!(
+                authority.read(&next, &reference).err(),
+                Some(CredentialError::ScopeMismatch)
+            );
+        });
     }
 }
