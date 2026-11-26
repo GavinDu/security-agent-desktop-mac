@@ -30,9 +30,14 @@ pub struct ApprovalRequest {
     pub preview: String,
 }
 
+struct PendingApproval {
+    request: ApprovalRequest,
+    sender: oneshot::Sender<bool>,
+}
+
 pub struct ApprovalGate {
     policies: RwLock<HashMap<String, Policy>>,
-    pending: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
+    pending: Mutex<HashMap<Uuid, PendingApproval>>,
     /// Monotonic lifecycle close; never accept a new approval after Exit.
     shutting_down: AtomicBool,
     events: broadcast::Sender<ApprovalRequest>,
@@ -71,6 +76,26 @@ impl ApprovalGate {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ApprovalRequest> {
         self.events.subscribe()
+    }
+
+    /// Point-in-time readback from the same bounded map as resolution.
+    /// Never recover poisoned state or publish a snapshot after shutdown.
+    /// Only the trusted main native command may expose this metadata.
+    pub(crate) fn pending_snapshot(&self) -> Result<Vec<ApprovalRequest>, String> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Approval system unavailable")?;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Approval system shutting down".into());
+        }
+        let mut snapshot: Vec<_> = pending
+            .values()
+            .filter(|entry| !entry.sender.is_closed())
+            .map(|entry| entry.request.clone())
+            .collect();
+        snapshot.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        Ok(snapshot)
     }
 
     pub fn policy(&self, tool: &str) -> Policy {
@@ -137,7 +162,12 @@ impl ApprovalGate {
             Policy::Ask => {
                 // Never authorize a suffix that the user could not review.
                 // The caller must supply losslessly escaped printable bytes.
-                if preview.is_empty()
+                if tool.is_empty()
+                    || tool.len() > 64
+                    || !tool
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    || preview.is_empty()
                     || preview.len() > MAX_APPROVAL_PREVIEW_BYTES
                     || !preview.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
                 {
@@ -160,14 +190,25 @@ impl ApprovalGate {
                     if pending.len() >= MAX_PENDING_APPROVALS {
                         return Err("Too many pending tool approvals".into());
                     }
-                    pending.insert(id, sender);
-                    self.events
-                        .send(ApprovalRequest {
-                            id: id.to_string(),
-                            tool: tool.into(),
-                            preview: preview.to_owned(),
-                        })
-                        .is_ok()
+                    let request = ApprovalRequest {
+                        id: id.to_string(),
+                        tool: tool.into(),
+                        preview: preview.to_owned(),
+                    };
+                    pending.insert(
+                        id,
+                        PendingApproval {
+                            request: request.clone(),
+                            sender,
+                        },
+                    );
+                    let delivered = self.events.send(request).is_ok();
+                    if !delivered {
+                        // Never expose an undeliverable request in readback,
+                        // even in the interval before the RAII guard drops.
+                        pending.remove(&id);
+                    }
+                    delivered
                 };
                 let _pending_guard = PendingApprovalGuard { gate: self, id };
                 if !delivered {
@@ -217,7 +258,7 @@ impl ApprovalGate {
             return false;
         }
         match pending.remove(&id) {
-            Some(tx) => tx.send(allow).is_ok(),
+            Some(entry) => entry.sender.send(allow).is_ok(),
             None => false,
         }
     }
@@ -226,6 +267,47 @@ impl ApprovalGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn authoritative_snapshot_retains_all_live_requests_and_prunes_on_resolution() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut events = gate.subscribe();
+        let first = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.require("bash__run", "first").await })
+        };
+        let a = events.recv().await.unwrap();
+        let second = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.require("bash__run", "second").await })
+        };
+        let b = events.recv().await.unwrap();
+        let snapshot = gate.pending_snapshot().unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.windows(2).all(|w| w[0].id < w[1].id));
+        assert!(snapshot
+            .iter()
+            .any(|x| x.id == a.id && x.preview == "first"));
+        assert!(snapshot
+            .iter()
+            .any(|x| x.id == b.id && x.preview == "second"));
+        let id = Uuid::parse_str(&a.id).unwrap();
+        assert!(gate.resolve(id, false).await);
+        assert!(first.await.unwrap().is_err());
+        assert_eq!(gate.pending_snapshot().unwrap()[0].id, b.id);
+        second.abort();
+        let _ = second.await;
+        assert!(gate.pending_snapshot().unwrap().is_empty());
+        assert!(!gate.resolve(id, true).await);
+
+        let restarted = ApprovalGate::new(HashMap::new());
+        assert!(restarted.pending_snapshot().unwrap().is_empty());
+        assert!(!restarted.resolve(id, true).await);
+        assert!(restarted.require("bash__run", "no listener").await.is_err());
+        assert!(restarted.pending_snapshot().unwrap().is_empty());
+        assert_eq!(gate.cancel_pending_for_shutdown().unwrap(), 0);
+        assert!(gate.pending_snapshot().is_err());
+    }
+
     #[tokio::test]
     async fn ask_preview_is_complete_or_denied_without_pending_event() {
         let gate = ApprovalGate::new(HashMap::new());
@@ -426,6 +508,7 @@ mod tests {
 
         assert!(!gate.resolve(id, true).await);
         assert!(!gate.resolve(id, false).await);
+        assert!(gate.pending_snapshot().is_err());
         assert_eq!(
             gate.require("bash__run", "must not be announced")
                 .await
@@ -441,7 +524,10 @@ mod tests {
         let _ = waiting.await;
         // Only the RAII drop cleanup may recover poisoned registry state
         // to remove an abandoned UUID. It cannot grant authorization.
-        let pending = gate.pending.lock().unwrap_err().into_inner();
+        let pending = match gate.pending.lock() {
+            Err(poisoned) => poisoned.into_inner(),
+            Ok(_) => panic!("expected poisoned pending registry"),
+        };
         assert!(pending.is_empty());
         // Release the recovered cleanup-only guard before calling resolve.
         // Holding it across the next mutex acquisition would deadlock.
