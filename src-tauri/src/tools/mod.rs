@@ -29,3 +29,7 @@ pub(crate) mod native_host;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod native_transport;
+
+// Staged wire boundary; no subprocess or live tool dispatch.
+#[allow(dead_code)]
+pub(crate) mod mcp_wire;
