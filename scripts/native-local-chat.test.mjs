@@ -9,7 +9,7 @@ test('native chat checks trusted origin and reuses optional bounded provider', a
   const guard = model.indexOf('navigation::ensure_privileged_webview(&window)?', command);
   const dispatch = model.indexOf('complete_native_text(state.local_model.as_ref(), &message)', guard);
   assert.ok(command > 0 && guard > command && dispatch > guard);
-  assert.match(model, /provider\.complete\(message\)/);
+  assert.match(model, /provider\s*\.complete\(message\)/);
   assert.match(app, /agent::local_model::chat_text,/);
 });
 
