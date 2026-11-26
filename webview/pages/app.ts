@@ -1,4 +1,5 @@
 import { listen } from '@tauri-apps/api/event';
+import { mountLocalChat } from './local-chat';
 import { connectorBridge, type ApprovalEvent } from '../bridges/connectors';
 import { PolicyWriteCoordinator, type ShellPolicy } from '../bridges/policy-write';
 import { ApprovalReplyCoordinator } from '../bridges/approval-reply';
@@ -255,6 +256,7 @@ void listen<ApprovalEvent>('security-agent://tool-approval', (event) => {
   allow.disabled = approvalReplies.inFlight;
   deny.disabled = approvalReplies.inFlight;
 });
+mountLocalChat();
 void refresh();
 // Status polling must not overwrite a user's in-progress permissions edits.
 // Keep this independent of the full settings/catalog refresh.
