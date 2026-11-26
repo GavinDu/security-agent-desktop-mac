@@ -163,7 +163,6 @@ impl McpCatalog {
     }
 }
 
-
 // Staged registry authority: connector identity is supplied by a trusted
 // host, not model input. No raw transport send is exposed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,7 +262,10 @@ impl McpAuthority {
         policy: McpPolicy,
     ) -> Result<(), AdmissionError> {
         let mut state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
-        let (connector, _) = state.catalog.resolve(function).ok_or(AdmissionError::Denied)?;
+        let (connector, _) = state
+            .catalog
+            .resolve(function)
+            .ok_or(AdmissionError::Denied)?;
         let connector = connector.to_owned();
         let authority = state
             .connectors
@@ -285,9 +287,14 @@ impl McpAuthority {
             .catalog
             .validate_call(function, &arguments)
             .map_err(|_| AdmissionError::Denied)?;
-        let authority = state.connectors.get(connector).ok_or(AdmissionError::Denied)?;
-        let &(policy, policy_revision) =
-            authority.policies.get(function).ok_or(AdmissionError::Denied)?;
+        let authority = state
+            .connectors
+            .get(connector)
+            .ok_or(AdmissionError::Denied)?;
+        let &(policy, policy_revision) = authority
+            .policies
+            .get(function)
+            .ok_or(AdmissionError::Denied)?;
         if policy == McpPolicy::Disable {
             return Err(AdmissionError::Denied);
         }
@@ -311,8 +318,7 @@ impl McpAuthority {
             .get(&plan.connector)
             .ok_or(AdmissionError::Stale)?;
         if authority.incarnation != plan.incarnation
-            || authority.policies.get(&plan.function)
-                != Some(&(plan.policy, plan.policy_revision))
+            || authority.policies.get(&plan.function) != Some(&(plan.policy, plan.policy_revision))
         {
             return Err(AdmissionError::Stale);
         }
@@ -648,7 +654,9 @@ mod tests {
     fn poisoned_authority_never_admits_or_rechecks() {
         let authority = McpAuthority::default();
         authority.replace("fixture", vec![tool("search")]).unwrap();
-        authority.set_policy("fixture__search", McpPolicy::Ask).unwrap();
+        authority
+            .set_policy("fixture__search", McpPolicy::Ask)
+            .unwrap();
         let plan = authority
             .prepare("fixture__search", json!({"query":"x"}))
             .unwrap();
@@ -661,7 +669,9 @@ mod tests {
         });
         assert_eq!(authority.recheck(&plan), Err(AdmissionError::Unavailable));
         assert_eq!(
-            authority.prepare("fixture__search", json!({"query":"x"})).err(),
+            authority
+                .prepare("fixture__search", json!({"query":"x"}))
+                .err(),
             Some(AdmissionError::Unavailable)
         );
     }
