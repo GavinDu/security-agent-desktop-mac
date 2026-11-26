@@ -95,7 +95,11 @@ impl Planner for StructuredPlanner<'_> {
         }
         // Fail permanently on any failed/canceled exchange; no replay.
         self.ended = true;
-        let bytes = self.provider.structured_request(&payload).await.map_err(|_| ())?;
+        let bytes = self
+            .provider
+            .structured_request(&payload)
+            .await
+            .map_err(|_| ())?;
         let step = parse_step(&bytes)?;
         match &step {
             ModelStep::Answer(_) => {}
@@ -103,7 +107,10 @@ impl Planner for StructuredPlanner<'_> {
                 if self.calls.len() == MAX_CALLS
                     || !allowed_names.contains(&call.name)
                     || self.calls.iter().any(|old| old.id == call.id)
-                    || self.catalog.validate_call(&call.name, &call.arguments).is_err()
+                    || self
+                        .catalog
+                        .validate_call(&call.name, &call.arguments)
+                        .is_err()
                 {
                     return Err(());
                 }
@@ -133,9 +140,10 @@ fn parse_step(bytes: &[u8]) -> Result<ModelStep, ()> {
     }
     match choice.get("finish_reason").and_then(Value::as_str) {
         Some("stop") => {
-            if message.get("tool_calls").is_some_and(|v| {
-                !v.is_null() && !v.as_array().is_some_and(Vec::is_empty)
-            }) {
+            if message
+                .get("tool_calls")
+                .is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(Vec::is_empty))
+            {
                 return Err(());
             }
             let text = message.get("content").and_then(Value::as_str).ok_or(())?;
@@ -145,12 +153,16 @@ fn parse_step(bytes: &[u8]) -> Result<ModelStep, ()> {
             Ok(ModelStep::Answer(text.to_owned()))
         }
         Some("tool_calls") => {
-            if message.get("content").is_some_and(|v| {
-                !v.is_null() && v.as_str() != Some("")
-            }) {
+            if message
+                .get("content")
+                .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+            {
                 return Err(());
             }
-            let calls = message.get("tool_calls").and_then(Value::as_array).ok_or(())?;
+            let calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .ok_or(())?;
             let [call] = calls.as_slice() else {
                 return Err(());
             };
@@ -160,7 +172,10 @@ fn parse_step(bytes: &[u8]) -> Result<ModelStep, ()> {
             let id = call.get("id").and_then(Value::as_str).ok_or(())?;
             let function = call.get("function").and_then(Value::as_object).ok_or(())?;
             let name = function.get("name").and_then(Value::as_str).ok_or(())?;
-            let raw = function.get("arguments").and_then(Value::as_str).ok_or(())?;
+            let raw = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .ok_or(())?;
             if !token(id, 128) || !token(name, 64) || raw.len() > MAX_ARGUMENT_BYTES {
                 return Err(());
             }
@@ -181,7 +196,9 @@ fn parse_step(bytes: &[u8]) -> Result<ModelStep, ()> {
 fn token(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 #[cfg(test)]
@@ -200,11 +217,17 @@ mod tests {
 
     fn catalog() -> McpCatalog {
         let mut catalog = McpCatalog::default();
-        catalog.replace_connector("fixture", vec![McpDescriptor {
-            name:"read".into(), description:None,
-            input_schema:json!({"type":"object","properties":{"query":{"type":"string"}},
+        catalog
+            .replace_connector(
+                "fixture",
+                vec![McpDescriptor {
+                    name: "read".into(),
+                    description: None,
+                    input_schema: json!({"type":"object","properties":{"query":{"type":"string"}},
                                 "required":["query"],"additionalProperties":false}),
-        }]).unwrap();
+                }],
+            )
+            .unwrap();
         catalog
     }
 
@@ -224,13 +247,19 @@ mod tests {
         }
         let mut bad = reply(r#"{"query":"x"}"#);
         let duplicate = bad["choices"][0]["message"]["tool_calls"][0].clone();
-        bad["choices"][0]["message"]["tool_calls"].as_array_mut().unwrap().push(duplicate);
+        bad["choices"][0]["message"]["tool_calls"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
         assert!(parse_step(bad.to_string().as_bytes()).is_err());
         assert!(parse_step(br#"{"choices":[],"choices":[]}"#).is_err());
         let answer = json!({"choices":[{"finish_reason":"stop","message":{
             "role":"assistant","content":"I ran a tool"
         }}]});
-        assert!(matches!(parse_step(answer.to_string().as_bytes()), Ok(ModelStep::Answer(_))));
+        assert!(matches!(
+            parse_step(answer.to_string().as_bytes()),
+            Ok(ModelStep::Answer(_))
+        ));
     }
 
     struct FixtureExecutor {
@@ -289,9 +318,14 @@ mod tests {
             let provider = LocalModelProvider::for_test(address);
             let catalog = catalog();
             let mut planner = StructuredPlanner::new(&provider, &catalog);
-            let mut executor = FixtureExecutor { release, calls:0 };
-            let result = tool_loop::run(&mut planner, &mut executor, "question",
-                                        &BTreeSet::from(["fixture__read".into()])).await;
+            let mut executor = FixtureExecutor { release, calls: 0 };
+            let result = tool_loop::run(
+                &mut planner,
+                &mut executor,
+                "question",
+                &BTreeSet::from(["fixture__read".into()]),
+            )
+            .await;
             assert_eq!(executor.calls, 1);
             if release {
                 assert_eq!(result.unwrap().text, "done");
