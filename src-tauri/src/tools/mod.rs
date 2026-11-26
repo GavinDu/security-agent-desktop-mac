@@ -20,3 +20,6 @@ pub(crate) mod native_probe;
 
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) mod native_host;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod native_transport;
