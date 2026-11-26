@@ -2,6 +2,11 @@ pub(crate) mod local_model;
 pub mod rate_limit;
 pub mod server;
 
+// Staged coordinator: no real registry/model data release until trusted
+// identity, execution authorization and provider handoff are integrated.
+#[allow(dead_code)]
+pub(crate) mod tool_loop;
+
 use crate::{
     settings::AgentSettings,
     tools::{approvals::ApprovalGate, registry::ToolRegistry},
