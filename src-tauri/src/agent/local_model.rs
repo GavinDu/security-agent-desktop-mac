@@ -45,8 +45,7 @@ impl LocalModelProvider {
     /// Opt-in only at trusted application startup. No caller-supplied URL.
     pub(crate) fn from_env() -> Result<Option<Self>, String> {
         match std::env::var("SECURITY_AGENT_LOCAL_MODEL") {
-            Ok(model) => Self::new(model, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11434))
-                .map(Some),
+            Ok(model) => Self::new(model, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11434)).map(Some),
             Err(std::env::VarError::NotPresent) => Ok(None),
             Err(_) => Err("Invalid local model configuration".into()),
         }
@@ -297,7 +296,10 @@ mod tests {
         let mut wrong_role = good.clone();
         wrong_role["choices"][0]["message"]["role"] = json!("user");
         let mut multiple = good.clone();
-        multiple["choices"].as_array_mut().unwrap().push(good["choices"][0].clone());
+        multiple["choices"]
+            .as_array_mut()
+            .unwrap()
+            .push(good["choices"][0].clone());
         for bad in [calls, legacy, wrong_role, multiple, json!({})] {
             assert_eq!(
                 parse_completion(bad.to_string().as_bytes()),
