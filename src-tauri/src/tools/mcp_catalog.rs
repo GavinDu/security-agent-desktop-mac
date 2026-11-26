@@ -3,7 +3,8 @@
 
 use super::mcp_schema::Schema;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Mutex};
+use uuid::Uuid;
 
 const MAX_CONNECTORS: usize = 16;
 const MAX_TOOLS_PER_CONNECTOR: usize = 32;
@@ -159,6 +160,170 @@ impl McpCatalog {
                 json!({"type": "function", "function": function})
             })
             .collect()
+    }
+}
+
+
+// Staged registry authority: connector identity is supplied by a trusted
+// host, not model input. No raw transport send is exposed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpPolicy {
+    Disable,
+    Ask,
+    Auto,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum AdmissionError {
+    #[error("MCP authority unavailable")]
+    Unavailable,
+    #[error("MCP call denied")]
+    Denied,
+    #[error("MCP call stale")]
+    Stale,
+    #[error("MCP catalog rejected")]
+    Catalog,
+}
+
+struct ConnectorAuthority {
+    incarnation: Uuid,
+    policies: BTreeMap<String, (McpPolicy, Uuid)>,
+}
+
+#[derive(Default)]
+struct AuthorityState {
+    catalog: McpCatalog,
+    connectors: BTreeMap<String, ConnectorAuthority>,
+}
+
+#[derive(Default)]
+pub(crate) struct McpAuthority {
+    state: Mutex<AuthorityState>,
+}
+
+// Immutable private fields: caller cannot substitute args after admission.
+// This is a proposal, not execution authorization; Ask must be answered
+// separately, and a future transport owner must fence the actual handoff.
+pub(crate) struct CallPlan {
+    connector: String,
+    incarnation: Uuid,
+    function: String,
+    remote: String,
+    arguments: Value,
+    policy: McpPolicy,
+    policy_revision: Uuid,
+}
+
+impl CallPlan {
+    pub(crate) fn policy(&self) -> McpPolicy {
+        self.policy
+    }
+
+    pub(crate) fn arguments(&self) -> &Value {
+        &self.arguments
+    }
+
+    pub(crate) fn function(&self) -> &str {
+        &self.function
+    }
+}
+
+impl McpAuthority {
+    pub(crate) fn replace(
+        &self,
+        connector: &str,
+        tools: Vec<McpDescriptor>,
+    ) -> Result<(), AdmissionError> {
+        let mut state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        state
+            .catalog
+            .replace_connector(connector, tools)
+            .map_err(|_| AdmissionError::Catalog)?;
+        // Even an identical refresh invalidates prior policy and plans.
+        state.connectors.insert(
+            connector.to_owned(),
+            ConnectorAuthority {
+                incarnation: Uuid::new_v4(),
+                policies: BTreeMap::new(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn remove(&self, connector: &str) -> Result<(), AdmissionError> {
+        let mut state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        state.catalog.remove_connector(connector);
+        state.connectors.remove(connector);
+        Ok(())
+    }
+
+    pub(crate) fn set_policy(
+        &self,
+        function: &str,
+        policy: McpPolicy,
+    ) -> Result<(), AdmissionError> {
+        let mut state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        let (connector, _) = state.catalog.resolve(function).ok_or(AdmissionError::Denied)?;
+        let connector = connector.to_owned();
+        let authority = state
+            .connectors
+            .get_mut(&connector)
+            .ok_or(AdmissionError::Denied)?;
+        authority
+            .policies
+            .insert(function.to_owned(), (policy, Uuid::new_v4()));
+        Ok(())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        function: &str,
+        arguments: Value,
+    ) -> Result<CallPlan, AdmissionError> {
+        let state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        let (connector, remote) = state
+            .catalog
+            .validate_call(function, &arguments)
+            .map_err(|_| AdmissionError::Denied)?;
+        let authority = state.connectors.get(connector).ok_or(AdmissionError::Denied)?;
+        let &(policy, policy_revision) =
+            authority.policies.get(function).ok_or(AdmissionError::Denied)?;
+        if policy == McpPolicy::Disable {
+            return Err(AdmissionError::Denied);
+        }
+        Ok(CallPlan {
+            connector: connector.to_owned(),
+            incarnation: authority.incarnation,
+            function: function.to_owned(),
+            remote: remote.to_owned(),
+            arguments,
+            policy,
+            policy_revision,
+        })
+    }
+
+    /// Revalidate at the admission boundary. The result does not grant
+    /// execution or disclosure and does not retain the mutex across I/O.
+    pub(crate) fn recheck(&self, plan: &CallPlan) -> Result<(), AdmissionError> {
+        let state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        let authority = state
+            .connectors
+            .get(&plan.connector)
+            .ok_or(AdmissionError::Stale)?;
+        if authority.incarnation != plan.incarnation
+            || authority.policies.get(&plan.function)
+                != Some(&(plan.policy, plan.policy_revision))
+        {
+            return Err(AdmissionError::Stale);
+        }
+        let mapping = state
+            .catalog
+            .validate_call(&plan.function, &plan.arguments)
+            .map_err(|_| AdmissionError::Stale)?;
+        if mapping != (plan.connector.as_str(), plan.remote.as_str()) {
+            return Err(AdmissionError::Stale);
+        }
+        Ok(())
     }
 }
 
@@ -428,6 +593,76 @@ mod tests {
         assert_eq!(
             empty.replace_connector("overflow", Vec::new()),
             Err(CatalogError::Capacity)
+        );
+    }
+
+    #[test]
+    fn authority_defaults_to_deny_and_invalidates_policy_aba() {
+        let authority = McpAuthority::default();
+        authority.replace("fixture", vec![tool("search")]).unwrap();
+        let name = "fixture__search";
+        assert_eq!(
+            authority.prepare(name, json!({"query":"x"})).err(),
+            Some(AdmissionError::Denied)
+        );
+        authority.set_policy(name, McpPolicy::Ask).unwrap();
+        let plan = authority.prepare(name, json!({"query":"x"})).unwrap();
+        assert_eq!(plan.policy(), McpPolicy::Ask);
+        assert_eq!(plan.function(), name);
+        assert_eq!(plan.arguments(), &json!({"query":"x"}));
+        assert_eq!(authority.recheck(&plan), Ok(()));
+        assert_eq!(
+            authority.prepare(name, json!({"unknown":"x"})).err(),
+            Some(AdmissionError::Denied)
+        );
+        authority.set_policy(name, McpPolicy::Disable).unwrap();
+        authority.set_policy(name, McpPolicy::Ask).unwrap();
+        assert_eq!(authority.recheck(&plan), Err(AdmissionError::Stale));
+    }
+
+    #[test]
+    fn refresh_rollback_and_same_name_replacement_are_distinct() {
+        let authority = McpAuthority::default();
+        let name = "fixture__search";
+        authority.replace("fixture", vec![tool("search")]).unwrap();
+        authority.set_policy(name, McpPolicy::Auto).unwrap();
+        let plan = authority.prepare(name, json!({"query":"x"})).unwrap();
+        assert_eq!(
+            authority.replace("fixture", vec![tool("search"), tool("search")]),
+            Err(AdmissionError::Catalog)
+        );
+        assert_eq!(authority.recheck(&plan), Ok(()));
+        authority.replace("fixture", vec![tool("search")]).unwrap();
+        assert_eq!(authority.recheck(&plan), Err(AdmissionError::Stale));
+        assert_eq!(
+            authority.prepare(name, json!({"query":"x"})).err(),
+            Some(AdmissionError::Denied)
+        );
+        authority.set_policy(name, McpPolicy::Auto).unwrap();
+        let next = authority.prepare(name, json!({"query":"x"})).unwrap();
+        authority.remove("fixture").unwrap();
+        assert_eq!(authority.recheck(&next), Err(AdmissionError::Stale));
+    }
+
+    #[test]
+    fn poisoned_authority_never_admits_or_rechecks() {
+        let authority = McpAuthority::default();
+        authority.replace("fixture", vec![tool("search")]).unwrap();
+        authority.set_policy("fixture__search", McpPolicy::Ask).unwrap();
+        let plan = authority
+            .prepare("fixture__search", json!({"query":"x"}))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _guard = authority.state.lock().unwrap();
+                panic!("fixture poison");
+            });
+            assert!(worker.join().is_err());
+        });
+        assert_eq!(authority.recheck(&plan), Err(AdmissionError::Unavailable));
+        assert_eq!(
+            authority.prepare("fixture__search", json!({"query":"x"})).err(),
+            Some(AdmissionError::Unavailable)
         );
     }
 }
