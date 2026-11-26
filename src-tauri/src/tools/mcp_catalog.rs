@@ -88,7 +88,8 @@ impl McpCatalog {
                 return Err(CatalogError::InvalidDescription);
             }
             validate_schema_metadata(&tool.input_schema)?;
-            let validator = Schema::compile(&tool.input_schema).ok_or(CatalogError::InvalidSchema)?;
+            let validator =
+                Schema::compile(&tool.input_schema).ok_or(CatalogError::InvalidSchema)?;
             // Connector IDs cannot contain underscores, so split_once is
             // unambiguous even when the exact remote tool name contains "__".
             let name = format!("{connector}__{}", tool.name);
@@ -359,12 +360,19 @@ mod tests {
     #[test]
     fn validated_mapping_tracks_current_catalog_and_bad_refresh_rolls_back() {
         let mut catalog = McpCatalog::default();
-        catalog.replace_connector("alpha", vec![tool("query")]).unwrap();
+        catalog
+            .replace_connector("alpha", vec![tool("query")])
+            .unwrap();
         assert_eq!(
             catalog.validate_call("alpha__query", &json!({"query":"ok"})),
             Ok(("alpha", "query"))
         );
-        for arguments in [json!([]), json!({}), json!({"query":1}), json!({"query":"ok","extra":1})] {
+        for arguments in [
+            json!([]),
+            json!({}),
+            json!({"query":1}),
+            json!({"query":"ok","extra":1}),
+        ] {
             assert_eq!(
                 catalog.validate_call("alpha__query", &arguments),
                 Err(CatalogError::InvalidArguments)
@@ -376,7 +384,9 @@ mod tests {
             catalog.replace_connector("alpha", vec![bad]),
             Err(CatalogError::InvalidSchema)
         );
-        assert!(catalog.validate_call("alpha__query", &json!({"query":"ok"})).is_ok());
+        assert!(catalog
+            .validate_call("alpha__query", &json!({"query":"ok"}))
+            .is_ok());
         assert!(catalog.remove_connector("alpha"));
         assert_eq!(
             catalog.validate_call("alpha__query", &json!({"query":"ok"})),
