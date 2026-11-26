@@ -45,7 +45,9 @@ impl StdioDiscovery {
         if !executable.is_absolute()
             || !cwd.is_absolute()
             || args.len() > 32
-            || args.iter().any(|arg| arg.len() > 4096 || arg.contains('\0'))
+            || args
+                .iter()
+                .any(|arg| arg.len() > 4096 || arg.contains('\0'))
         {
             return Err(DiscoveryError::Configuration);
         }
@@ -164,12 +166,7 @@ impl StdioDiscovery {
                     .and_then(Value::as_str)
                     .ok_or(DiscoveryError::Protocol)?;
                 let description = match tool.get("description") {
-                    Some(value) => Some(
-                        value
-                            .as_str()
-                            .ok_or(DiscoveryError::Protocol)?
-                            .to_owned(),
-                    ),
+                    Some(value) => Some(value.as_str().ok_or(DiscoveryError::Protocol)?.to_owned()),
                     None => None,
                 };
                 let schema = tool
@@ -210,7 +207,11 @@ impl StdioDiscovery {
 }
 
 async fn reap(child: &mut Child) -> Result<(), DiscoveryError> {
-    if child.try_wait().map_err(|_| DiscoveryError::Process)?.is_some() {
+    if child
+        .try_wait()
+        .map_err(|_| DiscoveryError::Process)?
+        .is_some()
+    {
         return Ok(());
     }
     // A natural exit may race start_kill; wait remains the authority.
@@ -271,7 +272,10 @@ IFS= read -r line
     #[tokio::test]
     async fn invalid_version_and_relative_executable_fail_closed() {
         let invalid = START.replace("2025-06-18", "unsupported");
-        assert_eq!(fixture(&invalid).await.err(), Some(DiscoveryError::Protocol));
+        assert_eq!(
+            fixture(&invalid).await.err(),
+            Some(DiscoveryError::Protocol)
+        );
         assert_eq!(
             StdioDiscovery::start(Path::new("sh"), &[], Path::new("/"))
                 .await
