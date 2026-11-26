@@ -255,12 +255,11 @@ impl<'de> Visitor<'de> for Strict<'_> {
     }
 }
 
-fn parse_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
+/// Bounded duplicate-key rejecting JSON decode shared by structured local
+/// model responses. Newlines are allowed here; stdio framing rejects them.
+pub(crate) fn decode_unique(bytes: &[u8]) -> Result<Value, WireError> {
     if bytes.len() > MAX_FRAME {
         return Err(WireError::Oversize);
-    }
-    if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
-        return Err(WireError::Invalid);
     }
     let mut parser = serde_json::Deserializer::from_slice(bytes);
     let mut nodes = MAX_NODES;
@@ -271,7 +270,14 @@ fn parse_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
     .deserialize(&mut parser)
     .map_err(|_| WireError::Invalid)?;
     parser.end().map_err(|_| WireError::Invalid)?;
-    let mut map = match value {
+    Ok(value)
+}
+
+fn parse_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
+    if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
+        return Err(WireError::Invalid);
+    }
+    let mut map = match decode_unique(bytes)? {
         Value::Object(map) => map,
         _ => return Err(WireError::Invalid),
     };
