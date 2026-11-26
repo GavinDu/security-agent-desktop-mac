@@ -1,5 +1,5 @@
 use crate::{
-    agent::AgentState,
+    agent::{local_model::ModelError, AgentState},
     tools::registry::{ToolCall, ToolRegistry},
 };
 use axum::{
@@ -422,8 +422,8 @@ struct ChatRequest {
     tool_call: Option<ToolCall>,
 }
 
-/// Deterministic tool-dispatch envelope, *not* a claimed LLM inference loop.
-/// An inference provider/agent planner will be added in a later milestone.
+/// Deterministic explicit tool dispatch or opt-in local text inference.
+/// Provider-driven tool execution is not enabled.
 async fn chat(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AgentState>>,
@@ -453,7 +453,31 @@ async fn chat(
                 .into_response(),
         };
     }
-    (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"No inference provider configured; pass tool_call for deterministic tool execution"}))).into_response()
+    let Some(provider) = &state.local_model else {
+        return (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"No inference provider configured; pass tool_call for deterministic tool execution"}))).into_response();
+    };
+    // Until phone identity and consent are implemented, do not relay any
+    // remote prompt, even from an authenticated tunnel peer.
+    if !source.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Model inference is restricted to local callers"})),
+        )
+            .into_response();
+    }
+    match provider.complete(&request.message).await {
+        Ok(completion) => Json(completion).into_response(),
+        Err(error) => {
+            let status = match error {
+                ModelError::InvalidPrompt => StatusCode::BAD_REQUEST,
+                ModelError::Busy => StatusCode::TOO_MANY_REQUESTS,
+                ModelError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                ModelError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                ModelError::InvalidResponse => StatusCode::BAD_GATEWAY,
+            };
+            (status, Json(json!({"error": error.to_string()}))).into_response()
+        }
+    }
 }
 
 async fn pairing() -> impl IntoResponse {
@@ -507,6 +531,88 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn local_model_chat_obeys_auth_and_never_relays_tunnel_prompts() {
+        use crate::agent::local_model::LocalModelProvider;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let fake = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(body["messages"][0]["content"], "local question");
+                    Json(json!({"choices": [{
+                        "message": {"role": "assistant", "content": "fixture answer"},
+                        "finish_reason": "stop"
+                    }]}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            panic!("expected IPv4 fixture");
+        };
+        let task = tokio::spawn(async move {
+            axum::serve(listener, fake).await.unwrap();
+        });
+
+        let request = |ip: &str, authorized: bool| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header("content-type", "application/json");
+            if authorized {
+                builder = builder.header("authorization", "Bearer fixture-agent-token");
+            }
+            let mut req = builder
+                .body(Body::from(r#"{"message":"local question"}"#))
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(ip.parse().unwrap(), 41000)));
+            req
+        };
+        let state = |bind: &str, configured: bool| {
+            AgentState::new_with_local_model(
+                "fixture-agent-token".into(),
+                bind.parse().unwrap(),
+                AgentSettings::default(),
+                configured.then(|| LocalModelProvider::for_test(address)),
+            )
+            .unwrap()
+        };
+        let local = router(state("127.0.0.1:8080", true));
+        let denied = local
+            .clone()
+            .oneshot(request("127.0.0.1", false))
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let remote = router(state("10.8.0.1:8080", true))
+            .oneshot(request("10.8.0.2", true))
+            .await
+            .unwrap();
+        assert_eq!(remote.status(), StatusCode::FORBIDDEN);
+        let disabled = router(state("127.0.0.1:8080", false))
+            .oneshot(request("127.0.0.1", true))
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        let accepted = local.oneshot(request("127.0.0.1", true)).await.unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let bytes = accepted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"message": "fixture answer", "finish_reason": "stop"})
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        task.abort();
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn loopback_file_response_first_frame_denies_after_clear() {

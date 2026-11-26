@@ -85,7 +85,10 @@ pub fn run() {
             let token = secrets::get_or_create_api_token().map_err(std::io::Error::other)?;
             let bind = agent::bind_address().map_err(std::io::Error::other)?;
             let settings = AgentSettings::load().map_err(std::io::Error::other)?;
-            let state = AgentState::new(token, bind, settings).map_err(std::io::Error::other)?;
+            let local_model = agent::local_model::LocalModelProvider::from_env()
+                .map_err(std::io::Error::other)?;
+            let state = AgentState::new_with_local_model(token, bind, settings, local_model)
+                .map_err(std::io::Error::other)?;
 
             // Tauri's default auto-created window lacks a navigation hook.
             // Create exactly one trusted bundled UI; never create a remote

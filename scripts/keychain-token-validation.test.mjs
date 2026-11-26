@@ -19,8 +19,9 @@ test('Keychain token format is checked before trusted agent startup (#195)', asy
   assert.ok(src.indexOf('canonical_api_token(&token)', read) < write);
   assert.doesNotMatch(src, /Refusing a short existing API token/);
   const get = app.indexOf('secrets::get_or_create_api_token()');
-  const state = app.indexOf('AgentState::new(token, bind, settings)');
-  assert.ok(get > 0 && state > get);
+  const provider = app.indexOf('LocalModelProvider::from_env()');
+  const state = app.indexOf('AgentState::new_with_local_model(token, bind, settings, local_model)');
+  assert.ok(get > 0 && provider > get && state > provider);
 });
 
 test('canonical Keychain readback has native negative encoding tests (#195)', async () => {

@@ -2950,6 +2950,7 @@ dependencies = [
  "keyring",
  "libc",
  "rand",
+ "reqwest",
  "serde",
  "serde_json",
  "subtle",
