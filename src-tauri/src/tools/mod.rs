@@ -7,6 +7,10 @@ pub mod registry;
 #[allow(dead_code)]
 pub(crate) mod mcp_catalog;
 
+// Staged wire boundary; no subprocess or live tool dispatch.
+#[allow(dead_code)]
+pub(crate) mod mcp_wire;
+
 // Staged native delivery primitive: compile and test without exposing a new IPC route.
 #[cfg(any(test, target_os = "macos"))]
 mod native_delivery;
