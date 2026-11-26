@@ -32,6 +32,7 @@ pub fn run() {
             tools::commands::invoke_tool,
             tools::commands::prepare_native_file,
             tools::commands::get_agent_status,
+            agent::local_model::chat_text,
             tools::commands::respond_approval,
             tools::commands::set_tool_policy,
             tools::commands::set_allowed_roots,
