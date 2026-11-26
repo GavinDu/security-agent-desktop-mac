@@ -255,7 +255,10 @@ mod tests {
         };
         let event = events.recv().await.unwrap();
         assert_eq!(event.preview, preview);
-        assert!(gate.resolve(Uuid::parse_str(&event.id).unwrap(), false).await);
+        assert!(
+            gate.resolve(Uuid::parse_str(&event.id).unwrap(), false)
+                .await
+        );
         assert!(worker.await.unwrap().is_err());
         assert!(gate.pending.lock().unwrap().is_empty());
 
