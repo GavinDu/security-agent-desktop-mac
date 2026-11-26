@@ -29,7 +29,11 @@
       <p id="settingsNotice" class="muted"></p>
     </section>
     <section class="panel">
-      <h2>Pending approval</h2>
+      <h2>Pending approvals</h2>
+      <label for="approval-select">Select a request</label>
+      <select id="approval-select" disabled><option value="">Select a request to review</option></select>
+      <button id="approval-refresh">Refresh approvals</button>
+      <p id="approval-notice" role="status"></p>
       <pre id="approval-text">No requests awaiting approval.</pre>
       <p class="muted">Review the complete escaped input before allowing. Backslash escapes show non-printable bytes.</p>
       <div class="actions"><button id="allow" disabled>Allow once</button><button id="deny" disabled>Deny</button></div>
