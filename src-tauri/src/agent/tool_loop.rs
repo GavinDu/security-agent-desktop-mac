@@ -345,8 +345,7 @@ mod tests {
     #[tokio::test]
     async fn denial_stops_before_provider_can_observe_private_output() {
         for execute in [false, true] {
-            let mut planner =
-                FakePlanner::new(vec![call("one", "fixture__read", json!({}))]);
+            let mut planner = FakePlanner::new(vec![call("one", "fixture__read", json!({}))]);
             let mut executor = FakeExecutor {
                 execute,
                 disclose: false,
@@ -376,7 +375,11 @@ mod tests {
             call("one", "unknown__read", json!({})),
             call("", "fixture__read", json!({})),
             call("one", "fixture__read", json!([])),
-            call("one", "fixture__read", json!({"x":"a".repeat(MAX_ARGUMENTS)})),
+            call(
+                "one",
+                "fixture__read",
+                json!({"x":"a".repeat(MAX_ARGUMENTS)}),
+            ),
         ] {
             let mut planner = FakePlanner::new(vec![step]);
             let mut executor = FakeExecutor::default();
@@ -484,8 +487,12 @@ mod tests {
             deep = json!([deep]);
         }
         assert!(!bounded_arguments(&json!({"x": deep})));
-        assert!(!bounded_arguments(&json!({"x": vec![Value::Null; MAX_NODES]})));
-        assert!(!bounded_arguments(&json!({"x": "\n".repeat(MAX_ARGUMENTS / 2)})));
+        assert!(!bounded_arguments(
+            &json!({"x": vec![Value::Null; MAX_NODES]})
+        ));
+        assert!(!bounded_arguments(
+            &json!({"x": "\n".repeat(MAX_ARGUMENTS / 2)})
+        ));
         assert!(bounded_arguments(&json!({"x": "valid", "nested": [1, 2]})));
     }
 }
