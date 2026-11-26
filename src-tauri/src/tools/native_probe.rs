@@ -154,11 +154,15 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let reload_ticket = Arc::new(Mutex::new(None::<uuid::Uuid>));
     let reload_finished = Arc::new(AtomicBool::new(false));
     let prepared_at = Arc::new(Mutex::new(None::<Instant>));
-    let script = SCRIPT.replace(
-        "__CANARY_PATH__",
-        &serde_json::to_string(&root.join("canary.txt")).unwrap(),
-    )
-    .replace("__RELOAD_MODE__", if reload_mode { "true" } else { "false" });
+    let script = SCRIPT
+        .replace(
+            "__CANARY_PATH__",
+            &serde_json::to_string(&root.join("canary.txt")).unwrap(),
+        )
+        .replace(
+            "__RELOAD_MODE__",
+            if reload_mode { "true" } else { "false" },
+        );
     let clear_started = Arc::new(AtomicBool::new(false));
     let cleared = Arc::new(AtomicBool::new(false));
     let phase = Arc::new(AtomicUsize::new(0));
