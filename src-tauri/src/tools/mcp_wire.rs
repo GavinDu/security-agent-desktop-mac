@@ -2,7 +2,7 @@
 //! complete MCP client: initialization, notifications, subprocess ownership,
 //! transport negotiation and registry authorization are separate work.
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde_json::{json, Map, Number, Value};
+use serde_json::{Map, Number, Value};
 use std::{fmt, io, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -70,9 +70,12 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> WireSession<R, W> {
         }
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(WireError::Closed)?;
-        let frame = encode(&json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params
-        }))?;
+        let frame = encode(&Value::Object(Map::from_iter([
+            ("jsonrpc".into(), Value::String("2.0".into())),
+            ("id".into(), Value::Number(id.into())),
+            ("method".into(), Value::String(method.into())),
+            ("params".into(), params),
+        ])))?;
         // Set before the first await, so cancellation leaves it unusable.
         self.unusable = true;
         let result = tokio::time::timeout(deadline, async {
@@ -298,6 +301,7 @@ fn parse_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tokio::io::{duplex, split};
 
     #[test]
