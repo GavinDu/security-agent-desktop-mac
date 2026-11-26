@@ -13,6 +13,13 @@ name = "security_agent_desktop_mac"
 name = "security-agent-desktop-mac"
 path = "src/main.rs"
 
+[features]
+native-webkit-fixture = []
+
+[[example]]
+name = "native_registry_probe"
+required-features = ["native-webkit-fixture"]
+
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
 

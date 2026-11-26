@@ -15,5 +15,8 @@ mod native_route;
 #[cfg(any(test, target_os = "macos"))]
 mod native_session;
 
+#[cfg(all(target_os = "macos", feature = "native-webkit-fixture"))]
+pub(crate) mod native_probe;
+
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) mod native_host;
