@@ -35,10 +35,7 @@ fn private_child(parent: &File, name: &CStr, create: bool) -> io::Result<File> {
         0,
     )?;
     let meta = child.metadata()?;
-    if !meta.is_dir()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o7777 != 0o700
-    {
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o7777 != 0o700 {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     Ok(child)
@@ -134,7 +131,8 @@ impl AccountSettingsDirectory {
         let result = (|| {
             file.write_all(&bytes)
                 .map_err(|_| "Account settings write failed")?;
-            file.sync_all().map_err(|_| "Account settings sync failed")?;
+            file.sync_all()
+                .map_err(|_| "Account settings sync failed")?;
             // SAFETY: both leaves are fixed, relative to the same pinned
             // directory. Rename replaces the leaf, never follows a symlink.
             if unsafe {
@@ -162,7 +160,10 @@ impl AccountSettingsDirectory {
 mod tests {
     use super::*;
     use crate::tools::approvals::Policy;
-    use std::{fs, os::unix::fs::{symlink, PermissionsExt}};
+    use std::{
+        fs,
+        os::unix::fs::{symlink, PermissionsExt},
+    };
 
     fn directory(base: &Path, account: Uuid) -> AccountSettingsDirectory {
         AccountSettingsDirectory::open(base, account, true)
@@ -181,19 +182,26 @@ mod tests {
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
         fs::write(base.join("settings.json"), b"legacy authority").unwrap();
-        assert!(AccountSettingsDirectory::open(base, a, false).unwrap().is_none());
+        assert!(AccountSettingsDirectory::open(base, a, false)
+            .unwrap()
+            .is_none());
         let a_dir = directory(base, a);
         let b_dir = directory(base, b);
         let mut settings = AgentSettings::default();
         settings.allowed_roots.push("/fixture/a".into());
-        settings.policies.insert("bash__run".into(), Policy::Disable);
+        settings
+            .policies
+            .insert("bash__run".into(), Policy::Disable);
         a_dir.save(&settings).unwrap();
         let read = a_dir.load().unwrap();
         assert_eq!(read.allowed_roots, vec!["/fixture/a"]);
         assert_eq!(read.policies.get("bash__run"), Some(&Policy::Disable));
         assert!(b_dir.load().unwrap().allowed_roots.is_empty());
         assert!(b_dir.load().unwrap().policies.is_empty());
-        assert_eq!(fs::read(base.join("settings.json")).unwrap(), b"legacy authority");
+        assert_eq!(
+            fs::read(base.join("settings.json")).unwrap(),
+            b"legacy authority"
+        );
     }
 
     #[test]
