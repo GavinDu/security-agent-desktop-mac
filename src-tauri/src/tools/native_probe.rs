@@ -29,7 +29,31 @@ window.runRegistryProbe = async () => {
   try {
     const call = {name:'filesystem__read_file', arguments:{path: __CANARY_PATH__}};
     const prepare = () => window.__TAURI_INTERNALS__.invoke('prepare_native_file', {call});
+    // A native command with an invalid ToolCall must fail before issuing a ticket.
+    const denied = promise => promise.then(() => false, () => true);
+    if (!await denied(window.__TAURI_INTERNALS__.invoke('prepare_native_file', {
+      call: {name:'filesystem__read_file', arguments:{path:__CANARY_PATH__}, owner:'untrusted'}
+    }))) throw new Error('extra envelope fields accepted');
+    if (!await denied(window.__TAURI_INTERNALS__.invoke('prepare_native_file', {
+      call: {name:'bash__run', arguments:{}}
+    }))) throw new Error('non-file command accepted');
     const tickets = {first: await prepare(), stale: await prepare()};
+    // Malformed route requests must not consume the valid ticket.
+    const rejected = request => request.then(r => !r.ok, () => true);
+    if (!await rejected(fetch('security-agent-file://localhost/redeem?extra=1', {
+      method:'POST', credentials:'omit', headers:{'Content-Type':'text/plain'}, body:tickets.first
+    }))) throw new Error('query accepted');
+    if (!await rejected(redeem(tickets.first + 'x'))) throw new Error('malformed ticket accepted');
+    // No frame may be loaded from even the same bundled origin.
+    const frame = document.createElement('iframe');
+    frame.src = 'tauri://localhost/probe-frame';
+    document.body.appendChild(frame);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    frame.remove();
+    if (window.probeFrameRan) throw new Error('frame executed');
+    if (!(await fetch('/probe-frame-status', {cache:'no-store'})).ok)
+      throw new Error('frame request reached fixture');
+
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
     if (!uuid.test(tickets.first) || !uuid.test(tickets.stale) || tickets.first === tickets.stale)
       throw new Error('IPC did not return opaque tickets');
@@ -44,6 +68,8 @@ window.runRegistryProbe = async () => {
     const stale = await redeem(tickets.stale);
     if (stale.status !== 403 || (await stale.json()).error !== 'File read authorization changed')
       throw new Error('stale result not denied');
+    // After Clear, new preparation must fail as well as pending redemption.
+    if (!await denied(prepare())) throw new Error('post-Clear prepare accepted');
     location.replace('tauri://localhost/probe-pass');
   } catch (_) {
     location.replace('tauri://localhost/probe-fail');
@@ -92,6 +118,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let phase = Arc::new(AtomicUsize::new(0));
     let passed = Arc::new(AtomicBool::new(false));
 
+    let frame_seen = Arc::new(AtomicBool::new(false));
     let fixture_registry = Arc::clone(&registry);
     let fixture_phase = Arc::clone(&phase);
     let fixture_cleared = Arc::clone(&cleared);
@@ -118,6 +145,21 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                         StatusCode::OK,
                         "application/javascript",
                         script.as_bytes().to_vec(),
+                    ));
+                }
+                (&Method::GET, "tauri://localhost/probe-frame") => {
+                    frame_seen.store(true, Ordering::SeqCst);
+                    responder.respond(reply(StatusCode::FORBIDDEN, "text/plain", Vec::new()));
+                }
+                (&Method::GET, "tauri://localhost/probe-frame-status") => {
+                    responder.respond(reply(
+                        if frame_seen.load(Ordering::SeqCst) {
+                            StatusCode::FORBIDDEN
+                        } else {
+                            StatusCode::OK
+                        },
+                        "text/plain",
+                        Vec::new(),
                     ));
                 }
                 (&Method::POST, "tauri://localhost/probe-clear")
@@ -171,6 +213,8 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                     };
                     if trusted_document && expected {
                         handler_phase.fetch_add(1, Ordering::SeqCst);
+                    } else if current == 0 && status == StatusCode::FORBIDDEN {
+                        eprintln!("registry handoff probe: invalid route denied before ticket redemption");
                     }
                     eprintln!(
                         "registry handoff probe: phase={current}, status={}, trusted={trusted_document}, age_ms={}",
@@ -252,7 +296,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     host.close();
     if code == 0 && passed.load(Ordering::SeqCst) {
         println!(
-            "registry handoff probe: real 64 KiB read, replay denial and post-Clear denial verified"
+            "registry handoff probe: strict IPC/route/frame denial, real 64 KiB read, replay and post-Clear denial verified"
         );
         0
     } else {
