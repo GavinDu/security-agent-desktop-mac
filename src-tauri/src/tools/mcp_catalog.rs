@@ -1,6 +1,7 @@
 //! Staged MCP catalog contract. No transport, registry registration, model
 //! disclosure, policy mutation or execution is enabled by this module.
 
+use super::mcp_schema::Schema;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -27,6 +28,8 @@ pub(crate) enum CatalogError {
     InvalidDescription,
     #[error("Unsupported MCP input schema")]
     InvalidSchema,
+    #[error("Unknown MCP tool or invalid arguments")]
+    InvalidArguments,
 }
 
 pub(crate) struct McpDescriptor {
@@ -41,6 +44,7 @@ struct RegisteredTool {
     function_name: String,
     description: Option<String>,
     input_schema: Value,
+    validator: Schema,
 }
 
 #[derive(Default)]
@@ -84,6 +88,7 @@ impl McpCatalog {
                 return Err(CatalogError::InvalidDescription);
             }
             validate_schema_metadata(&tool.input_schema)?;
+            let validator = Schema::compile(&tool.input_schema).ok_or(CatalogError::InvalidSchema)?;
             // Connector IDs cannot contain underscores, so split_once is
             // unambiguous even when the exact remote tool name contains "__".
             let name = format!("{connector}__{}", tool.name);
@@ -93,6 +98,7 @@ impl McpCatalog {
                 function_name: name.clone(),
                 description: tool.description,
                 input_schema: tool.input_schema,
+                validator,
             };
             if replacement.insert(name, entry).is_some() {
                 return Err(CatalogError::Duplicate);
@@ -112,6 +118,28 @@ impl McpCatalog {
         let (connector, _) = function_name.split_once("__")?;
         let tool = self.connectors.get(connector)?.get(function_name)?;
         Some((&tool.connector, &tool.remote_name))
+    }
+
+    /// Validate against the current exact catalog. No authorization is
+    /// conveyed by this mapping; a live adapter must fence refresh/removal
+    /// and account generation at invocation time.
+    pub(crate) fn validate_call(
+        &self,
+        function_name: &str,
+        arguments: &Value,
+    ) -> Result<(&str, &str), CatalogError> {
+        let (connector, _) = function_name
+            .split_once("__")
+            .ok_or(CatalogError::InvalidArguments)?;
+        let tool = self
+            .connectors
+            .get(connector)
+            .and_then(|tools| tools.get(function_name))
+            .ok_or(CatalogError::InvalidArguments)?;
+        if !tool.validator.accepts(arguments) {
+            return Err(CatalogError::InvalidArguments);
+        }
+        Ok((&tool.connector, &tool.remote_name))
     }
 
     /// Stable across refresh order; not automatically exposed to any model.
@@ -326,6 +354,34 @@ mod tests {
             Err(CatalogError::InvalidDescription)
         );
         assert!(catalog.openai_functions().is_empty());
+    }
+
+    #[test]
+    fn validated_mapping_tracks_current_catalog_and_bad_refresh_rolls_back() {
+        let mut catalog = McpCatalog::default();
+        catalog.replace_connector("alpha", vec![tool("query")]).unwrap();
+        assert_eq!(
+            catalog.validate_call("alpha__query", &json!({"query":"ok"})),
+            Ok(("alpha", "query"))
+        );
+        for arguments in [json!([]), json!({}), json!({"query":1}), json!({"query":"ok","extra":1})] {
+            assert_eq!(
+                catalog.validate_call("alpha__query", &arguments),
+                Err(CatalogError::InvalidArguments)
+            );
+        }
+        let mut bad = tool("query");
+        bad.input_schema["properties"]["query"]["pattern"] = json!("a");
+        assert_eq!(
+            catalog.replace_connector("alpha", vec![bad]),
+            Err(CatalogError::InvalidSchema)
+        );
+        assert!(catalog.validate_call("alpha__query", &json!({"query":"ok"})).is_ok());
+        assert!(catalog.remove_connector("alpha"));
+        assert_eq!(
+            catalog.validate_call("alpha__query", &json!({"query":"ok"})),
+            Err(CatalogError::InvalidArguments)
+        );
     }
 
     #[test]
