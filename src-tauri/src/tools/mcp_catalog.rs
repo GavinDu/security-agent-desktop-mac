@@ -250,7 +250,10 @@ mod tests {
         assert_eq!(functions[0]["function"]["name"], "first__Search");
         assert_eq!(functions[1]["function"]["name"], "second__Search");
         assert_eq!(functions[2]["function"]["name"], "second__read__file");
-        assert_eq!(functions[0]["function"]["parameters"], tool("Search").input_schema);
+        assert_eq!(
+            functions[0]["function"]["parameters"],
+            tool("Search").input_schema
+        );
         for id in ["filesystem", "bash", "First", "a__b", "", "../x", "é"] {
             assert_eq!(
                 catalog.replace_connector(id, vec![tool("search")]),
