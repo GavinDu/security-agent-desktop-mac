@@ -53,18 +53,17 @@ test('throwing IPC reply does not lock approvals indefinitely (#135)', async () 
   assert.equal(await coordinator.tryRespond('id', false, async () => true), 'accepted');
 });
 
-test('trusted UI never claims success on stale or thrown native approval (#135)', async () => {
-  const source = await readFile('webview/pages/app.ts', 'utf8');
-  assert.match(source, /const approvalReplies = new ApprovalReplyCoordinator\(\)/);
-  assert.match(source, /if \(!current \|\| approvalReplies\.inFlight\) return/);
-  assert.match(source, /await approvalReplies\.tryRespond\(/);
-  assert.match(source, /if \(pending\?\.id !== current\.id\) return/);
-  assert.match(source, /if \(result === 'accepted'\)/);
-  assert.match(source, /else if \(result === 'expired'\)/);
+test('trusted inbox never claims success on stale or thrown native approval (#135)', async () => {
+  const source = await readFile('webview/pages/approval-inbox.ts', 'utf8');
+  assert.match(source, /const replies = new ApprovalReplyCoordinator\(\)/);
+  assert.match(source, /const current = inbox.beginResponse\(\)/);
+  assert.match(source, /if \(!current\) return/);
+  assert.match(source, /replies.tryRespond\(current.id, approved, connectorBridge.respondApproval\)/);
+  assert.match(source, /result === 'accepted'/);
   assert.match(source, /Approval expired or no longer pending\./);
-  assert.match(source, /Approval response failed; retry or deny\./);
-  assert.match(source, /allow\.disabled = !pending/);
-  assert.match(source, /deny\.disabled = !pending/);
-  assert.doesNotMatch(source, /Approval failed: ' \+ String\(error\)/);
-  assert.match(source, /allow\.disabled = approvalReplies\.inFlight/);
+  assert.match(source, /Approval response unknown\. Refresh and review again\./);
+  assert.match(source, /inbox.finishResponse\(\)/);
+  assert.match(source, /allow.disabled = !current \|\| replies.inFlight/);
+  assert.match(source, /deny.disabled = !current \|\| replies.inFlight/);
+  assert.doesNotMatch(source, /String\(error\)|innerHTML/);
 });

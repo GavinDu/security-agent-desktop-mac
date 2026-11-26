@@ -21,9 +21,9 @@ test('Ask never silently truncates a tool preview before approval', async () => 
 test('trusted approval preview is literal text with whitespace preserved', async () => {
   const html = await readFile('webview/index.html', 'utf8');
   const css = await readFile('webview/app.css', 'utf8');
-  const app = await readFile('webview/pages/app.ts', 'utf8');
+  const app = await readFile('webview/pages/approval-inbox.ts', 'utf8');
   assert.match(html, /<pre id="approval-text">/);
   assert.match(css, /#approval-text\{[^}]*max-height:none[^}]*white-space:pre-wrap/);
-  assert.match(app, /el\('approval-text'\)\.textContent = pending\.tool \+ ': ' \+ pending\.preview/);
-  assert.doesNotMatch(app, /el\('approval-text'\)\.innerHTML/);
+  assert.match(app, /preview\.textContent = current\s*\? current\.tool \+ ': ' \+ current\.preview/);
+  assert.doesNotMatch(app, /preview\.innerHTML/);
 });
