@@ -69,6 +69,10 @@ pub async fn list_tools(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Vec<Value>, String> {
     navigation::ensure_privileged_webview(&window)?;
+    #[cfg(target_os = "macos")]
+    if super::native_transport::available(&window) {
+        return Ok(state.registry.list());
+    }
     Ok(native_tool_catalog(&state.registry))
 }
 
@@ -80,6 +84,20 @@ pub async fn invoke_tool(
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
     invoke_native_tool(&state.registry, call).await
+}
+
+// Never return file bytes through an ordinary Tauri invoke reply.
+#[tauri::command]
+pub async fn prepare_native_file(window: WebviewWindow, call: ToolCall) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        super::native_transport::prepare(&window, call).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, call);
+        Err("File read authorization changed".to_owned())
+    }
 }
 
 #[tauri::command]
