@@ -1,3 +1,4 @@
+pub(crate) mod local_model;
 pub mod rate_limit;
 pub mod server;
 
@@ -66,6 +67,7 @@ pub struct AgentState {
     pub online: AtomicBool,
     pub bind: SocketAddr,
     pub registry: Arc<ToolRegistry>,
+    pub(crate) local_model: Option<local_model::LocalModelProvider>,
     pub gate: Arc<ApprovalGate>,
     pub dispatch_permits: Arc<Semaphore>,
     pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
@@ -87,6 +89,15 @@ impl AgentState {
         bind: SocketAddr,
         settings: AgentSettings,
     ) -> Result<Arc<Self>, String> {
+        Self::new_with_local_model(token, bind, settings, None)
+    }
+
+    pub(crate) fn new_with_local_model(
+        token: String,
+        bind: SocketAddr,
+        settings: AgentSettings,
+        local_model: Option<local_model::LocalModelProvider>,
+    ) -> Result<Arc<Self>, String> {
         // Missing Authorization headers parse to empty, and direct callers
         // must not be able to construct an empty-token or LAN-bound server.
         if token.trim().is_empty() {
@@ -103,6 +114,7 @@ impl AgentState {
             online: AtomicBool::new(false),
             bind,
             registry,
+            local_model,
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             source_rate_limiter: rate_limit::SourceRateLimiter::default(),
