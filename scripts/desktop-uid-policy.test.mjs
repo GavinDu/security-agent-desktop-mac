@@ -21,8 +21,9 @@ test('macOS desktop refuses root/setuid context before home path or Keychain sta
 
   const lock = app.indexOf('InstanceGuard::acquire()');
   const keychain = app.indexOf('secrets::get_or_create_api_token()');
-  const agent = app.indexOf('AgentState::new(token, bind, settings)');
-  assert.ok(lock > 0 && keychain > lock && agent > keychain);
+  const provider = app.indexOf('LocalModelProvider::from_env()');
+  const agent = app.indexOf('AgentState::new_with_local_model(token, bind, settings, local_model)');
+  assert.ok(lock > 0 && keychain > lock && provider > keychain && agent > provider);
   assert.match(guard, /fn desktop_rejects_root_setuid_and_mismatched_macos_identity/);
 });
 
