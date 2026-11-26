@@ -1,5 +1,5 @@
 use crate::{
-    agent::AgentState,
+    agent::{local_model::ModelError, AgentState},
     tools::registry::{ToolCall, ToolRegistry},
 };
 use axum::{
@@ -422,8 +422,8 @@ struct ChatRequest {
     tool_call: Option<ToolCall>,
 }
 
-/// Deterministic tool-dispatch envelope, *not* a claimed LLM inference loop.
-/// An inference provider/agent planner will be added in a later milestone.
+/// Deterministic explicit tool dispatch or opt-in local text inference.
+/// Provider-driven tool execution is not enabled.
 async fn chat(
     ConnectInfo(source): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AgentState>>,
@@ -453,7 +453,31 @@ async fn chat(
                 .into_response(),
         };
     }
-    (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"No inference provider configured; pass tool_call for deterministic tool execution"}))).into_response()
+    let Some(provider) = &state.local_model else {
+        return (StatusCode::NOT_IMPLEMENTED, Json(json!({"error":"No inference provider configured; pass tool_call for deterministic tool execution"}))).into_response();
+    };
+    // Until phone identity and consent are implemented, do not relay any
+    // remote prompt, even from an authenticated tunnel peer.
+    if !source.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Model inference is restricted to local callers"})),
+        )
+            .into_response();
+    }
+    match provider.complete(&request.message).await {
+        Ok(completion) => Json(completion).into_response(),
+        Err(error) => {
+            let status = match error {
+                ModelError::InvalidPrompt => StatusCode::BAD_REQUEST,
+                ModelError::Busy => StatusCode::TOO_MANY_REQUESTS,
+                ModelError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                ModelError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+                ModelError::InvalidResponse => StatusCode::BAD_GATEWAY,
+            };
+            (status, Json(json!({"error": error.to_string()}))).into_response()
+        }
+    }
 }
 
 async fn pairing() -> impl IntoResponse {
