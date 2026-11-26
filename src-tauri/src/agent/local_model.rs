@@ -1,10 +1,12 @@
 //! First provider slice: text-only inference against an operator-selected local
 //! OpenAI-compatible server. Never forward agent credentials or tool results.
 
+use crate::{agent::AgentState, navigation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::Semaphore;
@@ -127,6 +129,29 @@ impl LocalModelProvider {
     }
 }
 
+/// The native desktop is another caller of the same provider instance and
+/// concurrency budget as authenticated loopback HTTP, not a second client.
+#[tauri::command]
+pub(crate) async fn chat_text(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<AgentState>>,
+    message: String,
+) -> Result<Completion, String> {
+    navigation::ensure_privileged_webview(&window)?;
+    complete_native_text(state.local_model.as_ref(), &message).await
+}
+
+async fn complete_native_text(
+    provider: Option<&LocalModelProvider>,
+    message: &str,
+) -> Result<Completion, String> {
+    let provider = provider.ok_or("No local inference provider configured")?;
+    provider
+        .complete(message)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn transport_error(error: reqwest::Error) -> ModelError {
     if error.is_timeout() {
         ModelError::Timeout
@@ -198,6 +223,48 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
         (LocalModelProvider::for_test(address), task)
+    }
+
+    #[tokio::test]
+    async fn native_text_uses_configured_provider_and_fixed_error_classes() {
+        assert_eq!(
+            complete_native_text(None, "hello").await.unwrap_err(),
+            "No local inference provider configured"
+        );
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(
+                    body["messages"],
+                    json!([{"role": "user", "content": "hello"}])
+                );
+                assert!(body.get("tools").is_none());
+                Json(json!({"choices": [{
+                    "message": {"role": "assistant", "content": "native fixture"},
+                    "finish_reason": "length"
+                }]}))
+            }),
+        );
+        let (provider, task) = fixture(router).await;
+        let answer = complete_native_text(Some(&provider), "hello")
+            .await
+            .unwrap();
+        assert_eq!(answer.message, "native fixture");
+        assert_eq!(answer.finish_reason, "length");
+        assert_eq!(
+            complete_native_text(Some(&provider), " ")
+                .await
+                .unwrap_err(),
+            "Invalid model prompt"
+        );
+        let _slots = provider.slots.try_acquire_many(2).unwrap();
+        assert_eq!(
+            complete_native_text(Some(&provider), "hello")
+                .await
+                .unwrap_err(),
+            "Local inference capacity exceeded"
+        );
+        task.abort();
     }
 
     #[tokio::test]
