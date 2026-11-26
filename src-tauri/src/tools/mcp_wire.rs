@@ -69,10 +69,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> WireSession<R, W> {
                 .write_all(&frame)
                 .await
                 .map_err(|_| WireError::Transport)?;
-            self.writer
-                .flush()
-                .await
-                .map_err(|_| WireError::Transport)
+            self.writer.flush().await.map_err(|_| WireError::Transport)
         })
         .await
         .unwrap_or(Err(WireError::Timeout));
