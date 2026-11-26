@@ -3,6 +3,7 @@
 //! lifecycle must supply the current scope; persisted metadata is not authority.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 const SERVICE: &str = "com.gavindu.securityagent.desktop.scoped-credential.v1";
@@ -120,7 +121,7 @@ fn locator(scope: &TrustedScope, reference: &CredentialRef) -> Result<String, Cr
     ))
 }
 
-pub(crate) fn read<S: Store>(
+fn read<S: Store>(
     store: &S,
     scope: &TrustedScope,
     reference: &CredentialRef,
@@ -129,7 +130,7 @@ pub(crate) fn read<S: Store>(
     Secret::new(store.read(SERVICE, &name)?)
 }
 
-pub(crate) fn write<S: Store>(
+fn write<S: Store>(
     store: &S,
     scope: &TrustedScope,
     reference: &CredentialRef,
@@ -139,13 +140,170 @@ pub(crate) fn write<S: Store>(
     store.write(SERVICE, &name, secret.expose())
 }
 
-pub(crate) fn delete<S: Store>(
+fn delete<S: Store>(
     store: &S,
     scope: &TrustedScope,
     reference: &CredentialRef,
 ) -> Result<(), CredentialError> {
     let name = locator(scope, reference)?;
     store.delete(SERVICE, &name)
+}
+
+
+// Staged authority for one trusted active local account. Its lock serializes
+// store operations and session transitions; do not run blocking Keychain
+// operations on an async runtime worker, or hold this lock across an await.
+const MAX_ACTIVE_CREDENTIALS: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ActiveSession {
+    account: AccountId,
+    incarnation: Uuid,
+}
+
+struct ActiveAccount {
+    session: ActiveSession,
+    slots: Vec<TrustedScope>,
+}
+
+struct AuthorityState<S> {
+    store: S,
+    active: Option<ActiveAccount>,
+}
+
+pub(crate) struct AccountAuthority<S> {
+    state: Mutex<AuthorityState<S>>,
+}
+
+impl<S: Store> AccountAuthority<S> {
+    pub(crate) fn new(store: S) -> Self {
+        Self {
+            state: Mutex::new(AuthorityState {
+                store,
+                active: None,
+            }),
+        }
+    }
+
+    /// Trusted host only. Re-activation creates a fresh incarnation even for
+    /// the same account. No persisted references are implicitly re-authorized.
+    pub(crate) fn activate(&self, account: AccountId) -> Result<ActiveSession, CredentialError> {
+        if account.0.is_nil() {
+            return Err(CredentialError::ScopeMismatch);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CredentialError::StoreUnavailable)?;
+        let session = ActiveSession {
+            account,
+            incarnation: Uuid::new_v4(),
+        };
+        state.active = Some(ActiveAccount {
+            session,
+            slots: Vec::new(),
+        });
+        Ok(session)
+    }
+
+    pub(crate) fn deactivate(&self, session: &ActiveSession) -> Result<(), CredentialError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CredentialError::StoreUnavailable)?;
+        active_for(&state.active, session)?;
+        state.active = None;
+        Ok(())
+    }
+
+    /// Only the trusted host can install new credentials. Explicit revocation
+    /// is required before replacing a live integration/purpose slot.
+    pub(crate) fn install(
+        &self,
+        session: &ActiveSession,
+        integration: Uuid,
+        purpose: Purpose,
+        secret: &Secret,
+    ) -> Result<CredentialRef, CredentialError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CredentialError::StoreUnavailable)?;
+        let AuthorityState { store, active } = &mut *state;
+        let active = active_for_mut(active, session)?;
+        if active.slots.len() >= MAX_ACTIVE_CREDENTIALS
+            || active.slots.iter().any(|slot| {
+                slot.0.integration == integration && slot.0.purpose == purpose
+            })
+        {
+            return Err(CredentialError::ScopeMismatch);
+        }
+        let scope = TrustedScope::issue(session.account, integration, purpose);
+        let reference = scope.reference();
+        write(store, &scope, &reference, secret)?;
+        active.slots.push(scope);
+        Ok(reference)
+    }
+
+    pub(crate) fn read(
+        &self,
+        session: &ActiveSession,
+        reference: &CredentialRef,
+    ) -> Result<Secret, CredentialError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CredentialError::StoreUnavailable)?;
+        let active = active_for(&state.active, session)?;
+        let scope = active
+            .slots
+            .iter()
+            .find(|slot| slot.0 == *reference)
+            .ok_or(CredentialError::ScopeMismatch)?;
+        read(&state.store, scope, reference)
+    }
+
+    /// Revoke in-process authority before attempting deletion. Backend
+    /// failure may leave an orphan item, but cannot restore its authority.
+    pub(crate) fn revoke(
+        &self,
+        session: &ActiveSession,
+        reference: &CredentialRef,
+    ) -> Result<(), CredentialError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CredentialError::StoreUnavailable)?;
+        let AuthorityState { store, active } = &mut *state;
+        let active = active_for_mut(active, session)?;
+        let index = active
+            .slots
+            .iter()
+            .position(|slot| slot.0 == *reference)
+            .ok_or(CredentialError::ScopeMismatch)?;
+        let scope = active.slots.swap_remove(index);
+        delete(store, &scope, reference)
+    }
+}
+
+fn active_for<'a>(
+    active: &'a Option<ActiveAccount>,
+    session: &ActiveSession,
+) -> Result<&'a ActiveAccount, CredentialError> {
+    active
+        .as_ref()
+        .filter(|active| active.session == *session)
+        .ok_or(CredentialError::ScopeMismatch)
+}
+
+fn active_for_mut<'a>(
+    active: &'a mut Option<ActiveAccount>,
+    session: &ActiveSession,
+) -> Result<&'a mut ActiveAccount, CredentialError> {
+    active
+        .as_mut()
+        .filter(|active| active.session == *session)
+        .ok_or(CredentialError::ScopeMismatch)
 }
 
 // Separate from the global agent-api-token. No fallback or regeneration.
@@ -350,6 +508,116 @@ mod tests {
         assert_eq!(
             read(&store, &invalid, &invalid.reference()).err(),
             Some(CredentialError::ScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn active_session_fences_old_account_and_same_account_reactivation() {
+        let authority = AccountAuthority::new(FakeStore::default());
+        let account = AccountId::issue();
+        let session = authority.activate(account).unwrap();
+        let integration = Uuid::new_v4();
+        let secret = Secret::new("fixture".into()).unwrap();
+        let reference = authority
+            .install(&session, integration, Purpose::Mcp, &secret)
+            .unwrap();
+        assert_eq!(
+            authority.read(&session, &reference).unwrap().expose(),
+            "fixture"
+        );
+        let other = authority.activate(AccountId::issue()).unwrap();
+        assert_eq!(
+            authority.read(&other, &reference).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        let again = authority.activate(account).unwrap();
+        assert_eq!(
+            authority.read(&again, &reference).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        assert_eq!(
+            authority.install(&session, integration, Purpose::Mcp, &secret).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        assert_eq!(
+            authority.deactivate(&session),
+            Err(CredentialError::ScopeMismatch)
+        );
+        let replacement = authority
+            .install(&again, integration, Purpose::Mcp, &secret)
+            .unwrap();
+        assert!(replacement != reference);
+        authority.deactivate(&again).unwrap();
+        assert_eq!(
+            authority.read(&again, &replacement).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn revocation_denies_even_if_store_delete_fails_and_rotation_uses_new_generation() {
+        let authority = AccountAuthority::new(FakeStore::default());
+        let session = authority.activate(AccountId::issue()).unwrap();
+        let integration = Uuid::new_v4();
+        let secret = Secret::new("fixture".into()).unwrap();
+        let reference = authority
+            .install(&session, integration, Purpose::Model, &secret)
+            .unwrap();
+        assert_eq!(
+            authority.install(&session, integration, Purpose::Model, &secret).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        authority.state.lock().unwrap().store.unavailable.set(true);
+        assert_eq!(
+            authority.revoke(&session, &reference),
+            Err(CredentialError::StoreUnavailable)
+        );
+        let calls = authority.state.lock().unwrap().store.calls.get();
+        assert_eq!(
+            authority.read(&session, &reference).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        assert_eq!(authority.state.lock().unwrap().store.calls.get(), calls);
+        authority.state.lock().unwrap().store.unavailable.set(false);
+        let replacement = authority
+            .install(&session, integration, Purpose::Model, &secret)
+            .unwrap();
+        assert!(reference != replacement);
+        assert_eq!(
+            authority.read(&session, &reference).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        authority.revoke(&session, &replacement).unwrap();
+    }
+
+    #[test]
+    fn authority_capacity_and_poison_fail_closed() {
+        let authority = AccountAuthority::new(FakeStore::default());
+        let session = authority.activate(AccountId::issue()).unwrap();
+        let secret = Secret::new("fixture".into()).unwrap();
+        for _ in 0..MAX_ACTIVE_CREDENTIALS {
+            authority
+                .install(&session, Uuid::new_v4(), Purpose::Mcp, &secret)
+                .unwrap();
+        }
+        assert_eq!(
+            authority.install(&session, Uuid::new_v4(), Purpose::Mcp, &secret).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _guard = authority.state.lock().unwrap();
+                panic!("fixture poison");
+            });
+            assert!(worker.join().is_err());
+        });
+        assert_eq!(
+            authority.deactivate(&session),
+            Err(CredentialError::StoreUnavailable)
+        );
+        assert_eq!(
+            authority.activate(AccountId::issue()).err(),
+            Some(CredentialError::StoreUnavailable)
         );
     }
 }
