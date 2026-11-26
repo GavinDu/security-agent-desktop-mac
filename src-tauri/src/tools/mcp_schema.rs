@@ -143,9 +143,9 @@ fn bounded(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) ->
         return false;
     }
     match value {
-        Value::Object(map) => map.iter().all(|(key, child)| {
-            spend(bytes, key.len()) && bounded(child, depth + 1, nodes, bytes)
-        }),
+        Value::Object(map) => map
+            .iter()
+            .all(|(key, child)| spend(bytes, key.len()) && bounded(child, depth + 1, nodes, bytes)),
         Value::Array(items) => items
             .iter()
             .all(|child| bounded(child, depth + 1, nodes, bytes)),
