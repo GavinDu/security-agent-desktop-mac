@@ -12,7 +12,7 @@ test('pending-approval resolution denies poisoned locks instead of panicking (#2
   // sends within a mutex guard (for shutdown ordering) or after extraction.
   assert.match(resolver, /let Ok\(mut pending\) = self\.pending\.lock\(\) else \{\s*return false;/);
   assert.match(resolver, /match pending\.remove\(&id\)/);
-  assert.match(resolver, /Some\(tx\) => tx\.send\(allow\)\.is_ok\(\)/);
+  assert.match(resolver, /Some\(entry\) => entry\.sender\.send\(allow\)\.is_ok\(\)/);
   assert.match(resolver, /self\.shutting_down\.load\(Ordering::SeqCst\)/);
   assert.doesNotMatch(resolver, /expect\("approval lock poisoned"\)/);
   assert.match(source, /fn poisoned_pending_registry_never_resolves_or_broadcasts_a_grant/);

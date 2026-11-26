@@ -34,6 +34,7 @@ pub fn run() {
             tools::commands::get_agent_status,
             agent::local_model::chat_text,
             tools::commands::respond_approval,
+            tools::commands::list_pending_approvals,
             tools::commands::set_tool_policy,
             tools::commands::set_allowed_roots,
             tools::commands::clear_allowed_roots,

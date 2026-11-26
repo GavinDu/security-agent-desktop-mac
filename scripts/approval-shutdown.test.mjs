@@ -32,7 +32,7 @@ test('shutdown and late approval cannot resurrect an old UUID (#208)', async () 
   assert.match(resolve, /pending\.remove\(&id\)/);
   const require = src.slice(src.indexOf('pub async fn require('), src.indexOf('fn cancel_pending_for_shutdown('));
   assert.match(require, /Approval system shutting down/);
-  assert.match(require, /pending\.insert\(id, sender\)/);
+  assert.match(require, /pending\.insert\(\s*id,\s*PendingApproval\s*\{[\s\S]*?sender,/);
   assert.match(src, /fn trusted_exit_cancels_thirty_two_pending_asks_and_rejects_late_replies/);
   assert.match(src, /fn poisoned_pending_shutdown_fails_closed_without_recovery_to_approve/);
   assert.match(src, /MAX_PENDING_APPROVALS/);
