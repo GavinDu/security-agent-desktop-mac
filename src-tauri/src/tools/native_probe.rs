@@ -2,7 +2,7 @@
 //! temporary synthetic file; never starts the production agent or Keychain.
 use super::{
     approvals::ApprovalGate,
-    native_session::NativeFileSession,
+    native_host::NativeFileHost,
     registry::{ToolCall, ToolRegistry},
 };
 use std::{
@@ -10,7 +10,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -23,28 +23,31 @@ const DOCUMENT: &str = r#"<!doctype html>
 <meta charset="utf-8">
 <script src="/probe.js"></script>"#;
 const SCRIPT: &str = r#"
-(async () => {
+window.runRegistryProbe = async () => {
   const redeem = ticket => fetch('security-agent-file://localhost/redeem', {
     method: 'POST', credentials: 'omit', cache: 'no-store',
     headers: {'Content-Type': 'text/plain'}, body: ticket
   });
   try {
-    const first = await redeem('__FIRST__');
+    const prepared = await fetch('/probe-prepare', {method: 'POST', cache: 'no-store'});
+    if (!prepared.ok) throw new Error('prepare failed');
+    const tickets = await prepared.json();
+    const first = await redeem(tickets.first);
     if (!first.ok || (await first.json()).content !== 'x'.repeat(65536))
       throw new Error('initial delivery failed');
-    const replay = await redeem('__FIRST__');
+    const replay = await redeem(tickets.first);
     if (replay.status !== 403 || (await replay.json()).error !== 'File read authorization changed')
       throw new Error('replay not denied');
     const clear = await fetch('/probe-clear', {method: 'POST', cache: 'no-store'});
     if (!clear.ok) throw new Error('clear not confirmed');
-    const stale = await redeem('__STALE__');
+    const stale = await redeem(tickets.stale);
     if (stale.status !== 403 || (await stale.json()).error !== 'File read authorization changed')
       throw new Error('stale result not denied');
     location.replace('tauri://localhost/probe-pass');
   } catch (_) {
     location.replace('tauri://localhost/probe-fail');
   }
-})();
+};
 "#;
 
 fn reply(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -75,22 +78,15 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
         ToolRegistry::canonical_roots(&[root.to_string_lossy().into_owned()]).unwrap(),
         ApprovalGate::new(HashMap::new()),
     ));
-    // The stale denial must be observed strictly before the 30s ticket TTL.
-    // Measure from before either ticket is created, not from window launch.
-    let prepared_at = Instant::now();
-    let (session, script) = tauri::async_runtime::block_on(async {
-        let session = Arc::new(NativeFileSession::new(Arc::clone(&registry)));
-        let call = ToolCall {
-            name: "filesystem__read_file".into(),
-            arguments: serde_json::json!({"path": root.join("canary.txt")}),
-        };
-        let first = session.prepare("main", true, call.clone()).await.unwrap();
-        let stale = session.prepare("main", true, call).await.unwrap();
-        let script = SCRIPT
-            .replace("__FIRST__", &first.to_string())
-            .replace("__STALE__", &stale.to_string());
-        (session, script)
+    let host = tauri::async_runtime::block_on(async {
+        Arc::new(NativeFileHost::new(Arc::clone(&registry)))
     });
+    let prepared_at = Arc::new(Mutex::new(None::<Instant>));
+    let call = ToolCall {
+        name: "filesystem__read_file".into(),
+        arguments: serde_json::json!({"path": root.join("canary.txt")}),
+    };
+    let prepare_started = Arc::new(AtomicBool::new(false));
     let clear_started = Arc::new(AtomicBool::new(false));
     let cleared = Arc::new(AtomicBool::new(false));
     let phase = Arc::new(AtomicUsize::new(0));
@@ -99,10 +95,12 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let fixture_registry = Arc::clone(&registry);
     let fixture_phase = Arc::clone(&phase);
     let fixture_cleared = Arc::clone(&cleared);
-    let handler_session = Arc::clone(&session);
+    let fixture_host = Arc::clone(&host);
+    let fixture_age = Arc::clone(&prepared_at);
+    let handler_host = Arc::clone(&host);
     let handler_phase = Arc::clone(&phase);
     let handler_cleared = Arc::clone(&cleared);
-    let setup_session = Arc::clone(&session);
+    let setup_host = Arc::clone(&host);
     let setup_phase = Arc::clone(&phase);
     let setup_passed = Arc::clone(&passed);
 
@@ -120,8 +118,32 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                     responder.respond(reply(
                         StatusCode::OK,
                         "application/javascript",
-                        script.as_bytes().to_vec(),
+                        SCRIPT.as_bytes().to_vec(),
                     ));
+                }
+                (&Method::POST, "tauri://localhost/probe-prepare")
+                    if trusted(&ctx) && !prepare_started.swap(true, Ordering::SeqCst) =>
+                {
+                    let Some(session) = fixture_host.active() else {
+                        responder.respond(reply(StatusCode::FORBIDDEN, "text/plain", Vec::new()));
+                        return;
+                    };
+                    let call = call.clone();
+                    let age = Arc::clone(&fixture_age);
+                    tauri::async_runtime::spawn(async move {
+                        *age.lock().unwrap() = Some(Instant::now());
+                        let result = async {
+                            let first = session.prepare("main", true, call.clone()).await?;
+                            let stale = session.prepare("main", true, call).await?;
+                            Ok::<_, String>(serde_json::json!({"first":first,"stale":stale}))
+                        }
+                        .await;
+                        let (status, body) = match result {
+                            Ok(value) => (StatusCode::OK, serde_json::to_vec(&value).unwrap()),
+                            Err(_) => (StatusCode::FORBIDDEN, Vec::new()),
+                        };
+                        responder.respond(reply(status, "application/json", body));
+                    });
                 }
                 (&Method::POST, "tauri://localhost/probe-clear")
                     if trusted(&ctx)
@@ -158,7 +180,12 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
             "security-agent-file",
             move |ctx, request, responder| {
                 let trusted_document = trusted(&ctx);
-                handler_session.redeem(
+                let Some(session) = handler_host.active() else {
+                    responder.respond(reply(StatusCode::FORBIDDEN, "text/plain", Vec::new()));
+                    return;
+                };
+                let age = prepared_at.lock().unwrap().map(|start| start.elapsed());
+                session.redeem(
                     ctx.webview_label(),
                     trusted_document,
                     &request,
@@ -170,7 +197,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                             1 => status == StatusCode::FORBIDDEN,
                             2 => {
                                 handler_cleared.load(Ordering::SeqCst)
-                                    && prepared_at.elapsed() < Duration::from_secs(25)
+                                    && age.is_some_and(|age| age < Duration::from_secs(25))
                                     && status == StatusCode::FORBIDDEN
                             }
                             _ => false,
@@ -181,7 +208,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                         eprintln!(
                             "registry handoff probe: phase={current}, status={}, trusted={trusted_document}, age_ms={}",
                             status.as_u16(),
-                            prepared_at.elapsed().as_millis()
+                            age.map_or(u128::MAX, |age| age.as_millis())
                         );
                         // This is the real Tauri/Wry responder, inside the
                         // registry-backed ticket's synchronous guard.
@@ -203,25 +230,42 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                 tauri::Url::parse("tauri://localhost/index.html").unwrap(),
             );
             let handle = app.handle().clone();
-            let session = Arc::clone(&setup_session);
+            let nav_host = Arc::clone(&setup_host);
+            let load_host = Arc::clone(&setup_host);
             let phase = Arc::clone(&setup_phase);
             let passed = Arc::clone(&setup_passed);
             let window = WebviewWindowBuilder::from_config(app, &config)?
                 .visible(true)
                 .on_navigation(move |url| match url.as_str() {
-                    "tauri://localhost/" | "tauri://localhost/index.html" => true,
+                    "tauri://localhost/" | "tauri://localhost/index.html" => {
+                        nav_host.on_navigation(url)
+                    }
                     "tauri://localhost/probe-pass" => {
-                        let ok = phase.load(Ordering::SeqCst) == 3 && session.close().is_ok();
+                        let ok = phase.load(Ordering::SeqCst) == 3 && nav_host.active().is_some();
+                        nav_host.close();
+                        let ok = ok && nav_host.active().is_none();
                         passed.store(ok, Ordering::SeqCst);
                         handle.exit(if ok { 0 } else { 1 });
                         false
                     }
                     "tauri://localhost/probe-fail" => {
-                        let _ = session.close();
+                        nav_host.close();
                         handle.exit(1);
                         false
                     }
                     _ => false,
+                })
+                .on_page_load(move |window, payload| {
+                    let event = payload.event();
+                    load_host.on_page_load(window.label(), payload.url(), event);
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        if load_host.active().is_some() {
+                            eprintln!("registry handoff probe: host lifecycle active");
+                            window.eval("window.runRegistryProbe()").expect("Start fixture script");
+                        } else {
+                            window.app_handle().exit(1);
+                        }
+                    }
                 })
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
@@ -236,7 +280,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
         std::process::exit(2);
     });
     let code = app.run_return(|_, _| {});
-    let _ = session.close();
+    host.close();
     if code == 0 && passed.load(Ordering::SeqCst) {
         println!(
             "registry handoff probe: real 64 KiB read, replay denial and post-Clear denial verified"
