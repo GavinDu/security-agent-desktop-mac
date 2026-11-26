@@ -11,9 +11,9 @@ function parseSnapshot(value: unknown): ApprovalEvent[] | null {
   const items: ApprovalEvent[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object' ||
-        typeof item.id !== 'string' || !UUID.test(item.id) || ids.has(item.id) ||
-        typeof item.tool !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(item.tool) ||
-        typeof item.preview !== 'string' || !/^[ -~]{1,8192}$/.test(item.preview)) return null;
+        typeof item.id !== 'string' || item.id.length !== 36 || !UUID.test(item.id) || ids.has(item.id) ||
+        typeof item.tool !== 'string' || item.tool.length < 1 || item.tool.length > 64 || /[^A-Za-z0-9_-]/.test(item.tool) ||
+        typeof item.preview !== 'string' || item.preview.length < 1 || item.preview.length > 8192 || /[^ -~]/.test(item.preview)) return null;
     ids.add(item.id);
     items.push({ id: item.id, tool: item.tool, preview: item.preview });
   }
