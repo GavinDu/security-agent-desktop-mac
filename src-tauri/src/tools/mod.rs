@@ -6,6 +6,8 @@ pub mod registry;
 // Staged catalog-only contract: no MCP transport or live policy/dispatch yet.
 #[allow(dead_code)]
 pub(crate) mod mcp_catalog;
+#[allow(dead_code)]
+mod mcp_schema;
 
 // Staged native delivery primitive: compile and test without exposing a new IPC route.
 #[cfg(any(test, target_os = "macos"))]
