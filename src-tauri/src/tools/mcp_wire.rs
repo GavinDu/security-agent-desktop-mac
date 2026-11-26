@@ -80,7 +80,10 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> WireSession<R, W> {
                 .write_all(&frame)
                 .await
                 .map_err(|_| WireError::Transport)?;
-            self.writer.flush().await.map_err(|_| WireError::Transport)?;
+            self.writer
+                .flush()
+                .await
+                .map_err(|_| WireError::Transport)?;
             let bytes = read_frame(&mut self.reader).await?;
             parse_response(&bytes, id)
         })
@@ -93,9 +96,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> WireSession<R, W> {
     }
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<Vec<u8>, WireError> {
+async fn read_frame<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Result<Vec<u8>, WireError> {
     let mut frame = Vec::new();
     loop {
         let available = reader.fill_buf().await.map_err(|_| WireError::Transport)?;
@@ -319,7 +320,10 @@ mod tests {
             Ok(json!({"tools":[]}))
         );
         assert_eq!(
-            parse_response(br#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"PRIVATE"}}"#, 1),
+            parse_response(
+                br#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"PRIVATE"}}"#,
+                1
+            ),
             Err(WireError::Remote)
         );
     }
@@ -339,7 +343,10 @@ mod tests {
             parse_response(&serde_json::to_vec(&nodes).unwrap(), 1),
             Err(WireError::Invalid)
         );
-        assert_eq!(encode(&json!("x".repeat(MAX_FRAME))), Err(WireError::Oversize));
+        assert_eq!(
+            encode(&json!("x".repeat(MAX_FRAME))),
+            Err(WireError::Oversize)
+        );
     }
 
     #[tokio::test]
