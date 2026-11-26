@@ -201,7 +201,8 @@ mod probe {
                     .on_navigation(move |url| match url.as_str() {
                         "tauri://localhost/" | "tauri://localhost/index.html" => true,
                         "tauri://localhost/probe-pass" => {
-                            let ok = released.load(Ordering::SeqCst) && fresh.load(Ordering::SeqCst);
+                            let ok =
+                                released.load(Ordering::SeqCst) && fresh.load(Ordering::SeqCst);
                             passed.store(ok, Ordering::SeqCst);
                             handle.exit(if ok { 0 } else { 1 });
                             false
