@@ -148,6 +148,8 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let host = tauri::async_runtime::block_on(async {
         Arc::new(NativeFileHost::new(Arc::clone(&registry)))
     });
+    let (initial_generation, initial_slot) = registry.reserve_http_file_delivery().unwrap();
+    drop(initial_slot);
     let reload_mode = std::env::var_os("SECURITY_AGENT_FIXTURE_RELOAD").is_some();
     let reload_ticket = Arc::new(Mutex::new(None::<uuid::Uuid>));
     let reload_finished = Arc::new(AtomicBool::new(false));
@@ -170,6 +172,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     let handler_ticket = Arc::clone(&reload_ticket);
     let handler_finished = Arc::clone(&reload_finished);
     let handler_host = Arc::clone(&host);
+    let handler_registry = Arc::clone(&registry);
     let setup_ticket = Arc::clone(&reload_ticket);
     let setup_finished = Arc::clone(&reload_finished);
     let setup_age = Arc::clone(&prepared_at);
@@ -226,7 +229,11 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                     }
                     drop(slot);
                     responder.respond(reply(
-                        if accepted { StatusCode::OK } else { StatusCode::FORBIDDEN },
+                        if accepted {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::FORBIDDEN
+                        },
                         "text/plain",
                         Vec::new(),
                     ));
@@ -280,6 +287,7 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
                                 && handler_finished.load(Ordering::SeqCst)
                                 && handler_host.active().is_none()
                                 && !handler_cleared.load(Ordering::SeqCst)
+                                && handler_registry.try_http_file_handoff(initial_generation).is_ok()
                                 && age.is_some_and(|age| age < Duration::from_secs(25))
                                 && status == StatusCode::FORBIDDEN
                                 && response.body().as_slice()
@@ -398,7 +406,9 @@ pub fn run(context: tauri::Context<Wry>, root: &Path) -> i32 {
     host.close();
     if code == 0 && passed.load(Ordering::SeqCst) {
         if reload_mode {
-            println!("registry handoff probe: actual reload denies retained ticket and fresh preparation without Clear");
+            println!(
+                "registry handoff probe: actual reload denies retained ticket and fresh preparation without Clear"
+            );
         } else {
             println!(
                 "registry handoff probe: strict IPC/route/frame denial, real 64 KiB read, replay and post-Clear denial verified"
