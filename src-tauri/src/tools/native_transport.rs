@@ -1,9 +1,5 @@
 //! Production native file boundary. Never return contents from Tauri IPC.
-use super::{
-    native_host::NativeFileHost,
-    native_route,
-    registry::ToolCall,
-};
+use super::{native_host::NativeFileHost, native_route, registry::ToolCall};
 use std::sync::Arc;
 use tauri::{
     http::{Request, Response},
