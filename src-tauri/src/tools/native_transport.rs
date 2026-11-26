@@ -55,6 +55,12 @@ pub(crate) fn redeem(
     if let Some(session) = session {
         session.redeem(label, true, &request, respond);
     } else {
-        native_route::dispatch(label, false, &request, |_, _| Err(DENIED.to_owned()), respond);
+        native_route::dispatch(
+            label,
+            false,
+            &request,
+            |_, _| Err(DENIED.to_owned()),
+            respond,
+        );
     }
 }

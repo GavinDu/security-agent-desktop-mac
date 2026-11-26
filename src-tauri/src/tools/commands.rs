@@ -89,6 +89,7 @@ pub async fn invoke_tool(
 // Never return file bytes through an ordinary Tauri invoke reply.
 #[tauri::command]
 pub async fn prepare_native_file(window: WebviewWindow, call: ToolCall) -> Result<String, String> {
+    navigation::ensure_privileged_webview(&window)?;
     #[cfg(target_os = "macos")]
     {
         super::native_transport::prepare(&window, call).await

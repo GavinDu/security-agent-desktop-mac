@@ -13,6 +13,7 @@ test('one strict ToolCall envelope guards Tauri IPC and HTTP routes (#141)', asy
   assert.match(registry, /struct RunInput/);
   assert.match(registry, /fn tool_call_envelope_requires_exact_fields_on_both_http_and_tauri_paths/);
   assert.match(commands, /pub async fn invoke_tool\([\s\S]*?call: ToolCall,/);
+  assert.match(commands, /pub async fn prepare_native_file\(window: WebviewWindow, call: ToolCall\) -> Result<String, String>/);
   assert.match(server, /async fn invoke_tool\([\s\S]*?Json\(call\): Json<ToolCall>/);
   assert.match(server, /tool_call: Option<ToolCall>/);
   assert.match(server, /state\.registry\.invoke\(call\)\.await/);
@@ -21,6 +22,6 @@ test('one strict ToolCall envelope guards Tauri IPC and HTTP routes (#141)', asy
 test('trusted frontend only sends the documented tool name plus arguments (#141)', async () => {
   const source = await readFile('webview/bridges/connectors.ts', 'utf8');
   assert.match(source, /interface ToolCall \{ name: string; arguments: Record<string, unknown> \}/);
-  assert.match(source, /invoke: \(call\) => invoke\('invoke_tool', \{ call \}\)/);
+  assert.match(source, /invoke: \(call\) => call.name === 'filesystem__read_file'\s*\? redeemNativeFile\(\(\) => invoke\('prepare_native_file', \{ call \}\)\)\s*: invoke\('invoke_tool', \{ call \}\)/);
   assert.doesNotMatch(source, /approvalToken|bearerToken|adminPrivileges/);
 });

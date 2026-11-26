@@ -1,10 +1,7 @@
 //! Feature-gated, isolated real WKWebView regression. The example owns a
 //! temporary synthetic file; never starts the production agent or Keychain.
 use super::{
-    approvals::ApprovalGate,
-    native_host::NativeFileHost,
-    native_transport,
-    registry::ToolRegistry,
+    approvals::ApprovalGate, native_host::NativeFileHost, native_transport, registry::ToolRegistry,
 };
 use std::{
     collections::HashMap,

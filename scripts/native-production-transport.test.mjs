@@ -22,7 +22,7 @@ test('native response uses the host-owned session and real synchronous responder
   assert.match(app, /native_transport::redeem\(ctx, request, \|response\| responder.respond\(response\)\)/);
   assert.match(transport, /ensure_privileged_webview\(window\)/);
   assert.match(transport, /session.redeem\(label, true, &request, respond\)/);
-  assert.match(transport, /native_route::dispatch\(label, false/);
+  assert.match(transport, /native_route::dispatch\(\s*label,\s*false/);
 });
 
 test('desktop bridge uses only the fenced path and CSP does not open remote frames', () => {
