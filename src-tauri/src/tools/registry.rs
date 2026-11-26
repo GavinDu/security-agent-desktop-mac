@@ -581,7 +581,7 @@ impl ToolRegistry {
         }
         match call.name.as_str() {
             "filesystem__read_file" => {
-                let input: ReadInput = serde_json::from_value(call.arguments)
+                let input: ReadInput = parse_object_arguments(call.arguments)
                     .map_err(|_| "Expected { path: string }".to_owned())?;
                 let path = self
                     .allowed_path_for_tool(PathBuf::from(&input.path), false)
@@ -627,7 +627,7 @@ impl ToolRegistry {
                 Ok(json!({ "path": path, "content": text }))
             }
             "bash__run" => {
-                let input: RunInput = serde_json::from_value(call.arguments)
+                let input: RunInput = parse_object_arguments(call.arguments)
                     .map_err(|_| "Expected { command: string, cwd: string }".to_owned())?;
                 if input.command.trim().is_empty() || input.command.len() > 4096 {
                     return Err("Invalid shell command length".into());
@@ -648,6 +648,15 @@ impl ToolRegistry {
             _ => Err("Unknown tool".into()),
         }
     }
+}
+
+// Serde structs can accept sequence representations as well as maps.
+// The advertised tool contract is an object, never positional arguments.
+fn parse_object_arguments<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, ()> {
+    if !value.is_object() {
+        return Err(());
+    }
+    serde_json::from_value(value).map_err(|_| ())
 }
 
 #[derive(Deserialize)]
@@ -751,6 +760,60 @@ mod tests {
             json!({"command":"true","cwd":"/safe","admin":true})
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_arguments_require_objects_before_preflight_or_approval() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let mut approvals = gate.subscribe();
+        let registry = ToolRegistry::new(Vec::new(), gate);
+        for (name, expected, invalid) in [
+            (
+                "filesystem__read_file",
+                "Expected { path: string }",
+                vec![
+                    json!(["/safe/file.txt"]),
+                    json!({}),
+                    json!({"path": 42}),
+                    json!({"path": "/safe", "extra": true}),
+                ],
+            ),
+            (
+                "bash__run",
+                "Expected { command: string, cwd: string }",
+                vec![
+                    json!(["true", "/safe"]),
+                    json!({"command": "true"}),
+                    json!({"command": true, "cwd": "/safe"}),
+                    json!({"command": "true", "cwd": "/safe", "extra": true}),
+                ],
+            ),
+        ] {
+            for arguments in invalid.into_iter().chain([
+                Value::Null,
+                json!(true),
+                json!(42),
+                json!("not an object"),
+            ]) {
+                let error = registry
+                    .invoke(ToolCall {
+                        name: name.into(),
+                        arguments,
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(error, expected);
+            }
+        }
+        assert!(matches!(
+            approvals.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(parse_object_arguments::<ReadInput>(json!({"path": "/safe"})).is_ok());
+        assert!(
+            parse_object_arguments::<RunInput>(json!({"command": "true", "cwd": "/safe"}))
+                .is_ok()
+        );
     }
 
     #[tokio::test]
