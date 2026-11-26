@@ -168,7 +168,9 @@ fn keychain_error(error: keyring::Error) -> CredentialError {
 #[cfg(target_os = "macos")]
 impl Store for MacKeychain {
     fn read(&self, service: &str, account: &str) -> Result<String, CredentialError> {
-        entry(service, account)?.get_password().map_err(keychain_error)
+        entry(service, account)?
+            .get_password()
+            .map_err(keychain_error)
     }
 
     fn write(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialError> {
@@ -245,10 +247,22 @@ mod tests {
         write(&store, &scope, &reference, &secret).unwrap();
         let calls = store.calls.get();
         for other in [
-            TrustedScope::issue(AccountId::issue(), integration, Purpose::Mcp),
-            TrustedScope::issue(account, Uuid::new_v4(), Purpose::Mcp),
-            TrustedScope::issue(account, integration, Purpose::Model),
-            TrustedScope::issue(account, integration, Purpose::Mcp),
+            TrustedScope(CredentialRef {
+                account: AccountId::issue(),
+                ..reference
+            }),
+            TrustedScope(CredentialRef {
+                integration: Uuid::new_v4(),
+                ..reference
+            }),
+            TrustedScope(CredentialRef {
+                purpose: Purpose::Model,
+                ..reference
+            }),
+            TrustedScope(CredentialRef {
+                generation: Uuid::new_v4(),
+                ..reference
+            }),
         ] {
             assert_eq!(
                 read(&store, &other, &reference).err(),
@@ -264,7 +278,10 @@ mod tests {
             );
         }
         assert_eq!(store.calls.get(), calls);
-        assert_eq!(read(&store, &scope, &reference).unwrap().expose(), "fixture-secret");
+        assert_eq!(
+            read(&store, &scope, &reference).unwrap().expose(),
+            "fixture-secret"
+        );
     }
 
     #[test]
@@ -281,18 +298,37 @@ mod tests {
         let secret = Secret::new("PRIVATE_CANARY".into()).unwrap();
         write(&store, &old, &decoded, &secret).unwrap();
         assert!(!encoded.contains(secret.expose()));
-        assert_ne!(locator(&old, &decoded).unwrap(), locator(&new, &new.reference()).unwrap());
-        assert_ne!(locator(&old, &decoded).unwrap(), locator(&refresh, &refresh.reference()).unwrap());
-        assert_eq!(read(&store, &new, &new.reference()).err(), Some(CredentialError::Missing));
+        assert_ne!(
+            locator(&old, &decoded).unwrap(),
+            locator(&new, &new.reference()).unwrap()
+        );
+        assert_ne!(
+            locator(&old, &decoded).unwrap(),
+            locator(&refresh, &refresh.reference()).unwrap()
+        );
+        assert_eq!(
+            read(&store, &new, &new.reference()).err(),
+            Some(CredentialError::Missing)
+        );
         delete(&store, &old, &decoded).unwrap();
-        assert_eq!(read(&store, &old, &decoded).err(), Some(CredentialError::Missing));
+        assert_eq!(
+            read(&store, &old, &decoded).err(),
+            Some(CredentialError::Missing)
+        );
         assert_eq!(store.entries.borrow().len(), 0);
     }
 
     #[test]
     fn invalid_secret_and_backend_failure_are_redacted() {
-        for value in [String::new(), "x".repeat(MAX_SECRET_BYTES + 1), "a\0b".into()] {
-            assert_eq!(Secret::new(value).err(), Some(CredentialError::InvalidSecret));
+        for value in [
+            String::new(),
+            "x".repeat(MAX_SECRET_BYTES + 1),
+            "a\0b".into(),
+        ] {
+            assert_eq!(
+                Secret::new(value).err(),
+                Some(CredentialError::InvalidSecret)
+            );
         }
         let store = FakeStore::default();
         let scope = TrustedScope::issue(AccountId::issue(), Uuid::new_v4(), Purpose::Model);
@@ -300,9 +336,20 @@ mod tests {
         store.unavailable.set(true);
         let error = read(&store, &scope, &reference).err().unwrap();
         assert_eq!(error.to_string(), "Credential store unavailable");
-        assert_eq!(write(&store, &scope, &reference, &Secret::new("secret".into()).unwrap()), Err(error));
+        assert_eq!(
+            write(
+                &store,
+                &scope,
+                &reference,
+                &Secret::new("secret".into()).unwrap()
+            ),
+            Err(error)
+        );
         assert_eq!(delete(&store, &scope, &reference), Err(error));
         let invalid = TrustedScope::issue(AccountId::issue(), Uuid::nil(), Purpose::Model);
-        assert_eq!(read(&store, &invalid, &invalid.reference()).err(), Some(CredentialError::ScopeMismatch));
+        assert_eq!(
+            read(&store, &invalid, &invalid.reference()).err(),
+            Some(CredentialError::ScopeMismatch)
+        );
     }
 }
