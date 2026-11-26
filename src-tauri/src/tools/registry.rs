@@ -29,6 +29,16 @@ const MAX_ADMITTED_PATH_PREFLIGHTS: usize = 16;
 const FILE_WORKER_WAIT: Duration = Duration::from_secs(10);
 const MAX_SHELL_OUTPUT: usize = 8 * 1024;
 
+// Printable, lossless byte escapes distinguish a literal backslash from a
+// control byte and preserve even non-UTF-8 Unix path bytes in Ask previews.
+fn escaped_preview(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .flat_map(|&byte| std::ascii::escape_default(byte))
+        .map(char::from)
+        .collect()
+}
+
 async fn wait_for_file_worker<T>(
     worker: tokio::task::JoinHandle<T>,
     max_wait: Duration,
@@ -587,7 +597,13 @@ impl ToolRegistry {
                     .allowed_path_for_tool(PathBuf::from(&input.path), false)
                     .await?;
                 self.gate
-                    .require("filesystem__read_file", &format!("Read {}", path.display()))
+                    .require(
+                        "filesystem__read_file",
+                        &format!(
+                            "path=\"{}\"",
+                            escaped_preview(path.as_os_str().as_encoded_bytes())
+                        ),
+                    )
                     .await?;
                 self.reauthorize_after_approval("filesystem__read_file", &path)
                     .await?;
@@ -638,7 +654,11 @@ impl ToolRegistry {
                 self.gate
                     .require(
                         "bash__run",
-                        &format!("{} (cwd: {})", input.command, directory.display()),
+                        &format!(
+                            "command=\"{}\"; cwd=\"{}\"",
+                            escaped_preview(input.command.as_bytes()),
+                            escaped_preview(directory.as_os_str().as_encoded_bytes())
+                        ),
                     )
                     .await?;
                 self.reauthorize_after_approval("bash__run", &directory)
@@ -715,6 +735,27 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
+    fn approval_preview_encoding_is_lossless_and_ascii_only() {
+        assert_eq!(escaped_preview(b"ordinary  text"), "ordinary  text");
+        assert_eq!(escaped_preview(b"\n"), r"\n");
+        assert_eq!(escaped_preview(b"\\n"), r"\\n");
+        assert_eq!(escaped_preview(&[0xff]), r"\xff");
+        assert_eq!(escaped_preview(b"\""), r#"\""#);
+        let encoded = escaped_preview("a\u{202e}b".as_bytes());
+        assert_eq!(encoded, r"a\xe2\x80\xaeb");
+        assert!(encoded.bytes().all(|b| b == b' ' || b.is_ascii_graphic()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let path = Path::new(std::ffi::OsStr::from_bytes(b"/safe/\xff"));
+            assert_eq!(
+                escaped_preview(path.as_os_str().as_encoded_bytes()),
+                r"/safe/\xff"
+            );
         }
     }
 
