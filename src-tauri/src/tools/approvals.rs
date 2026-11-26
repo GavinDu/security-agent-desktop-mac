@@ -524,7 +524,10 @@ mod tests {
         let _ = waiting.await;
         // Only the RAII drop cleanup may recover poisoned registry state
         // to remove an abandoned UUID. It cannot grant authorization.
-        let pending = gate.pending.lock().unwrap_err().into_inner();
+        let pending = match gate.pending.lock() {
+            Err(poisoned) => poisoned.into_inner(),
+            Ok(_) => panic!("expected poisoned pending registry"),
+        };
         assert!(pending.is_empty());
         // Release the recovered cleanup-only guard before calling resolve.
         // Holding it across the next mutex acquisition would deadlock.
