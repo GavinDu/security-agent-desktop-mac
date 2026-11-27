@@ -281,7 +281,9 @@ impl OwnedConnector {
         if !self.online || !self.child.usable {
             return Err(DiscoveryError::Process);
         }
-        self.authority.planning_catalog(&self.connector).map_err(|_| DiscoveryError::Catalog)
+        self.authority
+            .planning_catalog(&self.connector)
+            .map_err(|_| DiscoveryError::Catalog)
     }
 
     pub(crate) fn approval_gate(&self) -> Arc<ApprovalGate> {
