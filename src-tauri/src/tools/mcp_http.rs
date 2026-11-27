@@ -2,11 +2,12 @@
 //! only; no credentials, session IDs, SSE, GET stream, or external TLS.
 //! Not a production route and never falls back to a different transport.
 use super::{
-    mcp_catalog::{McpCatalog, McpDescriptor},
+    approvals::{ApprovalEpoch, ApprovalGate},
+    mcp_catalog::{McpAuthority, McpCatalog, McpDescriptor, McpPolicy},
     mcp_wire::{decode_response, encode},
 };
 use serde_json::{json, Value};
-use std::{net::SocketAddrV4, time::Duration};
+use std::{net::SocketAddrV4, sync::Arc, time::Duration};
 
 const PROTOCOL: &str = "2025-06-18";
 const LIMIT: usize = 64 * 1024;
@@ -24,6 +25,8 @@ pub(crate) enum HttpMcpError {
     Oversize,
     #[error("MCP HTTP deadline exceeded")]
     Deadline,
+    #[error("MCP HTTP authorization denied")]
+    Authorization,
     #[error("MCP HTTP catalog rejected")]
     Catalog,
     #[error("MCP HTTP session unavailable")]
@@ -252,6 +255,117 @@ impl HttpDiscovery {
     }
 }
 
+
+/// Trusted owner of the fixed stateless HTTP transport. No untrusted route
+/// or credential configuration. A retained owner never acquires a fresh epoch.
+pub(crate) struct OwnedHttpConnector {
+    connector: String,
+    transport: HttpDiscovery,
+    authority: McpAuthority,
+    gate: Arc<ApprovalGate>,
+    epoch: ApprovalEpoch,
+    online: bool,
+}
+
+impl OwnedHttpConnector {
+    pub(crate) async fn connect(
+        connector: String,
+        address: SocketAddrV4,
+        gate: Arc<ApprovalGate>,
+    ) -> Result<Self, HttpMcpError> {
+        let epoch = gate.current_epoch().map_err(|_| HttpMcpError::Authorization)?;
+        let dispatch = gate.clone();
+        let _lease = dispatch.dispatch_for_epoch(epoch).await.map_err(|_| HttpMcpError::Authorization)?;
+        let transport = HttpDiscovery::connect(address).await?;
+        let mut owner = Self {
+            connector,transport,authority:McpAuthority::default(),gate,epoch,online:false,
+        };
+        owner.refresh_admitted().await?;
+        Ok(owner)
+    }
+
+    fn check_epoch(&self) -> Result<(), HttpMcpError> {
+        self.gate.ensure_epoch(self.epoch).map_err(|_| HttpMcpError::Authorization)
+    }
+
+    pub(crate) async fn refresh(&mut self) -> Result<(), HttpMcpError> {
+        let gate = self.gate.clone();
+        let _lease = gate.dispatch_for_epoch(self.epoch).await.map_err(|_| HttpMcpError::Authorization)?;
+        self.refresh_admitted().await
+    }
+
+    async fn refresh_admitted(&mut self) -> Result<(), HttpMcpError> {
+        if !self.transport.usable {
+            return Err(HttpMcpError::Closed);
+        }
+        self.online = false;
+        self.authority.remove(&self.connector).map_err(|_| HttpMcpError::Catalog)?;
+        let result = tokio::time::timeout(Duration::from_secs(30),self.transport.discover()).await;
+        self.transport.usable = false;
+        let descriptors = result.map_err(|_| HttpMcpError::Deadline)??;
+        self.authority.replace(&self.connector,descriptors).map_err(|_| HttpMcpError::Catalog)?;
+        self.transport.usable = true;
+        self.online = true;
+        Ok(())
+    }
+
+    pub(crate) fn set_policy(&mut self, function: &str, policy: McpPolicy) -> Result<(), HttpMcpError> {
+        self.check_epoch()?;
+        if !self.online {
+            return Err(HttpMcpError::Closed);
+        }
+        self.authority.set_policy(function,policy).map_err(|_| HttpMcpError::Authorization)
+    }
+
+    pub(crate) fn planning_catalog(&self) -> Result<McpCatalog, HttpMcpError> {
+        self.check_epoch()?;
+        if !self.online || !self.transport.usable {
+            return Err(HttpMcpError::Closed);
+        }
+        self.authority.planning_catalog(&self.connector).map_err(|_| HttpMcpError::Catalog)
+    }
+
+    /// The returned value is undisclosed. No permission to publish to a
+    /// model, peer or external route follows from execution authorization.
+    pub(crate) async fn call(&mut self, function: &str, arguments: Value) -> Result<Value, HttpMcpError> {
+        self.check_epoch()?;
+        if !self.online || !self.transport.usable {
+            return Err(HttpMcpError::Closed);
+        }
+        let plan = self.authority.prepare(function,arguments).map_err(|_| HttpMcpError::Authorization)?;
+        if plan.policy() == McpPolicy::Ask {
+            let bytes = serde_json::to_vec(&json!({
+                "destination":self.transport.endpoint,
+                "tool":plan.function(),"arguments":plan.arguments()
+            })).map_err(|_| HttpMcpError::Authorization)?;
+            let preview: String = bytes.iter().flat_map(|&byte|std::ascii::escape_default(byte)).map(char::from).collect();
+            self.gate.require_explicit_ask_for_epoch(self.epoch,plan.function(),&preview).await
+                .map_err(|_| HttpMcpError::Authorization)?;
+        }
+        let gate = self.gate.clone();
+        let _lease = gate.dispatch_for_epoch(self.epoch).await.map_err(|_| HttpMcpError::Authorization)?;
+        self.authority.recheck(&plan).map_err(|_| HttpMcpError::Authorization)?;
+        let remote = plan.function().split_once("__").map(|(_,remote)|remote).ok_or(HttpMcpError::Catalog)?;
+        // Cancellation, protocol failure, oversized or error result never
+        // permits re-use of a possibly side-effecting exchange.
+        self.online = false;
+        let result = self.transport.request("tools/call",json!({"name":remote,"arguments":plan.arguments()})).await?;
+        if !result.is_object()
+            || !result.get("content").is_some_and(Value::is_array)
+            || result.get("isError").is_some_and(|v| !v.is_boolean() || v.as_bool() == Some(true))
+        {
+            self.transport.usable = false;
+            return Err(HttpMcpError::Protocol);
+        }
+        if serde_json::to_vec(&result).map_err(|_| HttpMcpError::Protocol)?.len() > 8192 {
+            self.transport.usable = false;
+            return Err(HttpMcpError::Oversize);
+        }
+        self.online = true;
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +508,68 @@ mod tests {
             );
             task.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn owned_http_default_deny_ask_and_epoch_revocation() {
+        use std::sync::atomic::{AtomicUsize,Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let router = Router::new().route("/mcp",post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let id = body["id"].as_u64().unwrap_or_default();
+                match body["method"].as_str().unwrap() {
+                    "initialize" => Json(initialized()).into_response(),
+                    "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+                    "tools/list" => Json(json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}})).into_response(),
+                    "tools/call" => {
+                        let index = seen.fetch_add(1,Ordering::SeqCst);
+                        assert_eq!(body["params"]["name"],"read");
+                        assert_eq!(body["params"]["arguments"],json!({}));
+                        let reply_id = if index == 0 { id } else { 999 };
+                        Json(json!({"jsonrpc":"2.0","id":reply_id,"result":{"content":[{"type":"text","text":"fixture"}]}})).into_response()
+                    }
+                    _ => panic!("unexpected method"),
+                }
+            }
+        }));
+        let (address,task) = fixture(router).await;
+        let gate = ApprovalGate::new(std::collections::HashMap::from([(
+            "fixture__read".into(),super::super::approvals::Policy::Auto,
+        )]));
+        let mut events = gate.subscribe();
+        let mut owner = OwnedHttpConnector::connect("fixture".into(),address,gate.clone()).await.unwrap();
+        assert!(owner.planning_catalog().unwrap().openai_functions().is_empty());
+        assert_eq!(owner.call("fixture__read",json!({})).await,Err(HttpMcpError::Authorization));
+        owner.set_policy("fixture__read",McpPolicy::Ask).unwrap();
+        assert_eq!(owner.call("fixture__read",json!({"unexpected":true})).await,Err(HttpMcpError::Authorization));
+        for allow in [false,true] {
+            let decide = async {
+                let request = tokio::time::timeout(Duration::from_secs(5),events.recv()).await.unwrap().unwrap();
+                assert_eq!(request.tool,"fixture__read");
+                assert!(request.preview.contains(&format!("http://{address}/mcp")));
+                assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(),allow).await);
+            };
+            let (result,()) = tokio::join!(owner.call("fixture__read",json!({})),decide);
+            if allow {
+                assert_eq!(result.unwrap()["content"][0]["text"],"fixture");
+            } else {
+                assert_eq!(result,Err(HttpMcpError::Authorization));
+                assert_eq!(calls.load(Ordering::SeqCst),0);
+            }
+        }
+        gate.rotate_after_dispatch().await.unwrap();
+        assert!(owner.planning_catalog().is_err());
+        assert_eq!(owner.refresh().await,Err(HttpMcpError::Authorization));
+        assert_eq!(owner.call("fixture__read",json!({})).await,Err(HttpMcpError::Authorization));
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+        let mut fresh = OwnedHttpConnector::connect("fixture".into(),address,gate).await.unwrap();
+        assert_eq!(fresh.call("fixture__read",json!({})).await,Err(HttpMcpError::Authorization));
+        fresh.set_policy("fixture__read",McpPolicy::Auto).unwrap();
+        assert_eq!(fresh.call("fixture__read",json!({})).await,Err(HttpMcpError::Protocol));
+        assert_eq!(fresh.call("fixture__read",json!({})).await,Err(HttpMcpError::Closed));
+        assert_eq!(calls.load(Ordering::SeqCst),2);
+        task.abort();
     }
 }
