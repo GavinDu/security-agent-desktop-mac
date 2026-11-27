@@ -229,6 +229,15 @@ impl ApprovalGate {
         self.rotate_epoch()
     }
 
+    /// Terminal per-session retirement: latch admission closed and drain
+    /// pending Ask before waiting on existing bounded transport exchanges.
+    /// Cancellation while waiting never reopens the retired gate.
+    pub(crate) async fn retire_after_dispatch(&self) -> Result<(), String> {
+        self.cancel_pending_for_shutdown()?;
+        let _exclusive = self.dispatch.write().await;
+        Ok(())
+    }
+
     pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
         let epoch = self.current_epoch()?;
         self.require_for_epoch(epoch, tool, preview).await
