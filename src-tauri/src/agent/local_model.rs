@@ -101,11 +101,31 @@ impl LocalModelProvider {
             "stream": false,
             "max_tokens": 1024
         });
+        let bytes = self.request_bytes(&payload).await?;
+        parse_completion(&bytes)
+    }
+
+    pub(super) async fn structured_request(&self, payload: &Value) -> Result<Vec<u8>, ModelError> {
+        let _slot = self.slots.try_acquire().map_err(|_| ModelError::Busy)?;
+        tokio::time::timeout(DEADLINE, self.request_bytes(payload))
+            .await
+            .map_err(|_| ModelError::Timeout)?
+    }
+
+    pub(super) fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    async fn request_bytes(&self, payload: &Value) -> Result<Vec<u8>, ModelError> {
+        let body = serde_json::to_vec(payload).map_err(|_| ModelError::InvalidPrompt)?;
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(ModelError::InvalidPrompt);
+        }
         let mut response = self
             .client
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(payload.to_string())
+            .body(body)
             .send()
             .await
             .map_err(transport_error)?;
@@ -125,7 +145,7 @@ impl LocalModelProvider {
             }
             bytes.extend_from_slice(&chunk);
         }
-        parse_completion(&bytes)
+        Ok(bytes)
     }
 }
 
