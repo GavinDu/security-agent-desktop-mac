@@ -30,6 +30,6 @@ test('poison cleanup can remove abandoned UUID but never grant (#205)', async ()
   assert.match(approval, /\.lock\(\)\s*\.map_err\(\|_\| "Approval system unavailable"\)/);
   const tests = source.slice(source.indexOf('fn poisoned_pending_registry_never_resolves_or_broadcasts_a_grant'));
   assert.match(tests, /waiting\.abort\(\)/);
-  assert.match(tests, /assert!\(pending\.is_empty\(\)\)/);
+  assert.match(tests, /assert!\(pending\.entries\.is_empty\(\)\)/);
   assert.match(tests, /TryRecvError::Empty/);
 });
