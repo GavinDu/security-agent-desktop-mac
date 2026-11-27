@@ -10,7 +10,10 @@ use super::{
         Planner, ProviderCall,
     },
 };
-use crate::tools::{approvals::{ApprovalEpoch, ApprovalGate}, mcp_stdio_discovery::OwnedConnector};
+use crate::tools::{
+    approvals::{ApprovalEpoch, ApprovalGate},
+    mcp_stdio_discovery::OwnedConnector,
+};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -42,12 +45,19 @@ pub(crate) async fn run(
         model: provider.model_name(),
         calls: Vec::new(),
     };
-    let mut executor = ConnectorExecutor { connector, gate: gate.clone(), epoch };
+    let mut executor = ConnectorExecutor {
+        connector,
+        gate: gate.clone(),
+        epoch,
+    };
     let answer = tool_loop::run(&mut planner, &mut executor, prompt, allowed_names).await?;
-    let _lease = gate.dispatch_for_epoch(epoch).await.map_err(|_| LoopFailure {
-        reason: LoopError::InvalidAuthority,
-        confirmed_executions: answer.confirmed_executions,
-    })?;
+    let _lease = gate
+        .dispatch_for_epoch(epoch)
+        .await
+        .map_err(|_| LoopFailure {
+            reason: LoopError::InvalidAuthority,
+            confirmed_executions: answer.confirmed_executions,
+        })?;
     Ok(answer)
 }
 
@@ -137,7 +147,11 @@ impl Planner for ReleasePlanner<'_> {
                 .await
                 .map_err(|_| ())?;
         }
-        let _lease = self.gate.dispatch_for_epoch(self.epoch).await.map_err(|_| ())?;
+        let _lease = self
+            .gate
+            .dispatch_for_epoch(self.epoch)
+            .await
+            .map_err(|_| ())?;
         let step = self.inner.next(prompt, names, observations).await?;
         if let ModelStep::Call(call) = &step {
             self.calls.push(ProviderCall {
@@ -242,7 +256,11 @@ IFS= read -r line
                     );
                     if rotate_before_send && index == 1 {
                         gate.rotate_after_dispatch().await.unwrap();
-                        assert!(!gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true).await);
+                        assert!(
+                            !gate
+                                .resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true)
+                                .await
+                        );
                         break;
                     }
                     if index == 3 {
