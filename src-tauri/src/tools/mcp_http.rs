@@ -275,6 +275,15 @@ impl OwnedHttpConnector {
         let epoch = gate
             .current_epoch()
             .map_err(|_| HttpMcpError::Authorization)?;
+        Self::connect_for_epoch(connector, address, gate, epoch).await
+    }
+
+    pub(super) async fn connect_for_epoch(
+        connector: String,
+        address: SocketAddrV4,
+        gate: Arc<ApprovalGate>,
+        epoch: ApprovalEpoch,
+    ) -> Result<Self, HttpMcpError> {
         let dispatch = gate.clone();
         let _lease = dispatch
             .dispatch_for_epoch(epoch)
