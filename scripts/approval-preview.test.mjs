@@ -8,7 +8,7 @@ test('Ask never silently truncates a tool preview before approval', async () => 
   const ask = gate.indexOf('Policy::Ask => {');
   const limit = gate.indexOf('preview.len() > MAX_APPROVAL_PREVIEW_BYTES', ask);
   const preview = gate.indexOf('preview: preview.to_owned()', limit);
-  const insert = gate.indexOf('pending.insert(', preview);
+  const insert = gate.indexOf('pending.entries.insert(', preview);
   const emit = gate.indexOf('self.events.send(request)', insert);
   assert.ok(ask > 0 && limit > ask && preview > limit && insert > preview && emit > insert);
   assert.doesNotMatch(gate, /preview\.chars\(\)\.take\(/);
