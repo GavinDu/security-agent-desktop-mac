@@ -168,6 +168,11 @@ impl ApprovalGate {
     }
 
     pub(crate) fn current_epoch(&self) -> Result<ApprovalEpoch, String> {
+        // Preserve terminal shutdown precedence even if pending state is
+        // poisoned. Check again under the mutex for a racing shutdown.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Approval system shutting down".into());
+        }
         let pending = self
             .pending
             .lock()
