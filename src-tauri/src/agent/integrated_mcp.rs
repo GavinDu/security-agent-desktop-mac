@@ -218,13 +218,11 @@ IFS= read -r line
             let names = BTreeSet::from(["fixture__read".into()]);
             let decisions = async {
                 for index in 0..4 {
-                    let request = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        events.recv(),
-                    )
-                    .await
-                    .expect("approval fixture timed out")
-                    .unwrap();
+                    let request =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                            .await
+                            .expect("approval fixture timed out")
+                            .unwrap();
                     assert_eq!(
                         request.tool,
                         if index % 2 == 0 {
