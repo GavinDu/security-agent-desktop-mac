@@ -306,6 +306,9 @@ impl OwnedConnector {
                 .await
                 .map_err(|_| DiscoveryError::Catalog)?;
         }
+        self.gate
+            .ensure_running()
+            .map_err(|_| DiscoveryError::Catalog)?;
         self.authority
             .recheck(&plan)
             .map_err(|_| DiscoveryError::Catalog)?;
@@ -556,6 +559,43 @@ IFS= read -r line
         assert_eq!(
             owner.call("fixture__read", json!({})).await,
             Err(DiscoveryError::Protocol)
+        );
+        assert_eq!(
+            owner.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Process)
+        );
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_wire_wait_cannot_reuse_connector() {
+        let script = format!(
+            "{START}{}",
+            r#"
+IFS= read -r line || exit 5
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}}'
+IFS= read -r line || exit 6
+IFS= read -r line
+"#
+        );
+        let gate = ApprovalGate::new(Default::default());
+        let mut owner = OwnedConnector::connect(
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            Path::new("/"),
+            gate,
+        )
+        .await
+        .unwrap();
+        owner.set_policy("fixture__read", McpPolicy::Auto).unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                owner.call("fixture__read", json!({}))
+            )
+            .await
+            .is_err()
         );
         assert_eq!(
             owner.call("fixture__read", json!({})).await,
