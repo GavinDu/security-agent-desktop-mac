@@ -33,3 +33,7 @@ pub(crate) mod native_transport;
 // Staged wire boundary; no subprocess or live tool dispatch.
 #[allow(dead_code)]
 pub(crate) mod mcp_wire;
+
+// Staged direct-child discovery only; no live connector execution.
+#[allow(dead_code)]
+pub(crate) mod mcp_stdio_discovery;

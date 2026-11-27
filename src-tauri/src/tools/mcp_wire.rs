@@ -54,6 +54,31 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> WireSession<R, W> {
         self.request_with_deadline(method, params, DEADLINE).await
     }
 
+    /// Only the initialized notification is supported by this staged codec.
+    /// Cancellation or write failure makes the session permanently unusable.
+    pub(crate) async fn notify_initialized(&mut self) -> Result<(), WireError> {
+        if self.unusable {
+            return Err(WireError::Closed);
+        }
+        let frame = encode(&serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/initialized"
+        }))?;
+        self.unusable = true;
+        let result = tokio::time::timeout(DEADLINE, async {
+            self.writer
+                .write_all(&frame)
+                .await
+                .map_err(|_| WireError::Transport)?;
+            self.writer.flush().await.map_err(|_| WireError::Transport)
+        })
+        .await
+        .unwrap_or(Err(WireError::Timeout));
+        if result.is_ok() {
+            self.unusable = false;
+        }
+        result
+    }
+
     async fn request_with_deadline(
         &mut self,
         method: &str,
