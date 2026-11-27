@@ -830,9 +830,11 @@ mod tests {
         let epoch = gate.current_epoch().unwrap();
         let lease = gate.dispatch_for_epoch(epoch).await.unwrap();
         let mut rotation = Box::pin(gate.rotate_after_dispatch());
-        assert!(tokio::time::timeout(Duration::from_millis(5), &mut rotation)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut rotation)
+                .await
+                .is_err()
+        );
         drop(lease);
         let current = rotation.await.unwrap();
         assert!(gate.dispatch_for_epoch(epoch).await.is_err());
