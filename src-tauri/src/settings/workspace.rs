@@ -1,7 +1,9 @@
 //! Trusted-host workspace activation. No account identity from IPC/HTTP.
 //! This coordinator owns the credential authority and pinned settings handle.
 //! Production integration must first revoke old approval/root/peer authority.
-use super::{enrollment::EnrollmentStore, scoped_settings::AccountSettingsDirectory, AgentSettings};
+use super::{
+    enrollment::EnrollmentStore, scoped_settings::AccountSettingsDirectory, AgentSettings,
+};
 use crate::{
     account_credentials::{
         AccountAuthority, AccountId, ActiveSession, CredentialRef, Purpose, Secret, Store,
@@ -64,7 +66,9 @@ impl<S: Store> WorkspaceCoordinator<S> {
         account: AccountId,
     ) -> Result<ActiveSession, WorkspaceError> {
         self.clear_active()?;
-        let directory = enrollment.open_account(account).map_err(|_| WorkspaceError::Settings)?;
+        let directory = enrollment
+            .open_account(account)
+            .map_err(|_| WorkspaceError::Settings)?;
         self.activate_directory(account, directory)
     }
 
@@ -286,7 +290,11 @@ mod tests {
         let mut host = WorkspaceCoordinator::new(base.path(), FixtureStore::default());
         let first = host.activate_enrolled(&enrollment, account).unwrap();
         assert!(host.settings(&first).is_ok());
-        assert_eq!(host.activate_enrolled(&enrollment, AccountId::issue()).err(), Some(WorkspaceError::Settings));
+        assert_eq!(
+            host.activate_enrolled(&enrollment, AccountId::issue())
+                .err(),
+            Some(WorkspaceError::Settings)
+        );
         assert!(host.settings(&first).is_err());
         drop(host);
         drop(enrollment);
