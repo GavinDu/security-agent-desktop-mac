@@ -207,7 +207,6 @@ impl StdioDiscovery {
     }
 }
 
-
 /// Exclusive owner of one connector. No external catalog or transport
 /// authority is exposed. Rust's mutable borrow serializes policy mutation,
 /// discovery and dispatch through the complete bounded response. A canceled
@@ -295,8 +294,8 @@ impl OwnedConnector {
         if plan.policy() == McpPolicy::Ask {
             // Escapes preserve every byte, including non-ASCII and backslash.
             // Shared gate rejects any preview that cannot be shown in full.
-            let bytes = serde_json::to_vec(plan.arguments())
-                .map_err(|_| DiscoveryError::Catalog)?;
+            let bytes =
+                serde_json::to_vec(plan.arguments()).map_err(|_| DiscoveryError::Catalog)?;
             let preview: String = bytes
                 .iter()
                 .flat_map(|&byte| std::ascii::escape_default(byte))
@@ -322,7 +321,10 @@ impl OwnedConnector {
         let result = self
             .child
             .wire
-            .request("tools/call", json!({"name":remote,"arguments":plan.arguments()}))
+            .request(
+                "tools/call",
+                json!({"name":remote,"arguments":plan.arguments()}),
+            )
             .await
             .map_err(|_| DiscoveryError::Protocol)?;
         if !result.is_object()
@@ -508,15 +510,22 @@ IFS= read -r line
         let deny = async {
             let request = events.recv().await.unwrap();
             assert_eq!(request.tool, "fixture__read");
-            assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), false).await);
+            assert!(
+                gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), false)
+                    .await
+            );
         };
         let (result, ()) = tokio::join!(owner.call("fixture__read", json!({"query":"ok"})), deny);
         assert_eq!(result, Err(DiscoveryError::Catalog));
         let approve = async {
             let request = events.recv().await.unwrap();
-            assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true).await);
+            assert!(
+                gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true)
+                    .await
+            );
         };
-        let (result, ()) = tokio::join!(owner.call("fixture__read", json!({"query":"ok"})), approve);
+        let (result, ()) =
+            tokio::join!(owner.call("fixture__read", json!({"query":"ok"})), approve);
         assert_eq!(result.unwrap()["content"][0]["text"], "fixture");
         owner.shutdown().await.unwrap();
     }
