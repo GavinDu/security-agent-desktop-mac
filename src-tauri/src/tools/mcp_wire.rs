@@ -167,7 +167,7 @@ impl io::Write for BoundedWriter {
     }
 }
 
-fn encode(value: &Value) -> Result<Vec<u8>, WireError> {
+pub(super) fn encode(value: &Value) -> Result<Vec<u8>, WireError> {
     // Validate shape before serialization (including trusted outbound values).
     let mut nodes = MAX_NODES;
     if !bounded_shape(value, 0, &mut nodes) {
@@ -302,6 +302,12 @@ fn parse_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
     if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
         return Err(WireError::Invalid);
     }
+    decode_response(bytes, id)
+}
+
+/// HTTP JSON responses share exact JSON-RPC response validation without
+/// applying the stdio newline framing restriction.
+pub(super) fn decode_response(bytes: &[u8], id: u64) -> Result<Value, WireError> {
     let mut map = match decode_unique(bytes)? {
         Value::Object(map) => map,
         _ => return Err(WireError::Invalid),
