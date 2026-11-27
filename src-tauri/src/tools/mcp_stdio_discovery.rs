@@ -297,7 +297,10 @@ impl OwnedConnector {
         function: &str,
         arguments: Value,
     ) -> Result<Value, DiscoveryError> {
-        let epoch = self.gate.current_epoch().map_err(|_| DiscoveryError::Catalog)?;
+        let epoch = self
+            .gate
+            .current_epoch()
+            .map_err(|_| DiscoveryError::Catalog)?;
         self.call_for_epoch(epoch, function, arguments).await
     }
 
@@ -307,7 +310,9 @@ impl OwnedConnector {
         function: &str,
         arguments: Value,
     ) -> Result<Value, DiscoveryError> {
-        self.gate.ensure_epoch(epoch).map_err(|_| DiscoveryError::Catalog)?;
+        self.gate
+            .ensure_epoch(epoch)
+            .map_err(|_| DiscoveryError::Catalog)?;
         if !self.online || !self.child.usable {
             return Err(DiscoveryError::Process);
         }
