@@ -2,7 +2,7 @@
 //! Trusted host chooses the executable, argv and cwd. Never expose these
 //! configuration inputs to a model or remote IPC. No tools/call entrypoint.
 use super::{
-    approvals::ApprovalGate,
+    approvals::{ApprovalEpoch, ApprovalGate},
     mcp_catalog::{McpAuthority, McpCatalog, McpDescriptor, McpPolicy},
     mcp_wire::WireSession,
 };
@@ -297,6 +297,17 @@ impl OwnedConnector {
         function: &str,
         arguments: Value,
     ) -> Result<Value, DiscoveryError> {
+        let epoch = self.gate.current_epoch().map_err(|_| DiscoveryError::Catalog)?;
+        self.call_for_epoch(epoch, function, arguments).await
+    }
+
+    pub(crate) async fn call_for_epoch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        function: &str,
+        arguments: Value,
+    ) -> Result<Value, DiscoveryError> {
+        self.gate.ensure_epoch(epoch).map_err(|_| DiscoveryError::Catalog)?;
         if !self.online || !self.child.usable {
             return Err(DiscoveryError::Process);
         }
@@ -315,12 +326,14 @@ impl OwnedConnector {
                 .map(char::from)
                 .collect();
             self.gate
-                .require_explicit_ask(plan.function(), &preview)
+                .require_explicit_ask_for_epoch(epoch, plan.function(), &preview)
                 .await
                 .map_err(|_| DiscoveryError::Catalog)?;
         }
-        self.gate
-            .ensure_running()
+        let gate = self.gate.clone();
+        let _lease = gate
+            .dispatch_for_epoch(epoch)
+            .await
             .map_err(|_| DiscoveryError::Catalog)?;
         self.authority
             .recheck(&plan)
