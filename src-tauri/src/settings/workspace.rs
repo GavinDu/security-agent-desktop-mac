@@ -1,7 +1,9 @@
 //! Trusted-host workspace activation. No account identity from IPC/HTTP.
 //! This coordinator owns the credential authority and pinned settings handle.
 //! Production integration must first revoke old approval/root/peer authority.
-use super::{scoped_settings::AccountSettingsDirectory, AgentSettings};
+use super::{
+    enrollment::EnrollmentStore, scoped_settings::AccountSettingsDirectory, AgentSettings,
+};
 use crate::{
     account_credentials::{
         AccountAuthority, AccountId, ActiveSession, CredentialRef, Purpose, Secret, Store,
@@ -44,19 +46,47 @@ impl<S: Store> WorkspaceCoordinator<S> {
 
     /// A failed switch never restores the old workspace or authorizes a
     /// target from unvalidated disk state. Only a trusted host calls this.
+    #[cfg(test)]
     pub(crate) fn activate(
         &mut self,
         account: AccountId,
         create: bool,
     ) -> Result<ActiveSession, WorkspaceError> {
+        self.clear_active()?;
+        let directory = AccountSettingsDirectory::open(&self.support, account.as_uuid(), create)
+            .map_err(|_| WorkspaceError::Settings)?
+            .ok_or(WorkspaceError::Settings)?;
+        self.activate_directory(account, directory)
+    }
+
+    /// Explicit enrolled identity only; never discover authority by scanning
+    /// directories. The manifest owner supplies the pinned root.
+    pub(crate) fn activate_enrolled(
+        &mut self,
+        enrollment: &EnrollmentStore,
+        account: AccountId,
+    ) -> Result<ActiveSession, WorkspaceError> {
+        self.clear_active()?;
+        let directory = enrollment
+            .open_account(account)
+            .map_err(|_| WorkspaceError::Settings)?;
+        self.activate_directory(account, directory)
+    }
+
+    fn clear_active(&mut self) -> Result<(), WorkspaceError> {
         if let Some(previous) = self.active.take() {
             self.credentials
                 .deactivate(&previous.session)
                 .map_err(|_| WorkspaceError::Unavailable)?;
         }
-        let directory = AccountSettingsDirectory::open(&self.support, account.as_uuid(), create)
-            .map_err(|_| WorkspaceError::Settings)?
-            .ok_or(WorkspaceError::Settings)?;
+        Ok(())
+    }
+
+    fn activate_directory(
+        &mut self,
+        account: AccountId,
+        directory: AccountSettingsDirectory,
+    ) -> Result<ActiveSession, WorkspaceError> {
         let settings = directory.load().map_err(|_| WorkspaceError::Settings)?;
         // Validate every stored root using the existing pinned-root checks.
         // Do not claim these temporary descriptors authorize actual I/O.
@@ -251,5 +281,29 @@ mod tests {
         );
         assert!(host.settings(&next).is_err());
         assert!(host.active.is_none());
+    }
+
+    #[test]
+    fn explicit_enrollment_activation_rejects_unknown_and_preserves_no_active_restart() {
+        let base = tempfile::tempdir().unwrap();
+        let mut enrollment = EnrollmentStore::open(base.path()).unwrap();
+        let account = enrollment.enroll().unwrap();
+        let mut host = WorkspaceCoordinator::new(base.path(), FixtureStore::default());
+        let first = host.activate_enrolled(&enrollment, account).unwrap();
+        assert!(host.settings(&first).is_ok());
+        assert_eq!(
+            host.activate_enrolled(&enrollment, AccountId::issue())
+                .err(),
+            Some(WorkspaceError::Settings)
+        );
+        assert!(host.settings(&first).is_err());
+        drop(host);
+        drop(enrollment);
+        let enrollment = EnrollmentStore::open(base.path()).unwrap();
+        let mut host = WorkspaceCoordinator::new(base.path(), FixtureStore::default());
+        assert!(host.settings(&first).is_err());
+        let next = host.activate_enrolled(&enrollment, account).unwrap();
+        assert!(host.settings(&next).is_ok());
+        assert!(host.settings(&first).is_err());
     }
 }

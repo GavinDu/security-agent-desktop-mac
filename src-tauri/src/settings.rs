@@ -27,6 +27,10 @@ mod scoped_settings;
 #[allow(dead_code)]
 pub(crate) mod workspace;
 
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) mod enrollment;
+
 /// Open and pin the final application support directory, not a pathname leaf
 /// that can be swapped after a metadata preflight. Earlier ancestors remain
 /// outside this narrow protection and need separate privileged OS policy.
