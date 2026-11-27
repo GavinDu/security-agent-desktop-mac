@@ -228,6 +228,40 @@ impl CallPlan {
 }
 
 impl McpAuthority {
+    /// Metadata snapshot only, filtered to currently enabled exact tools.
+    /// The owned connector still revalidates every actual call.
+    pub(crate) fn planning_catalog(&self, connector: &str) -> Result<McpCatalog, AdmissionError> {
+        let state = self.state.lock().map_err(|_| AdmissionError::Unavailable)?;
+        let authority = state
+            .connectors
+            .get(connector)
+            .ok_or(AdmissionError::Denied)?;
+        let tools = state
+            .catalog
+            .connectors
+            .get(connector)
+            .ok_or(AdmissionError::Denied)?;
+        let descriptors = tools
+            .values()
+            .filter(|tool| {
+                authority
+                    .policies
+                    .get(&tool.function_name)
+                    .is_some_and(|(policy, _)| *policy != McpPolicy::Disable)
+            })
+            .map(|tool| McpDescriptor {
+                name: tool.remote_name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+            .collect();
+        let mut catalog = McpCatalog::default();
+        catalog
+            .replace_connector(connector, descriptors)
+            .map_err(|_| AdmissionError::Catalog)?;
+        Ok(catalog)
+    }
+
     pub(crate) fn replace(
         &self,
         connector: &str,
