@@ -77,6 +77,12 @@ impl AccountSettingsDirectory {
         }
     }
 
+    /// Enrollment must persist the fresh settings leaf before publishing
+    /// the account identity in the parent manifest.
+    pub(super) fn sync_directory(&self) -> Result<(), String> {
+        self.directory.sync_all().map_err(|_| "Account directory sync failed".into())
+    }
+
     pub(super) fn load(&self) -> Result<AgentSettings, String> {
         let leaf = CString::new("settings.json").expect("fixed name");
         let file = match open_settings_at(
