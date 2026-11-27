@@ -23,6 +23,10 @@ const MAX_SETTINGS_BYTES: u64 = 256 * 1024;
 #[allow(dead_code)]
 mod scoped_settings;
 
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) mod workspace;
+
 /// Open and pin the final application support directory, not a pathname leaf
 /// that can be swapped after a metadata preflight. Earlier ancestors remain
 /// outside this narrow protection and need separate privileged OS policy.
