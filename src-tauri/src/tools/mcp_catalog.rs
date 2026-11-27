@@ -110,6 +110,31 @@ impl McpCatalog {
         Ok(())
     }
 
+    /// Merge disjoint, already validated snapshots without granting policy.
+    /// Validate capacity and duplicate ownership before mutating the target.
+    pub(super) fn merge_disjoint(&mut self, other: Self) -> Result<(), CatalogError> {
+        if other
+            .connectors
+            .keys()
+            .any(|id| self.connectors.contains_key(id))
+        {
+            return Err(CatalogError::Duplicate);
+        }
+        if self.connectors.len() + other.connectors.len() > MAX_CONNECTORS
+            || self
+                .connectors
+                .values()
+                .chain(other.connectors.values())
+                .map(BTreeMap::len)
+                .sum::<usize>()
+                > MAX_TOTAL_TOOLS
+        {
+            return Err(CatalogError::Capacity);
+        }
+        self.connectors.extend(other.connectors);
+        Ok(())
+    }
+
     pub(crate) fn remove_connector(&mut self, connector: &str) -> bool {
         self.connectors.remove(connector).is_some()
     }
@@ -367,10 +392,10 @@ impl McpAuthority {
     }
 }
 
-fn valid_connector(id: &str) -> bool {
+pub(super) fn valid_connector(id: &str) -> bool {
     // Lowercase ASCII IDs with no underscores cannot collide with the "__"
     // separator. Reserve both existing builtin connector namespaces.
-    !matches!(id, "filesystem" | "bash")
+    !matches!(id, "filesystem" | "bash" | "agent")
         && (1..=32).contains(&id.len())
         && id.as_bytes()[0].is_ascii_lowercase()
         && id

@@ -41,3 +41,7 @@ pub(crate) mod mcp_stdio_discovery;
 // Restricted stateless loopback HTTP JSON transport, no production route.
 #[allow(dead_code)]
 pub(crate) mod mcp_http;
+
+// Trusted session-owned mixed transport registry; no production route.
+#[allow(dead_code)]
+pub(crate) mod mcp_session;
