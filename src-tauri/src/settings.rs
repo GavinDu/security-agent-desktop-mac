@@ -592,3 +592,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) mod workspace_worker;
