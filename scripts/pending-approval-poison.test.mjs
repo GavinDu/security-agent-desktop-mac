@@ -11,7 +11,7 @@ test('pending-approval resolution denies poisoned locks instead of panicking (#2
   // Poison must deny before a sender can be used, whether the resolver
   // sends within a mutex guard (for shutdown ordering) or after extraction.
   assert.match(resolver, /let Ok\(mut pending\) = self\.pending\.lock\(\) else \{\s*return false;/);
-  assert.match(resolver, /match pending\.remove\(&id\)/);
+  assert.match(resolver, /match pending\.entries\.remove\(&id\)/);
   assert.match(resolver, /Some\(entry\) => entry\.sender\.send\(allow\)\.is_ok\(\)/);
   assert.match(resolver, /self\.shutting_down\.load\(Ordering::SeqCst\)/);
   assert.doesNotMatch(resolver, /expect\("approval lock poisoned"\)/);
@@ -24,7 +24,7 @@ test('poison cleanup can remove abandoned UUID but never grant (#205)', async ()
   const source = await readFile('src-tauri/src/tools/approvals.rs', 'utf8');
   const guard = source.slice(source.indexOf('impl Drop for PendingApprovalGuard'), source.indexOf('impl ApprovalGate'));
   assert.match(guard, /unwrap_or_else\(\|poisoned\| poisoned\.into_inner\(\)\)/);
-  assert.match(guard, /pending\.remove\(&self\.id\)/);
+  assert.match(guard, /pending\.entries\.remove\(&self\.id\)/);
   assert.doesNotMatch(guard, /send\(true\)/);
   const approval = source.slice(source.indexOf('pub async fn require('), source.indexOf('pub async fn resolve('));
   assert.match(approval, /\.lock\(\)\s*\.map_err\(\|_\| "Approval system unavailable"\)/);
