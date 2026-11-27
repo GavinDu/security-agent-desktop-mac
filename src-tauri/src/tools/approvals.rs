@@ -166,7 +166,10 @@ impl ApprovalGate {
     }
 
     pub(crate) fn current_epoch(&self) -> Result<ApprovalEpoch, String> {
-        let pending = self.pending.lock().map_err(|_| "Approval system unavailable")?;
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Approval system unavailable")?;
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err("Approval system shutting down".into());
         }
@@ -185,7 +188,10 @@ impl ApprovalGate {
     /// This does NOT revoke previously started tool I/O or provider bytes.
     pub(crate) fn rotate_epoch(&self) -> Result<ApprovalEpoch, String> {
         let (epoch, old) = {
-            let mut pending = self.pending.lock().map_err(|_| "Approval system unavailable")?;
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "Approval system unavailable")?;
             if self.shutting_down.load(Ordering::SeqCst) {
                 return Err("Approval system shutting down".into());
             }
@@ -207,7 +213,8 @@ impl ApprovalGate {
         tool: &str,
         preview: &str,
     ) -> Result<(), String> {
-        self.require_policy(epoch, self.policy(tool), tool, preview).await
+        self.require_policy(epoch, self.policy(tool), tool, preview)
+            .await
     }
 
     /// Point-in-time only; live lifecycle must fence actual sends.
@@ -221,7 +228,8 @@ impl ApprovalGate {
         preview: &str,
     ) -> Result<(), String> {
         let epoch = self.current_epoch()?;
-        self.require_explicit_ask_for_epoch(epoch, tool, preview).await
+        self.require_explicit_ask_for_epoch(epoch, tool, preview)
+            .await
     }
 
     pub(crate) async fn require_explicit_ask_for_epoch(
@@ -529,7 +537,10 @@ mod tests {
             let event = events.recv().await.unwrap();
             ids.push(Uuid::parse_str(&event.id).unwrap());
         }
-        assert_eq!(gate.pending.lock().unwrap().entries.len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
 
         // No 33rd preview is ever broadcast, and the excess caller is not
         // enqueued to wait for capacity or a timeout.
@@ -543,7 +554,10 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
-        assert_eq!(gate.pending.lock().unwrap().entries.len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
 
         workers[0].abort();
         let _ = (&mut workers[0]).await;
@@ -560,7 +574,10 @@ mod tests {
                 .await
         });
         let replacement_id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
-        assert_eq!(gate.pending.lock().unwrap().entries.len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
         assert!(gate.resolve(replacement_id, true).await);
         assert!(replacement.await.unwrap().is_ok());
         assert!(!gate.resolve(replacement_id, true).await);
@@ -636,7 +653,10 @@ mod tests {
             }));
             ids.push(Uuid::parse_str(&events.recv().await.unwrap().id).unwrap());
         }
-        assert_eq!(gate.pending.lock().unwrap().entries.len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
         assert_eq!(
             gate.cancel_pending_for_shutdown().unwrap(),
             MAX_PENDING_APPROVALS
@@ -740,16 +760,26 @@ mod tests {
         assert!(!gate.resolve(first_id, true).await);
         assert!(!gate.resolve(second_id, true).await);
         assert!(gate.pending_snapshot().unwrap().is_empty());
-        assert!(gate.require_for_epoch(old, "filesystem__read_file", "old").await.is_err());
-        assert!(gate.require_for_epoch(next, "filesystem__read_file", "new").await.is_ok());
+        assert!(gate
+            .require_for_epoch(old, "filesystem__read_file", "old")
+            .await
+            .is_err());
+        assert!(gate
+            .require_for_epoch(next, "filesystem__read_file", "new")
+            .await
+            .is_ok());
         let current = {
             let gate = gate.clone();
             tokio::spawn(async move {
-                gate.require_explicit_ask_for_epoch(next, "fixture__read", "new").await
+                gate.require_explicit_ask_for_epoch(next, "fixture__read", "new")
+                    .await
             })
         };
         let request = events.recv().await.unwrap();
-        assert!(gate.resolve(Uuid::parse_str(&request.id).unwrap(), true).await);
+        assert!(
+            gate.resolve(Uuid::parse_str(&request.id).unwrap(), true)
+                .await
+        );
         assert!(current.await.unwrap().is_ok());
         gate.cancel_pending_for_shutdown().unwrap();
         assert!(gate.rotate_epoch().is_err());
