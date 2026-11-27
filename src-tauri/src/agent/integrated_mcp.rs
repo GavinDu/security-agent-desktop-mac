@@ -10,7 +10,7 @@ use super::{
         Planner, ProviderCall,
     },
 };
-use crate::tools::{approvals::ApprovalGate, mcp_stdio_discovery::OwnedConnector};
+use crate::tools::{approvals::{ApprovalEpoch, ApprovalGate}, mcp_stdio_discovery::OwnedConnector};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -34,14 +34,21 @@ pub(crate) async fn run(
         return Err(invalid());
     }
     let gate = connector.approval_gate();
+    let epoch = gate.current_epoch().map_err(|_| invalid())?;
     let mut planner = ReleasePlanner {
         inner: StructuredPlanner::new(provider, &catalog),
         gate: gate.clone(),
+        epoch,
         model: provider.model_name(),
         calls: Vec::new(),
     };
-    let mut executor = ConnectorExecutor { connector, gate };
-    tool_loop::run(&mut planner, &mut executor, prompt, allowed_names).await
+    let mut executor = ConnectorExecutor { connector, gate: gate.clone(), epoch };
+    let answer = tool_loop::run(&mut planner, &mut executor, prompt, allowed_names).await?;
+    let _lease = gate.dispatch_for_epoch(epoch).await.map_err(|_| LoopFailure {
+        reason: LoopError::InvalidAuthority,
+        confirmed_executions: answer.confirmed_executions,
+    })?;
+    Ok(answer)
 }
 
 fn preview(value: &Value) -> Result<String, ()> {
@@ -64,13 +71,14 @@ fn preview(value: &Value) -> Result<String, ()> {
 struct ConnectorExecutor<'a> {
     connector: &'a mut OwnedConnector,
     gate: Arc<ApprovalGate>,
+    epoch: ApprovalEpoch,
 }
 
 impl AuthorizedExecutor for ConnectorExecutor<'_> {
     async fn authorize_and_execute(&mut self, call: &ProviderCall) -> Result<String, ()> {
         let result = self
             .connector
-            .call(&call.name, call.arguments.clone())
+            .call_for_epoch(self.epoch, &call.name, call.arguments.clone())
             .await
             .map_err(|_| ())?;
         serde_json::to_string(&result).map_err(|_| ())
@@ -85,7 +93,7 @@ impl AuthorizedExecutor for ConnectorExecutor<'_> {
             return false;
         };
         self.gate
-            .require_explicit_ask("agent__stage_result", &text)
+            .require_explicit_ask_for_epoch(self.epoch, "agent__stage_result", &text)
             .await
             .is_ok()
     }
@@ -94,6 +102,7 @@ impl AuthorizedExecutor for ConnectorExecutor<'_> {
 struct ReleasePlanner<'a> {
     inner: StructuredPlanner<'a>,
     gate: Arc<ApprovalGate>,
+    epoch: ApprovalEpoch,
     model: &'a str,
     calls: Vec<ProviderCall>,
 }
@@ -124,11 +133,11 @@ impl Planner for ReleasePlanner<'_> {
                 "model":self.model,"tool_transcript":transcript
             }))?;
             self.gate
-                .require_explicit_ask("agent__send_results", &text)
+                .require_explicit_ask_for_epoch(self.epoch, "agent__send_results", &text)
                 .await
                 .map_err(|_| ())?;
         }
-        self.gate.ensure_running().map_err(|_| ())?;
+        let _lease = self.gate.dispatch_for_epoch(self.epoch).await.map_err(|_| ())?;
         let step = self.inner.next(prompt, names, observations).await?;
         if let ModelStep::Call(call) = &step {
             self.calls.push(ProviderCall {
@@ -169,7 +178,7 @@ IFS= read -r line
 
     #[tokio::test]
     async fn real_http_and_stdio_only_send_approved_batches_including_replay() {
-        for deny_replay in [true, false] {
+        for (deny_replay, rotate_before_send) in [(true, false), (false, false), (false, true)] {
             let gate = ApprovalGate::new(Default::default());
             let mut events = gate.subscribe();
             let mut connector = OwnedConnector::connect(
@@ -231,6 +240,11 @@ IFS= read -r line
                             "agent__send_results"
                         }
                     );
+                    if rotate_before_send && index == 1 {
+                        gate.rotate_after_dispatch().await.unwrap();
+                        assert!(!gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true).await);
+                        break;
+                    }
                     if index == 3 {
                         assert!(request.preview.contains("FIRST_PRIVATE"));
                         assert!(request.preview.contains("SECOND_PRIVATE"));
@@ -248,7 +262,11 @@ IFS= read -r line
                 run(&provider, &mut connector, "question", &names),
                 decisions
             );
-            if deny_replay {
+            if rotate_before_send {
+                let error = result.unwrap_err();
+                assert_eq!(error.confirmed_executions, 1);
+                assert_eq!(requests.load(Ordering::SeqCst), 1);
+            } else if deny_replay {
                 let error = result.unwrap_err();
                 assert_eq!(error.confirmed_executions, 2);
                 assert_eq!(error.reason, LoopError::ProviderFailed);
