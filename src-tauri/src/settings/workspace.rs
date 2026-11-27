@@ -46,6 +46,7 @@ impl<S: Store> WorkspaceCoordinator<S> {
 
     /// A failed switch never restores the old workspace or authorizes a
     /// target from unvalidated disk state. Only a trusted host calls this.
+    #[cfg(test)]
     pub(crate) fn activate(
         &mut self,
         account: AccountId,
