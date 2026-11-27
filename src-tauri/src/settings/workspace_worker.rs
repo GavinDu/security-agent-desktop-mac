@@ -83,7 +83,7 @@ impl WorkspaceWorker {
         store: S,
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel(CAPACITY);
-        let (ready, opened) = oneshot::channel();
+        let (ready, opened) = oneshot::channel::<Result<(), String>>();
         let (exit, exited) = oneshot::channel();
         let signal = Arc::new(Mutex::new(Control::default()));
         let worker_signal = signal.clone();
@@ -235,12 +235,17 @@ impl WorkspaceWorker {
     // Trusted readback when the activation reply was delivered but the
     // receiver was dropped before observing it. Never auto-activate again.
     pub(crate) fn current_signal(&self) -> Result<Option<SessionSignal>, String> {
-        let control = self.signal.lock().map_err(|_| "Workspace signal unavailable")?;
+        let control = self
+            .signal
+            .lock()
+            .map_err(|_| "Workspace signal unavailable")?;
         Ok(control.active.clone())
     }
 
     fn stopped_cleanly(&self) -> Result<bool, String> {
-        self.signal.lock().map(|control| control.stopped_cleanly)
+        self.signal
+            .lock()
+            .map(|control| control.stopped_cleanly)
             .map_err(|_| "Workspace signal unavailable".into())
     }
 
