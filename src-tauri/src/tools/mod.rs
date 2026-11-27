@@ -37,3 +37,7 @@ pub(crate) mod mcp_wire;
 // Staged direct-child discovery only; no live connector execution.
 #[allow(dead_code)]
 pub(crate) mod mcp_stdio_discovery;
+
+// Restricted stateless loopback HTTP JSON transport, no production route.
+#[allow(dead_code)]
+pub(crate) mod mcp_http;
