@@ -32,6 +32,6 @@ test('main-only predicate is tested for Destroyed, Focused, and foreign window (
   const gate = await readFile('src-tauri/src/tools/approvals.rs', 'utf8');
   assert.match(gate, /fn cancel_pending_for_shutdown\(&self\) -> Result<usize, String>/);
   assert.match(gate, /self\.shutting_down\.store\(true, Ordering::SeqCst\)/);
-  assert.match(gate, /std::mem::take\(&mut \*pending\)/);
+  assert.match(gate, /std::mem::take\(&mut pending\.entries\)/);
   assert.match(gate, /fn trusted_exit_cancels_thirty_two_pending_asks_and_rejects_late_replies\(\)/);
 });
