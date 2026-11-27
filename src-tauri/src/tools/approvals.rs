@@ -156,7 +156,29 @@ impl ApprovalGate {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err("Approval system shutting down".into());
         }
-        match self.policy(tool) {
+        self.require_policy(self.policy(tool), tool, preview).await
+    }
+
+    /// The owned dynamic connector has its own explicit policy. Its Ask
+    /// decision must never inherit Auto from the built-in policy registry.
+    pub(crate) async fn require_explicit_ask(
+        &self,
+        tool: &str,
+        preview: &str,
+    ) -> Result<(), String> {
+        self.require_policy(Policy::Ask, tool, preview).await
+    }
+
+    async fn require_policy(
+        &self,
+        policy: Policy,
+        tool: &str,
+        preview: &str,
+    ) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Approval system shutting down".into());
+        }
+        match policy {
             Policy::Auto => Ok(()),
             Policy::Disable => Err("Tool disabled by policy".into()),
             Policy::Ask => {
