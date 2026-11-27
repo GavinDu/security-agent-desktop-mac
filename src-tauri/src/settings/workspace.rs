@@ -3,7 +3,9 @@
 //! Production integration must first revoke old approval/root/peer authority.
 use super::{scoped_settings::AccountSettingsDirectory, AgentSettings};
 use crate::{
-    account_credentials::{AccountAuthority, AccountId, ActiveSession, CredentialRef, Purpose, Secret, Store},
+    account_credentials::{
+        AccountAuthority, AccountId, ActiveSession, CredentialRef, Purpose, Secret, Store,
+    },
     tools::registry::ToolRegistry,
 };
 use std::path::{Path, PathBuf};
@@ -87,7 +89,10 @@ impl<S: Store> WorkspaceCoordinator<S> {
             .ok_or(WorkspaceError::Unavailable)
     }
 
-    pub(crate) fn settings(&self, session: &ActiveSession) -> Result<&AgentSettings, WorkspaceError> {
+    pub(crate) fn settings(
+        &self,
+        session: &ActiveSession,
+    ) -> Result<&AgentSettings, WorkspaceError> {
         Ok(&self.current(session)?.settings)
     }
 
@@ -158,15 +163,22 @@ mod tests {
 
     impl Store for FixtureStore {
         fn read(&self, service: &str, account: &str) -> Result<String, CredentialError> {
-            self.0.borrow().get(&(service.into(), account.into()))
-                .cloned().ok_or(CredentialError::Missing)
+            self.0
+                .borrow()
+                .get(&(service.into(), account.into()))
+                .cloned()
+                .ok_or(CredentialError::Missing)
         }
         fn write(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialError> {
-            self.0.borrow_mut().insert((service.into(), account.into()), value.into());
+            self.0
+                .borrow_mut()
+                .insert((service.into(), account.into()), value.into());
             Ok(())
         }
         fn delete(&self, service: &str, account: &str) -> Result<(), CredentialError> {
-            self.0.borrow_mut().remove(&(service.into(), account.into()));
+            self.0
+                .borrow_mut()
+                .remove(&(service.into(), account.into()));
             Ok(())
         }
     }
@@ -180,18 +192,34 @@ mod tests {
         let b = AccountId::issue();
         let first = host.activate(a, true).unwrap();
         let mut settings = AgentSettings::default();
-        settings.policies.insert("bash__run".into(), Policy::Disable);
+        settings
+            .policies
+            .insert("bash__run".into(), Policy::Disable);
         host.replace_settings(&first, settings).unwrap();
         let secret = Secret::new("fixture".into()).unwrap();
-        let reference = host.install(&first, Uuid::new_v4(), Purpose::Mcp, &secret).unwrap();
+        let reference = host
+            .install(&first, Uuid::new_v4(), Purpose::Mcp, &secret)
+            .unwrap();
         assert_eq!(host.read(&first, &reference).unwrap().expose(), "fixture");
         let second = host.activate(b, true).unwrap();
         assert!(host.settings(&second).unwrap().policies.is_empty());
-        assert_eq!(host.settings(&first).err(), Some(WorkspaceError::Unavailable));
-        assert_eq!(host.read(&second, &reference).err(), Some(WorkspaceError::Credential));
+        assert_eq!(
+            host.settings(&first).err(),
+            Some(WorkspaceError::Unavailable)
+        );
+        assert_eq!(
+            host.read(&second, &reference).err(),
+            Some(WorkspaceError::Credential)
+        );
         let again = host.activate(a, false).unwrap();
-        assert_eq!(host.settings(&again).unwrap().policies.get("bash__run"), Some(&Policy::Disable));
-        assert_eq!(host.read(&again, &reference).err(), Some(WorkspaceError::Credential));
+        assert_eq!(
+            host.settings(&again).unwrap().policies.get("bash__run"),
+            Some(&Policy::Disable)
+        );
+        assert_eq!(
+            host.read(&again, &reference).err(),
+            Some(WorkspaceError::Credential)
+        );
         assert_eq!(host.deactivate(&first), Err(WorkspaceError::Unavailable));
         host.deactivate(&again).unwrap();
         assert!(host.settings(&again).is_err());
@@ -204,13 +232,23 @@ mod tests {
         let a = AccountId::issue();
         let b = AccountId::issue();
         let first = host.activate(a, true).unwrap();
-        assert_eq!(host.activate(b, false).err(), Some(WorkspaceError::Settings));
+        assert_eq!(
+            host.activate(b, false).err(),
+            Some(WorkspaceError::Settings)
+        );
         assert!(host.settings(&first).is_err());
         let next = host.activate(b, true).unwrap();
-        let file = base.path().join("accounts-v1").join(b.as_uuid().to_string()).join("settings.json");
+        let file = base
+            .path()
+            .join("accounts-v1")
+            .join(b.as_uuid().to_string())
+            .join("settings.json");
         fs::write(&file, b"{\"unknown\":true}").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(host.activate(b, false).err(), Some(WorkspaceError::Settings));
+        assert_eq!(
+            host.activate(b, false).err(),
+            Some(WorkspaceError::Settings)
+        );
         assert!(host.settings(&next).is_err());
         assert!(host.active.is_none());
     }
