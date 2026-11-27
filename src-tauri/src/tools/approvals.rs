@@ -7,7 +7,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, RwLock as AsyncRwLock, RwLockReadGuard};
 use uuid::Uuid;
 
 /// Upper bound shared by all awaiting Ask approvals (IPC and HTTP).
@@ -47,6 +47,7 @@ struct PendingState {
 pub struct ApprovalGate {
     policies: RwLock<HashMap<String, Policy>>,
     pending: Mutex<PendingState>,
+    dispatch: AsyncRwLock<()>,
     /// Monotonic lifecycle close; never accept a new approval after Exit.
     shutting_down: AtomicBool,
     events: broadcast::Sender<ApprovalRequest>,
@@ -81,6 +82,7 @@ impl ApprovalGate {
                 epoch: ApprovalEpoch(Uuid::new_v4()),
                 entries: HashMap::new(),
             }),
+            dispatch: AsyncRwLock::new(()),
             shutting_down: AtomicBool::new(false),
             events,
         })
@@ -191,7 +193,7 @@ impl ApprovalGate {
     /// Trusted lifecycle only; no IPC or HTTP route. Rotation and UUID
     /// removal are one transaction under the same pending-map mutex.
     /// This does NOT revoke previously started tool I/O or provider bytes.
-    pub(crate) fn rotate_epoch(&self) -> Result<ApprovalEpoch, String> {
+    fn rotate_epoch(&self) -> Result<ApprovalEpoch, String> {
         let (epoch, old) = {
             let mut pending = self
                 .pending
@@ -205,6 +207,26 @@ impl ApprovalGate {
         };
         drop(old);
         Ok(epoch)
+    }
+
+    /// A reader is held through a bounded exchange, never through an Ask.
+    /// The trusted transition owner waits for admitted exchanges before
+    /// acknowledging rotation. No synchronous mutex is held across await.
+    pub(crate) async fn dispatch_for_epoch(
+        &self,
+        epoch: ApprovalEpoch,
+    ) -> Result<RwLockReadGuard<'_, ()>, String> {
+        let lease = self.dispatch.read().await;
+        self.ensure_epoch(epoch)?;
+        Ok(lease)
+    }
+
+    /// Tokio's FIFO writer prevents later readers from passing a queued
+    /// transition. An exchange already admitted may finish before rotation.
+    /// This is not a rollback or a guarantee about remote buffering.
+    pub(crate) async fn rotate_after_dispatch(&self) -> Result<ApprovalEpoch, String> {
+        let _exclusive = self.dispatch.write().await;
+        self.rotate_epoch()
     }
 
     pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
@@ -805,5 +827,22 @@ mod tests {
         });
         assert!(gate.rotate_epoch().is_err());
         assert!(gate.ensure_epoch(epoch).is_err());
+    }
+
+    #[tokio::test]
+    async fn rotation_waits_for_dispatch_and_old_epoch_cannot_reenter() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let epoch = gate.current_epoch().unwrap();
+        let lease = gate.dispatch_for_epoch(epoch).await.unwrap();
+        let mut rotation = Box::pin(gate.rotate_after_dispatch());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut rotation)
+                .await
+                .is_err()
+        );
+        drop(lease);
+        let current = rotation.await.unwrap();
+        assert!(gate.dispatch_for_epoch(epoch).await.is_err());
+        assert!(gate.dispatch_for_epoch(current).await.is_ok());
     }
 }
