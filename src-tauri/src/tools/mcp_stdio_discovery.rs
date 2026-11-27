@@ -230,6 +230,17 @@ impl OwnedConnector {
         gate: Arc<ApprovalGate>,
     ) -> Result<Self, DiscoveryError> {
         let epoch = gate.current_epoch().map_err(|_| DiscoveryError::Catalog)?;
+        Self::connect_for_epoch(connector, executable, args, cwd, gate, epoch).await
+    }
+
+    pub(super) async fn connect_for_epoch(
+        connector: String,
+        executable: &Path,
+        args: &[String],
+        cwd: &Path,
+        gate: Arc<ApprovalGate>,
+        epoch: ApprovalEpoch,
+    ) -> Result<Self, DiscoveryError> {
         let dispatch = gate.clone();
         let _lease = dispatch
             .dispatch_for_epoch(epoch)
