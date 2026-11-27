@@ -43,14 +43,21 @@ pub(crate) struct SessionRegistry {
 impl SessionRegistry {
     pub(crate) fn new(gate: Arc<ApprovalGate>) -> Result<Self, RegistryError> {
         let epoch = gate.current_epoch().map_err(|_| RegistryError::Closed)?;
-        Ok(Self {gate,epoch,owners:BTreeMap::new(),closed:false})
+        Ok(Self {
+            gate,
+            epoch,
+            owners: BTreeMap::new(),
+            closed: false,
+        })
     }
 
     pub(crate) fn epoch(&self) -> Result<ApprovalEpoch, RegistryError> {
         if self.closed {
             return Err(RegistryError::Closed);
         }
-        self.gate.ensure_epoch(self.epoch).map_err(|_| RegistryError::Closed)?;
+        self.gate
+            .ensure_epoch(self.epoch)
+            .map_err(|_| RegistryError::Closed)?;
         Ok(self.epoch)
     }
 
@@ -66,21 +73,57 @@ impl SessionRegistry {
         Ok(())
     }
 
-    pub(crate) async fn add_stdio(&mut self, id: String, executable: &Path, args: &[String], cwd: &Path) -> Result<(), RegistryError> {
+    pub(crate) async fn add_stdio(
+        &mut self,
+        id: String,
+        executable: &Path,
+        args: &[String],
+        cwd: &Path,
+    ) -> Result<(), RegistryError> {
         self.admit_connector(&id)?;
-        let owner = OwnedConnector::connect_for_epoch(id.clone(),executable,args,cwd,self.gate.clone(),self.epoch).await
-            .map_err(|_| RegistryError::Configuration)?;
+        let owner = OwnedConnector::connect_for_epoch(
+            id.clone(),
+            executable,
+            args,
+            cwd,
+            self.gate.clone(),
+            self.epoch,
+        )
+        .await
+        .map_err(|_| RegistryError::Configuration)?;
         // The owner must remain tracked even if rotation won the race
         // after connection returned. Such an entry cannot be used.
-        self.owners.insert(id,Entry{owner:Owner::Stdio(owner),retiring:false});
+        self.owners.insert(
+            id,
+            Entry {
+                owner: Owner::Stdio(owner),
+                retiring: false,
+            },
+        );
         self.epoch().map(|_| ())
     }
 
-    pub(crate) async fn add_http(&mut self, id: String, address: SocketAddrV4) -> Result<(), RegistryError> {
+    pub(crate) async fn add_http(
+        &mut self,
+        id: String,
+        address: SocketAddrV4,
+    ) -> Result<(), RegistryError> {
         self.admit_connector(&id)?;
-        let owner = OwnedHttpConnector::connect_for_epoch(id.clone(),address,self.gate.clone(),self.epoch).await
-            .map_err(|_| RegistryError::Configuration)?;
-        self.owners.insert(id,Entry{owner:Owner::Http(owner),retiring:false});
+        let owner = OwnedHttpConnector::connect_for_epoch(
+            id.clone(),
+            address,
+            self.gate.clone(),
+            self.epoch,
+        )
+        .await
+        .map_err(|_| RegistryError::Configuration)?;
+        self.owners.insert(
+            id,
+            Entry {
+                owner: Owner::Http(owner),
+                retiring: false,
+            },
+        );
         self.epoch().map(|_| ())
     }
 
@@ -89,18 +132,27 @@ impl SessionRegistry {
         let mut catalog = McpCatalog::default();
         for entry in self.owners.values().filter(|entry| !entry.retiring) {
             let snapshot = match &entry.owner {
-                Owner::Stdio(owner) => owner.planning_catalog().map_err(|_| RegistryError::Denied)?,
-                Owner::Http(owner) => owner.planning_catalog().map_err(|_| RegistryError::Denied)?,
+                Owner::Stdio(owner) => owner
+                    .planning_catalog()
+                    .map_err(|_| RegistryError::Denied)?,
+                Owner::Http(owner) => owner
+                    .planning_catalog()
+                    .map_err(|_| RegistryError::Denied)?,
             };
-            catalog.merge_disjoint(snapshot).map_err(|_| RegistryError::Denied)?;
+            catalog
+                .merge_disjoint(snapshot)
+                .map_err(|_| RegistryError::Denied)?;
         }
         Ok(catalog)
     }
 
     fn owner_mut(&mut self, id: &str) -> Result<&mut Owner, RegistryError> {
         self.epoch()?;
-        self.owners.get_mut(id).filter(|entry| !entry.retiring)
-            .map(|entry| &mut entry.owner).ok_or(RegistryError::Denied)
+        self.owners
+            .get_mut(id)
+            .filter(|entry| !entry.retiring)
+            .map(|entry| &mut entry.owner)
+            .ok_or(RegistryError::Denied)
     }
 
     pub(crate) async fn refresh(&mut self, id: &str) -> Result<(), RegistryError> {
@@ -110,35 +162,59 @@ impl SessionRegistry {
         }
     }
 
-    pub(crate) fn set_policy(&mut self, function: &str, policy: McpPolicy) -> Result<(), RegistryError> {
-        let (id,_) = function.split_once("__").ok_or(RegistryError::Denied)?;
+    pub(crate) fn set_policy(
+        &mut self,
+        function: &str,
+        policy: McpPolicy,
+    ) -> Result<(), RegistryError> {
+        let (id, _) = function.split_once("__").ok_or(RegistryError::Denied)?;
         match self.owner_mut(id)? {
-            Owner::Stdio(owner) => owner.set_policy(function,policy).map_err(|_| RegistryError::Denied),
-            Owner::Http(owner) => owner.set_policy(function,policy).map_err(|_| RegistryError::Denied),
+            Owner::Stdio(owner) => owner
+                .set_policy(function, policy)
+                .map_err(|_| RegistryError::Denied),
+            Owner::Http(owner) => owner
+                .set_policy(function, policy)
+                .map_err(|_| RegistryError::Denied),
         }
     }
 
-    pub(crate) async fn call_for_epoch(&mut self, epoch: ApprovalEpoch, function: &str, arguments: Value) -> Result<Value,RegistryError> {
+    pub(crate) async fn call_for_epoch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        function: &str,
+        arguments: Value,
+    ) -> Result<Value, RegistryError> {
         if self.epoch()? != epoch {
             return Err(RegistryError::Closed);
         }
         let catalog = self.planning_catalog()?;
         // Exact namespace and argument validation, then transport owner
         // independently validates current policy/schema before actual send.
-        let (id,_) = catalog.validate_call(function,&arguments).map_err(|_| RegistryError::Denied)?;
+        let (id, _) = catalog
+            .validate_call(function, &arguments)
+            .map_err(|_| RegistryError::Denied)?;
         match self.owner_mut(id)? {
-            Owner::Stdio(owner) => owner.call_for_epoch(epoch,function,arguments).await.map_err(|_| RegistryError::Denied),
-            Owner::Http(owner) => owner.call(function,arguments).await.map_err(|_| RegistryError::Denied),
+            Owner::Stdio(owner) => owner
+                .call_for_epoch(epoch, function, arguments)
+                .await
+                .map_err(|_| RegistryError::Denied),
+            Owner::Http(owner) => owner
+                .call(function, arguments)
+                .await
+                .map_err(|_| RegistryError::Denied),
         }
     }
 
-    pub(crate) async fn remove(&mut self, id: &str) -> Result<(),RegistryError> {
+    pub(crate) async fn remove(&mut self, id: &str) -> Result<(), RegistryError> {
         // Removal is allowed even after epoch revocation. Mark unavailable
         // before any await and retain the child handle until reap succeeds.
         let entry = self.owners.get_mut(id).ok_or(RegistryError::Denied)?;
         entry.retiring = true;
         if let Owner::Stdio(owner) = &mut entry.owner {
-            owner.retire().await.map_err(|_| RegistryError::Retirement)?;
+            owner
+                .retire()
+                .await
+                .map_err(|_| RegistryError::Retirement)?;
         }
         self.owners.remove(id);
         Ok(())
@@ -156,9 +232,9 @@ impl SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::post, response::IntoResponse, http::StatusCode, Json, Router};
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize,Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 
     const CHILD: &str = r#"
@@ -195,38 +271,104 @@ IFS= read -r line
             }
         }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {panic!("IPv4");};
-        let server = tokio::spawn(async move {axum::serve(listener,router).await.unwrap();});
+        let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            panic!("IPv4");
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
         let gate = ApprovalGate::new(Default::default());
         let mut registry = SessionRegistry::new(gate.clone()).unwrap();
         let epoch = registry.epoch().unwrap();
-        let args = ["-c".into(),CHILD.into()];
-        registry.add_stdio("local".into(),Path::new("/bin/sh"),&args,Path::new("/")).await.unwrap();
-        assert_eq!(registry.add_http("local".into(),address).await,Err(RegistryError::Configuration));
-        for name in ["filesystem","bash","agent","invalid__id"] {
-            assert_eq!(registry.add_http(name.into(),address).await,Err(RegistryError::Configuration));
+        let args = ["-c".into(), CHILD.into()];
+        registry
+            .add_stdio("local".into(), Path::new("/bin/sh"), &args, Path::new("/"))
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.add_http("local".into(), address).await,
+            Err(RegistryError::Configuration)
+        );
+        for name in ["filesystem", "bash", "agent", "invalid__id"] {
+            assert_eq!(
+                registry.add_http(name.into(), address).await,
+                Err(RegistryError::Configuration)
+            );
         }
-        registry.add_http("remote".into(),address).await.unwrap();
-        assert!(registry.planning_catalog().unwrap().openai_functions().is_empty());
-        registry.set_policy("local__read",McpPolicy::Auto).unwrap();
-        registry.set_policy("remote__read",McpPolicy::Auto).unwrap();
-        assert_eq!(registry.planning_catalog().unwrap().openai_functions().len(),2);
-        assert_eq!(registry.call_for_epoch(epoch,"other__read",json!({})).await,Err(RegistryError::Denied));
-        assert_eq!(registry.call_for_epoch(epoch,"remote__read",json!({"extra":1})).await,Err(RegistryError::Denied));
-        assert_eq!(calls.load(Ordering::SeqCst),0);
-        assert_eq!(registry.call_for_epoch(epoch,"local__read",json!({})).await.unwrap()["content"][0]["text"],"stdio");
-        assert_eq!(registry.call_for_epoch(epoch,"remote__read",json!({})).await.unwrap()["content"][0]["text"],"http");
+        registry.add_http("remote".into(), address).await.unwrap();
+        assert!(registry
+            .planning_catalog()
+            .unwrap()
+            .openai_functions()
+            .is_empty());
+        registry.set_policy("local__read", McpPolicy::Auto).unwrap();
+        registry
+            .set_policy("remote__read", McpPolicy::Auto)
+            .unwrap();
+        assert_eq!(
+            registry
+                .planning_catalog()
+                .unwrap()
+                .openai_functions()
+                .len(),
+            2
+        );
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "other__read", json!({}))
+                .await,
+            Err(RegistryError::Denied)
+        );
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "remote__read", json!({"extra":1}))
+                .await,
+            Err(RegistryError::Denied)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "local__read", json!({}))
+                .await
+                .unwrap()["content"][0]["text"],
+            "stdio"
+        );
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "remote__read", json!({}))
+                .await
+                .unwrap()["content"][0]["text"],
+            "http"
+        );
         registry.refresh("remote").await.unwrap();
-        assert_eq!(registry.call_for_epoch(epoch,"remote__read",json!({})).await,Err(RegistryError::Denied));
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "remote__read", json!({}))
+                .await,
+            Err(RegistryError::Denied)
+        );
         registry.remove("local").await.unwrap();
-        assert_eq!(registry.call_for_epoch(epoch,"local__read",json!({})).await,Err(RegistryError::Denied));
+        assert_eq!(
+            registry
+                .call_for_epoch(epoch, "local__read", json!({}))
+                .await,
+            Err(RegistryError::Denied)
+        );
         let next = gate.rotate_after_dispatch().await.unwrap();
-        assert_eq!(registry.call_for_epoch(next,"remote__read",json!({})).await,Err(RegistryError::Closed));
+        assert_eq!(
+            registry
+                .call_for_epoch(next, "remote__read", json!({}))
+                .await,
+            Err(RegistryError::Closed)
+        );
         assert!(registry.planning_catalog().is_err());
         registry.retire_all().await.unwrap();
         assert!(registry.owners.is_empty());
-        assert_eq!(registry.add_http("fresh".into(),address).await,Err(RegistryError::Closed));
-        assert_eq!(calls.load(Ordering::SeqCst),1);
+        assert_eq!(
+            registry.add_http("fresh".into(), address).await,
+            Err(RegistryError::Closed)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         server.abort();
     }
 }
