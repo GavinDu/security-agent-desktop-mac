@@ -6,7 +6,7 @@ test('canceled ask/approval futures revoke their pending ID through synchronous 
   const source = await readFile('src-tauri/src/tools/approvals.rs', 'utf8');
   assert.match(source, /struct PendingApprovalGuard<'a>/);
   assert.match(source, /impl Drop for PendingApprovalGuard<'_>/);
-  assert.match(source, /pending\.remove\(&self\.id\)/);
+  assert.match(source, /pending\.entries\.remove\(&self\.id\)/);
   assert.match(source, /let _pending_guard = PendingApprovalGuard \{ gate: self, id \}/);
   // Both plain mutex and atomic close state live in the std sync module.
   // Do not bind a security regression to rustfmt's import layout.

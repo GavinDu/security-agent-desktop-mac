@@ -35,9 +35,18 @@ struct PendingApproval {
     sender: oneshot::Sender<bool>,
 }
 
+/// Opaque process-local approval authority. Never deserialize from IPC.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ApprovalEpoch(Uuid);
+
+struct PendingState {
+    epoch: ApprovalEpoch,
+    entries: HashMap<Uuid, PendingApproval>,
+}
+
 pub struct ApprovalGate {
     policies: RwLock<HashMap<String, Policy>>,
-    pending: Mutex<HashMap<Uuid, PendingApproval>>,
+    pending: Mutex<PendingState>,
     /// Monotonic lifecycle close; never accept a new approval after Exit.
     shutting_down: AtomicBool,
     events: broadcast::Sender<ApprovalRequest>,
@@ -59,7 +68,7 @@ impl Drop for PendingApprovalGuard<'_> {
             .pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending.remove(&self.id);
+        pending.entries.remove(&self.id);
     }
 }
 
@@ -68,7 +77,10 @@ impl ApprovalGate {
         let (events, _) = broadcast::channel(64);
         Arc::new(Self {
             policies: RwLock::new(policies),
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(PendingState {
+                epoch: ApprovalEpoch(Uuid::new_v4()),
+                entries: HashMap::new(),
+            }),
             shutting_down: AtomicBool::new(false),
             events,
         })
@@ -90,6 +102,7 @@ impl ApprovalGate {
             return Err("Approval system shutting down".into());
         }
         let mut snapshot: Vec<_> = pending
+            .entries
             .values()
             .filter(|entry| !entry.sender.is_closed())
             .map(|entry| entry.request.clone())
@@ -152,47 +165,97 @@ impl ApprovalGate {
         });
     }
 
-    pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
+    pub(crate) fn current_epoch(&self) -> Result<ApprovalEpoch, String> {
+        // Preserve terminal shutdown precedence even if pending state is
+        // poisoned. Check again under the mutex for a racing shutdown.
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err("Approval system shutting down".into());
         }
-        self.require_policy(self.policy(tool), tool, preview).await
-    }
-
-    /// Point-in-time check only. The production lifecycle owner must also
-    /// serialize actual sends with global shutdown/account transitions.
-    pub(crate) fn ensure_running(&self) -> Result<(), String> {
-        let _pending = self
+        let pending = self
             .pending
             .lock()
             .map_err(|_| "Approval system unavailable")?;
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err("Approval system shutting down".into());
         }
+        Ok(pending.epoch)
+    }
+
+    pub(crate) fn ensure_epoch(&self, epoch: ApprovalEpoch) -> Result<(), String> {
+        if self.current_epoch()? != epoch {
+            return Err("Approval context changed".into());
+        }
         Ok(())
     }
 
-    /// The owned dynamic connector has its own explicit policy. Its Ask
-    /// decision must never inherit Auto from the built-in policy registry.
+    /// Trusted lifecycle only; no IPC or HTTP route. Rotation and UUID
+    /// removal are one transaction under the same pending-map mutex.
+    /// This does NOT revoke previously started tool I/O or provider bytes.
+    pub(crate) fn rotate_epoch(&self) -> Result<ApprovalEpoch, String> {
+        let (epoch, old) = {
+            let mut pending = self
+                .pending
+                .lock()
+                .map_err(|_| "Approval system unavailable")?;
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return Err("Approval system shutting down".into());
+            }
+            pending.epoch = ApprovalEpoch(Uuid::new_v4());
+            (pending.epoch, std::mem::take(&mut pending.entries))
+        };
+        drop(old);
+        Ok(epoch)
+    }
+
+    pub async fn require(&self, tool: &str, preview: &str) -> Result<(), String> {
+        let epoch = self.current_epoch()?;
+        self.require_for_epoch(epoch, tool, preview).await
+    }
+
+    pub(crate) async fn require_for_epoch(
+        &self,
+        epoch: ApprovalEpoch,
+        tool: &str,
+        preview: &str,
+    ) -> Result<(), String> {
+        self.require_policy(epoch, self.policy(tool), tool, preview)
+            .await
+    }
+
+    /// Point-in-time only; live lifecycle must fence actual sends.
+    pub(crate) fn ensure_running(&self) -> Result<(), String> {
+        self.current_epoch().map(|_| ())
+    }
+
     pub(crate) async fn require_explicit_ask(
         &self,
         tool: &str,
         preview: &str,
     ) -> Result<(), String> {
-        self.require_policy(Policy::Ask, tool, preview).await
+        let epoch = self.current_epoch()?;
+        self.require_explicit_ask_for_epoch(epoch, tool, preview)
+            .await
+    }
+
+    pub(crate) async fn require_explicit_ask_for_epoch(
+        &self,
+        epoch: ApprovalEpoch,
+        tool: &str,
+        preview: &str,
+    ) -> Result<(), String> {
+        self.require_policy(epoch, Policy::Ask, tool, preview).await
     }
 
     async fn require_policy(
         &self,
+        epoch: ApprovalEpoch,
         policy: Policy,
         tool: &str,
         preview: &str,
     ) -> Result<(), String> {
-        if self.shutting_down.load(Ordering::SeqCst) {
-            return Err("Approval system shutting down".into());
-        }
+        self.ensure_epoch(epoch)?;
         match policy {
-            Policy::Auto => Ok(()),
+            Policy::Auto => self.ensure_epoch(epoch),
             Policy::Disable => Err("Tool disabled by policy".into()),
             Policy::Ask => {
                 // Never authorize a suffix that the user could not review.
@@ -222,7 +285,10 @@ impl ApprovalGate {
                     if self.shutting_down.load(Ordering::SeqCst) {
                         return Err("Approval system shutting down".into());
                     }
-                    if pending.len() >= MAX_PENDING_APPROVALS {
+                    if pending.epoch != epoch {
+                        return Err("Approval context changed".into());
+                    }
+                    if pending.entries.len() >= MAX_PENDING_APPROVALS {
                         return Err("Too many pending tool approvals".into());
                     }
                     let request = ApprovalRequest {
@@ -230,7 +296,7 @@ impl ApprovalGate {
                         tool: tool.into(),
                         preview: preview.to_owned(),
                     };
-                    pending.insert(
+                    pending.entries.insert(
                         id,
                         PendingApproval {
                             request: request.clone(),
@@ -241,7 +307,7 @@ impl ApprovalGate {
                     if !delivered {
                         // Never expose an undeliverable request in readback,
                         // even in the interval before the RAII guard drops.
-                        pending.remove(&id);
+                        pending.entries.remove(&id);
                     }
                     delivered
                 };
@@ -255,7 +321,7 @@ impl ApprovalGate {
                 // RAII guard removes the pending ID on normal response,
                 // timeout, closed channel and cancellation alike.
                 match answer {
-                    Ok(Ok(true)) => Ok(()),
+                    Ok(Ok(true)) => self.ensure_epoch(epoch),
                     Ok(Ok(false)) => Err("Tool invocation denied".into()),
                     Ok(Err(_)) => Err("Approval channel was closed".into()),
                     Err(_) => Err("Approval timed out".into()),
@@ -275,7 +341,7 @@ impl ApprovalGate {
                 .pending
                 .lock()
                 .map_err(|_| "Approval system unavailable".to_owned())?;
-            std::mem::take(&mut *pending)
+            std::mem::take(&mut pending.entries)
         };
         let canceled = senders.len();
         drop(senders);
@@ -292,7 +358,7 @@ impl ApprovalGate {
         if self.shutting_down.load(Ordering::SeqCst) {
             return false;
         }
-        match pending.remove(&id) {
+        match pending.entries.remove(&id) {
             Some(entry) => entry.sender.send(allow).is_ok(),
             None => false,
         }
@@ -358,7 +424,7 @@ mod tests {
                 "Approval preview cannot be displayed completely"
             );
         }
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
         assert!(matches!(
             events.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
@@ -377,7 +443,7 @@ mod tests {
                 .await
         );
         assert!(worker.await.unwrap().is_err());
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
 
         // No new restriction on the explicitly selected Auto policy.
         gate.set_policy("bash__run", Policy::Auto);
@@ -450,11 +516,11 @@ mod tests {
         };
         let event = events.recv().await.unwrap();
         let id = Uuid::parse_str(&event.id).unwrap();
-        assert_eq!(gate.pending.lock().unwrap().len(), 1);
+        assert_eq!(gate.pending.lock().unwrap().entries.len(), 1);
 
         worker.abort();
         let _ = worker.await;
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
         assert!(
             !gate.resolve(id, true).await,
             "cancelled ID must be invalidated"
@@ -476,7 +542,10 @@ mod tests {
             let event = events.recv().await.unwrap();
             ids.push(Uuid::parse_str(&event.id).unwrap());
         }
-        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
 
         // No 33rd preview is ever broadcast, and the excess caller is not
         // enqueued to wait for capacity or a timeout.
@@ -490,12 +559,15 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
-        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
 
         workers[0].abort();
         let _ = (&mut workers[0]).await;
         assert_eq!(
-            gate.pending.lock().unwrap().len(),
+            gate.pending.lock().unwrap().entries.len(),
             MAX_PENDING_APPROVALS - 1
         );
         assert!(!gate.resolve(ids[0], true).await);
@@ -507,7 +579,10 @@ mod tests {
                 .await
         });
         let replacement_id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
-        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
         assert!(gate.resolve(replacement_id, true).await);
         assert!(replacement.await.unwrap().is_ok());
         assert!(!gate.resolve(replacement_id, true).await);
@@ -518,7 +593,7 @@ mod tests {
                 let _ = worker.await;
             }
         }
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
     }
 
     #[tokio::test]
@@ -532,7 +607,7 @@ mod tests {
                 .await
         });
         let id = Uuid::parse_str(&events.recv().await.unwrap().id).unwrap();
-        assert_eq!(gate.pending.lock().unwrap().len(), 1);
+        assert_eq!(gate.pending.lock().unwrap().entries.len(), 1);
 
         let poisoned = gate.clone();
         let thread = std::thread::spawn(move || {
@@ -563,7 +638,7 @@ mod tests {
             Err(poisoned) => poisoned.into_inner(),
             Ok(_) => panic!("expected poisoned pending registry"),
         };
-        assert!(pending.is_empty());
+        assert!(pending.entries.is_empty());
         // Release the recovered cleanup-only guard before calling resolve.
         // Holding it across the next mutex acquisition would deadlock.
         drop(pending);
@@ -583,7 +658,10 @@ mod tests {
             }));
             ids.push(Uuid::parse_str(&events.recv().await.unwrap().id).unwrap());
         }
-        assert_eq!(gate.pending.lock().unwrap().len(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            gate.pending.lock().unwrap().entries.len(),
+            MAX_PENDING_APPROVALS
+        );
         assert_eq!(
             gate.cancel_pending_for_shutdown().unwrap(),
             MAX_PENDING_APPROVALS
@@ -595,7 +673,7 @@ mod tests {
                 "Approval channel was closed"
             );
         }
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
         for id in ids {
             assert!(!gate.resolve(id, true).await);
         }
@@ -645,7 +723,7 @@ mod tests {
             result.unwrap_err(),
             "No desktop approval listener is connected"
         );
-        assert!(gate.pending.lock().unwrap().is_empty());
+        assert!(gate.pending.lock().unwrap().entries.is_empty());
     }
 
     #[tokio::test]
@@ -658,5 +736,74 @@ mod tests {
         assert!(gate.resolve(id, true).await);
         assert!(request.await.unwrap().is_ok());
         assert!(!gate.resolve(id, true).await);
+    }
+
+    #[tokio::test]
+    async fn trusted_epoch_rotation_drains_pending_and_denies_stale_auto_and_resolved_ask() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let old = gate.current_epoch().unwrap();
+        let mut events = gate.subscribe();
+        let first = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.require_for_epoch(old, "bash__run", "first").await })
+        };
+        let first_request = events.recv().await.unwrap();
+        let second = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.require_for_epoch(old, "bash__run", "second").await })
+        };
+        let second_request = events.recv().await.unwrap();
+        let first_id = Uuid::parse_str(&first_request.id).unwrap();
+        let second_id = Uuid::parse_str(&second_request.id).unwrap();
+        assert!(gate.resolve(first_id, true).await);
+        let next = gate.rotate_epoch().unwrap();
+        assert!(old != next);
+        assert!(gate.ensure_epoch(old).is_err());
+        assert!(gate.ensure_epoch(next).is_ok());
+        assert!(first.await.unwrap().is_err());
+        assert!(second.await.unwrap().is_err());
+        assert!(!gate.resolve(first_id, true).await);
+        assert!(!gate.resolve(second_id, true).await);
+        assert!(gate.pending_snapshot().unwrap().is_empty());
+        assert!(gate
+            .require_for_epoch(old, "filesystem__read_file", "old")
+            .await
+            .is_err());
+        assert!(gate
+            .require_for_epoch(next, "filesystem__read_file", "new")
+            .await
+            .is_ok());
+        let current = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                gate.require_explicit_ask_for_epoch(next, "fixture__read", "new")
+                    .await
+            })
+        };
+        let request = events.recv().await.unwrap();
+        assert!(
+            gate.resolve(Uuid::parse_str(&request.id).unwrap(), true)
+                .await
+        );
+        assert!(current.await.unwrap().is_ok());
+        gate.cancel_pending_for_shutdown().unwrap();
+        assert!(gate.rotate_epoch().is_err());
+    }
+
+    #[test]
+    fn approval_epoch_is_process_local_and_poison_denies_rotation() {
+        let gate = ApprovalGate::new(HashMap::new());
+        let other = ApprovalGate::new(HashMap::new());
+        let epoch = gate.current_epoch().unwrap();
+        assert!(other.ensure_epoch(epoch).is_err());
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let _guard = gate.pending.lock().unwrap();
+                panic!("fixture poison");
+            });
+            assert!(worker.join().is_err());
+        });
+        assert!(gate.rotate_epoch().is_err());
+        assert!(gate.ensure_epoch(epoch).is_err());
     }
 }
