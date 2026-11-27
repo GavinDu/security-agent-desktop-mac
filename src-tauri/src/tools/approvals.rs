@@ -159,6 +159,19 @@ impl ApprovalGate {
         self.require_policy(self.policy(tool), tool, preview).await
     }
 
+    /// Point-in-time check only. The production lifecycle owner must also
+    /// serialize actual sends with global shutdown/account transitions.
+    pub(crate) fn ensure_running(&self) -> Result<(), String> {
+        let _pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Approval system unavailable")?;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err("Approval system shutting down".into());
+        }
+        Ok(())
+    }
+
     /// The owned dynamic connector has its own explicit policy. Its Ask
     /// decision must never inherit Auto from the built-in policy registry.
     pub(crate) async fn require_explicit_ask(
