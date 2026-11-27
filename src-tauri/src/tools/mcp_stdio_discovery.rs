@@ -231,7 +231,10 @@ impl OwnedConnector {
     ) -> Result<Self, DiscoveryError> {
         let epoch = gate.current_epoch().map_err(|_| DiscoveryError::Catalog)?;
         let dispatch = gate.clone();
-        let _lease = dispatch.dispatch_for_epoch(epoch).await.map_err(|_| DiscoveryError::Catalog)?;
+        let _lease = dispatch
+            .dispatch_for_epoch(epoch)
+            .await
+            .map_err(|_| DiscoveryError::Catalog)?;
         let child = StdioDiscovery::start(executable, args, cwd).await?;
         let mut owner = Self {
             connector,
@@ -250,7 +253,10 @@ impl OwnedConnector {
 
     pub(crate) async fn refresh(&mut self) -> Result<(), DiscoveryError> {
         let gate = self.gate.clone();
-        let _lease = gate.dispatch_for_epoch(self.epoch).await.map_err(|_| DiscoveryError::Catalog)?;
+        let _lease = gate
+            .dispatch_for_epoch(self.epoch)
+            .await
+            .map_err(|_| DiscoveryError::Catalog)?;
         self.refresh_admitted().await
     }
 
@@ -302,7 +308,9 @@ impl OwnedConnector {
 
     /// Never grant a retained connector a new epoch implicitly.
     pub(crate) fn epoch(&self) -> Result<ApprovalEpoch, DiscoveryError> {
-        self.gate.ensure_epoch(self.epoch).map_err(|_| DiscoveryError::Catalog)?;
+        self.gate
+            .ensure_epoch(self.epoch)
+            .map_err(|_| DiscoveryError::Catalog)?;
         Ok(self.epoch)
     }
 
@@ -665,8 +673,14 @@ IFS= read -r line
         let gate = ApprovalGate::new(Default::default());
         let args = ["-c".into(), script];
         let mut old = OwnedConnector::connect(
-            "fixture".into(), Path::new("/bin/sh"), &args, Path::new("/"), gate.clone(),
-        ).await.unwrap();
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &args,
+            Path::new("/"),
+            gate.clone(),
+        )
+        .await
+        .unwrap();
         old.set_policy("fixture__read", McpPolicy::Auto).unwrap();
         let previous = old.epoch().unwrap();
         let current = gate.rotate_after_dispatch().await.unwrap();
@@ -675,14 +689,30 @@ IFS= read -r line
         assert!(old.planning_catalog().is_err());
         assert!(old.set_policy("fixture__read", McpPolicy::Auto).is_err());
         assert_eq!(old.refresh().await, Err(DiscoveryError::Catalog));
-        assert_eq!(old.call("fixture__read", json!({})).await, Err(DiscoveryError::Catalog));
-        assert_eq!(old.call_for_epoch(current, "fixture__read", json!({})).await, Err(DiscoveryError::Catalog));
+        assert_eq!(
+            old.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Catalog)
+        );
+        assert_eq!(
+            old.call_for_epoch(current, "fixture__read", json!({}))
+                .await,
+            Err(DiscoveryError::Catalog)
+        );
         old.shutdown().await.unwrap();
         let mut fresh = OwnedConnector::connect(
-            "fixture".into(), Path::new("/bin/sh"), &args, Path::new("/"), gate,
-        ).await.unwrap();
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &args,
+            Path::new("/"),
+            gate,
+        )
+        .await
+        .unwrap();
         assert!(fresh.epoch().unwrap() == current);
-        assert_eq!(fresh.call("fixture__read", json!({})).await, Err(DiscoveryError::Catalog));
+        assert_eq!(
+            fresh.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Catalog)
+        );
         fresh.set_policy("fixture__read", McpPolicy::Auto).unwrap();
         assert!(fresh.call("fixture__read", json!({})).await.is_ok());
         fresh.shutdown().await.unwrap();
