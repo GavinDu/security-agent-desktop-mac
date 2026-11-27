@@ -68,7 +68,7 @@ impl SessionRegistry {
 
     pub(crate) async fn add_stdio(&mut self, id: String, executable: &Path, args: &[String], cwd: &Path) -> Result<(), RegistryError> {
         self.admit_connector(&id)?;
-        let owner = OwnedConnector::connect(id.clone(),executable,args,cwd,self.gate.clone()).await
+        let owner = OwnedConnector::connect_for_epoch(id.clone(),executable,args,cwd,self.gate.clone(),self.epoch).await
             .map_err(|_| RegistryError::Configuration)?;
         // The owner must remain tracked even if rotation won the race
         // after connection returned. Such an entry cannot be used.
@@ -78,7 +78,7 @@ impl SessionRegistry {
 
     pub(crate) async fn add_http(&mut self, id: String, address: SocketAddrV4) -> Result<(), RegistryError> {
         self.admit_connector(&id)?;
-        let owner = OwnedHttpConnector::connect(id.clone(),address,self.gate.clone()).await
+        let owner = OwnedHttpConnector::connect_for_epoch(id.clone(),address,self.gate.clone(),self.epoch).await
             .map_err(|_| RegistryError::Configuration)?;
         self.owners.insert(id,Entry{owner:Owner::Http(owner),retiring:false});
         self.epoch().map(|_| ())
