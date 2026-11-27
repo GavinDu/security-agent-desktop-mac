@@ -11,6 +11,10 @@ pub(crate) mod tool_loop;
 #[allow(dead_code)]
 pub(crate) mod structured_planner;
 
+// Trusted-only integrated agent; no public route until global epoch fencing.
+#[allow(dead_code)]
+pub(crate) mod integrated_mcp;
+
 use crate::{
     settings::AgentSettings,
     tools::{approvals::ApprovalGate, registry::ToolRegistry},
