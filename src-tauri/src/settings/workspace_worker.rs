@@ -39,9 +39,15 @@ enum Command {
     Stop(Reply<()>),
 }
 
+#[derive(Default)]
+struct Control {
+    stopping: bool,
+    active: Option<SessionSignal>,
+}
+
 pub(crate) struct WorkspaceWorker {
     tx: mpsc::Sender<Command>,
-    signal: Arc<Mutex<Option<SessionSignal>>>,
+    signal: Arc<Mutex<Control>>,
     exited: Option<oneshot::Receiver<()>>,
 }
 
@@ -50,7 +56,7 @@ impl WorkspaceWorker {
         let (tx,rx) = mpsc::channel(CAPACITY);
         let (ready,opened) = oneshot::channel();
         let (exit,exited) = oneshot::channel();
-        let signal = Arc::new(Mutex::new(None));
+        let signal = Arc::new(Mutex::new(Control::default()));
         let worker_signal = signal.clone();
         std::thread::Builder::new().name("account-runtime".into()).spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -71,6 +77,10 @@ impl WorkspaceWorker {
     }
 
     fn submit(&self, command: Command) -> Result<(),String> {
+        let control = self.signal.lock().map_err(|_| "Workspace signal unavailable")?;
+        if control.stopping && !matches!(&command, Command::Stop(_) | Command::Retire(_, _)) {
+            return Err("Workspace worker stopping".into());
+        }
         self.tx.try_send(command).map_err(|_| "Workspace worker busy or unavailable".into())
     }
 
@@ -114,7 +124,11 @@ impl WorkspaceWorker {
     // Close before attempting bounded queue admission. A full queue or
     // canceled receiver cannot reopen the old session; caller retries.
     pub(crate) async fn retire(&self, signal: &SessionSignal) -> Result<(),String> {
-        signal.request_retirement()?;
+        {
+            let control = self.signal.lock().map_err(|_| "Workspace signal unavailable")?;
+            let current = control.active.as_ref().filter(|current| current.session == signal.session && Arc::ptr_eq(&current.gate,&signal.gate)).ok_or("Workspace session unavailable")?;
+            current.request_retirement()?;
+        }
         let (tx,rx) = oneshot::channel();
         self.submit(Command::Retire(signal.session,tx))?;
         receive(rx).await
@@ -138,18 +152,24 @@ impl Drop for WorkspaceWorker {
     }
 }
 
-fn close_current(signal: &Mutex<Option<SessionSignal>>) -> Result<(),String> {
-    let guard = signal.lock().map_err(|_| "Workspace signal unavailable")?;
-    if let Some(active) = guard.as_ref() {active.request_retirement()?;}
+fn close_current(signal: &Mutex<Control>) -> Result<(),String> {
+    let mut guard = signal.lock().map_err(|_| "Workspace signal unavailable")?;
+    guard.stopping = true;
+    if let Some(active) = guard.active.as_ref() {active.request_retirement()?;}
     Ok(())
 }
 async fn receive<T>(rx: oneshot::Receiver<Result<T,String>>) -> Result<T,String> {
     rx.await.map_err(|_| "Workspace worker unavailable")?
 }
 
-async fn serve<S:Store>(mut host: WorkspaceRuntime<S>,mut rx: mpsc::Receiver<Command>,signal: Arc<Mutex<Option<SessionSignal>>>) {
+async fn serve<S:Store>(mut host: WorkspaceRuntime<S>,mut rx: mpsc::Receiver<Command>,signal: Arc<Mutex<Control>>) {
     let mut active: Option<ActiveSession> = None;
     while let Some(command) = rx.recv().await {
+        let stopping = signal.lock().map(|control| control.stopping).unwrap_or(true);
+        if stopping && !matches!(&command, Command::Stop(_) | Command::Retire(_, _)) {
+            // Dropping the reply denies queued work after shutdown intent.
+            continue;
+        }
         match command {
             Command::Enroll(reply) => {if !reply.is_closed() {let _ = reply.send(host.enroll());}}
             Command::Activate(account,reply) => {
@@ -157,14 +177,25 @@ async fn serve<S:Store>(mut host: WorkspaceRuntime<S>,mut rx: mpsc::Receiver<Com
                 let result = host.activate(account).and_then(|session| {
                     active = Some(session);
                     let next = SessionSignal{session,gate:host.gate(&session)?};
-                    *signal.lock().map_err(|_| "Workspace signal unavailable")? = Some(next.clone());
+                    let mut control = match signal.lock() {
+                        Ok(control) => control,
+                        Err(_) => {
+                            let _ = next.request_retirement();
+                            return Err("Workspace signal unavailable".into());
+                        }
+                    };
+                    if control.stopping {
+                        let _ = next.request_retirement();
+                        return Err("Workspace worker stopping".into());
+                    }
+                    control.active = Some(next.clone());
                     Ok(next)
                 });
                 if let Err(Ok(lost)) = reply.send(result) {
                     let _ = lost.request_retirement();
                     if host.retire(&lost.session).await.is_ok() {
                         active = None;
-                        if let Ok(mut current) = signal.lock() {*current = None;}
+                        if let Ok(mut current) = signal.lock() {current.active = None;}
                     }
                 }
             }
@@ -182,14 +213,14 @@ async fn serve<S:Store>(mut host: WorkspaceRuntime<S>,mut rx: mpsc::Receiver<Com
                 let result = host.retire(&session).await;
                 if result.is_ok() {
                     active = None;
-                    if let Ok(mut current) = signal.lock() {*current = None;}
+                    if let Ok(mut current) = signal.lock() {current.active = None;}
                 }
                 let _ = reply.send(result);
             }
             Command::Stop(reply) => {
                 let result = match active {Some(session)=>host.retire(&session).await,None=>Ok(())};
                 if result.is_ok() {
-                    if let Ok(mut current) = signal.lock() {*current = None;}
+                    if let Ok(mut current) = signal.lock() {current.active = None;}
                     let _ = reply.send(Ok(()));
                     return;
                 }
@@ -258,13 +289,16 @@ IFS= read -r line
             drop(rx);
         }
         // Queue full, but retirement must close the gate independently.
-        assert!(worker.retire(&first).await.is_err() || gate.current_epoch().is_err());
+        let (tx,rx)=oneshot::channel();
+        assert!(worker.submit(Command::Enroll(tx)).is_err());
+        drop(rx);
+        let _ = worker.retire(&first).await;
         assert!(gate.current_epoch().is_err());
         assert!(!gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(),true).await);
         assert!(tokio::time::timeout(Duration::from_secs(5),run).await.unwrap().unwrap().is_err());
         // Barrier queued after all canceled enrollment work.
         let (tx,rx)=oneshot::channel();
-        worker.submit(Command::Retire(session,tx)).unwrap();
+        worker.tx.send(Command::Retire(session,tx)).await.unwrap();
         // A first retirement may have raced the queue drain and succeeded.
         let _=receive(rx).await;
         let second=worker.activate(b).await.unwrap();
