@@ -2,11 +2,12 @@
 //! Trusted host chooses the executable, argv and cwd. Never expose these
 //! configuration inputs to a model or remote IPC. No tools/call entrypoint.
 use super::{
-    mcp_catalog::{McpCatalog, McpDescriptor},
+    approvals::ApprovalGate,
+    mcp_catalog::{McpAuthority, McpCatalog, McpDescriptor, McpPolicy},
     mcp_wire::WireSession,
 };
 use serde_json::{json, Value};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const PROTOCOL: &str = "2025-06-18";
@@ -206,6 +207,151 @@ impl StdioDiscovery {
     }
 }
 
+
+/// Exclusive owner of one connector. No external catalog or transport
+/// authority is exposed. Rust's mutable borrow serializes policy mutation,
+/// discovery and dispatch through the complete bounded response. A canceled
+/// call leaves the connector closed to further use, until explicitly reaped.
+/// This is a trusted-host component, not a production IPC route.
+pub(crate) struct OwnedConnector {
+    connector: String,
+    child: StdioDiscovery,
+    authority: McpAuthority,
+    gate: Arc<ApprovalGate>,
+    online: bool,
+}
+
+impl OwnedConnector {
+    pub(crate) async fn connect(
+        connector: String,
+        executable: &Path,
+        args: &[String],
+        cwd: &Path,
+        gate: Arc<ApprovalGate>,
+    ) -> Result<Self, DiscoveryError> {
+        let child = StdioDiscovery::start(executable, args, cwd).await?;
+        let mut owner = Self {
+            connector,
+            child,
+            authority: McpAuthority::default(),
+            gate,
+            online: false,
+        };
+        if let Err(error) = owner.refresh().await {
+            let _ = owner.shutdown().await;
+            return Err(error);
+        }
+        Ok(owner)
+    }
+
+    pub(crate) async fn refresh(&mut self) -> Result<(), DiscoveryError> {
+        if !self.child.usable {
+            return Err(DiscoveryError::Process);
+        }
+        self.online = false;
+        self.child.usable = false;
+        // Revoke old generation before starting I/O, including on cancellation.
+        self.authority
+            .remove(&self.connector)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        let descriptors = tokio::time::timeout(DISCOVERY_DEADLINE, self.child.discover())
+            .await
+            .map_err(|_| DiscoveryError::Deadline)??;
+        self.authority
+            .replace(&self.connector, descriptors)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        self.child.usable = true;
+        self.online = true;
+        Ok(())
+    }
+
+    pub(crate) fn set_policy(
+        &mut self,
+        function: &str,
+        policy: McpPolicy,
+    ) -> Result<(), DiscoveryError> {
+        if !self.online {
+            return Err(DiscoveryError::Process);
+        }
+        self.authority
+            .set_policy(function, policy)
+            .map_err(|_| DiscoveryError::Catalog)
+    }
+
+    /// Returns an explicitly undisclosed bounded result to the trusted caller.
+    /// It is not an authorization to send that result to a model or peer.
+    pub(crate) async fn call(
+        &mut self,
+        function: &str,
+        arguments: Value,
+    ) -> Result<Value, DiscoveryError> {
+        if !self.online || !self.child.usable {
+            return Err(DiscoveryError::Process);
+        }
+        let plan = self
+            .authority
+            .prepare(function, arguments)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        if plan.policy() == McpPolicy::Ask {
+            // Escapes preserve every byte, including non-ASCII and backslash.
+            // Shared gate rejects any preview that cannot be shown in full.
+            let bytes = serde_json::to_vec(plan.arguments())
+                .map_err(|_| DiscoveryError::Catalog)?;
+            let preview: String = bytes
+                .iter()
+                .flat_map(|&byte| std::ascii::escape_default(byte))
+                .map(char::from)
+                .collect();
+            self.gate
+                .require_explicit_ask(plan.function(), &preview)
+                .await
+                .map_err(|_| DiscoveryError::Catalog)?;
+        }
+        self.authority
+            .recheck(&plan)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        let remote = plan
+            .function()
+            .split_once("__")
+            .map(|(_, remote)| remote)
+            .ok_or(DiscoveryError::Catalog)?;
+        // Before the first transport await, close admission. No other mutable
+        // operation can interleave, even if the request future is canceled.
+        self.online = false;
+        self.child.usable = false;
+        let result = self
+            .child
+            .wire
+            .request("tools/call", json!({"name":remote,"arguments":plan.arguments()}))
+            .await
+            .map_err(|_| DiscoveryError::Protocol)?;
+        if !result.is_object()
+            || !result.get("content").is_some_and(Value::is_array)
+            || result.get("isError").is_some_and(|v| !v.is_boolean())
+        {
+            return Err(DiscoveryError::Protocol);
+        }
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            // Tool-level errors may carry arbitrary private diagnostics.
+            return Err(DiscoveryError::Protocol);
+        }
+        if serde_json::to_vec(&result)
+            .map_err(|_| DiscoveryError::Protocol)?
+            .len()
+            > 8192
+        {
+            return Err(DiscoveryError::Protocol);
+        }
+        self.child.usable = true;
+        self.online = true;
+        Ok(result)
+    }
+
+    pub(crate) async fn shutdown(self) -> Result<(), DiscoveryError> {
+        self.child.shutdown().await
+    }
+}
+
 async fn reap(child: &mut Child) -> Result<(), DiscoveryError> {
     if child
         .try_wait()
@@ -319,5 +465,93 @@ IFS= read -r line
             Err(DiscoveryError::Process)
         );
         client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_connector_requires_exact_policy_and_shared_ask_before_wire_call() {
+        let script = format!(
+            "{START}{}",
+            r#"
+IFS= read -r line || exit 5
+case "$line" in *'"method":"tools/list"'*) ;; *) exit 6 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}]}}'
+IFS= read -r line || exit 7
+case "$line" in *'"method":"tools/call"'*'"query":"ok"'*'"name":"read"'*) ;; *) exit 8 ;; esac
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"fixture"}]}}'
+IFS= read -r line
+"#
+        );
+        // Even an unrelated builtin-policy Auto entry cannot bypass explicit Ask.
+        let gate = ApprovalGate::new(std::collections::HashMap::from([(
+            "fixture__read".into(),
+            super::super::approvals::Policy::Auto,
+        )]));
+        let mut events = gate.subscribe();
+        let mut owner = OwnedConnector::connect(
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            Path::new("/"),
+            gate.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            owner.call("fixture__read", json!({"query":"ok"})).await,
+            Err(DiscoveryError::Catalog)
+        );
+        owner.set_policy("fixture__read", McpPolicy::Ask).unwrap();
+        assert_eq!(
+            owner.call("fixture__read", json!({"bad":"ok"})).await,
+            Err(DiscoveryError::Catalog)
+        );
+        let deny = async {
+            let request = events.recv().await.unwrap();
+            assert_eq!(request.tool, "fixture__read");
+            assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), false).await);
+        };
+        let (result, ()) = tokio::join!(owner.call("fixture__read", json!({"query":"ok"})), deny);
+        assert_eq!(result, Err(DiscoveryError::Catalog));
+        let approve = async {
+            let request = events.recv().await.unwrap();
+            assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true).await);
+        };
+        let (result, ()) = tokio::join!(owner.call("fixture__read", json!({"query":"ok"})), approve);
+        assert_eq!(result.unwrap()["content"][0]["text"], "fixture");
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_call_reply_closes_live_admission() {
+        let script = format!(
+            "{START}{}",
+            r#"
+IFS= read -r line || exit 5
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}}'
+IFS= read -r line || exit 6
+printf '%s\n' '{"jsonrpc":"2.0","id":999,"result":{"content":[]}}'
+IFS= read -r line
+"#
+        );
+        let gate = ApprovalGate::new(Default::default());
+        let mut owner = OwnedConnector::connect(
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &["-c".into(), script],
+            Path::new("/"),
+            gate,
+        )
+        .await
+        .unwrap();
+        owner.set_policy("fixture__read", McpPolicy::Auto).unwrap();
+        assert_eq!(
+            owner.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Protocol)
+        );
+        assert_eq!(
+            owner.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Process)
+        );
+        owner.shutdown().await.unwrap();
     }
 }
