@@ -26,7 +26,12 @@ pub(crate) trait AgentConnector {
     fn catalog(&self) -> Result<McpCatalog, ()>;
     fn gate(&self) -> Arc<ApprovalGate>;
     fn captured_epoch(&self) -> Result<ApprovalEpoch, ()>;
-    async fn dispatch(&mut self, epoch: ApprovalEpoch, name: &str, args: Value) -> Result<Value, ()>;
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()>;
 }
 
 impl AgentConnector for OwnedConnector {
@@ -39,7 +44,12 @@ impl AgentConnector for OwnedConnector {
     fn captured_epoch(&self) -> Result<ApprovalEpoch, ()> {
         self.epoch().map_err(|_| ())
     }
-    async fn dispatch(&mut self, epoch: ApprovalEpoch, name: &str, args: Value) -> Result<Value, ()> {
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()> {
         self.call_for_epoch(epoch, name, args).await.map_err(|_| ())
     }
 }
@@ -54,7 +64,12 @@ impl AgentConnector for SessionRegistry {
     fn captured_epoch(&self) -> Result<ApprovalEpoch, ()> {
         self.epoch().map_err(|_| ())
     }
-    async fn dispatch(&mut self, epoch: ApprovalEpoch, name: &str, args: Value) -> Result<Value, ()> {
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()> {
         self.call_for_epoch(epoch, name, args).await.map_err(|_| ())
     }
 }
@@ -348,11 +363,19 @@ IFS= read -r line
     #[tokio::test]
     async fn mixed_registry_agent_uses_exact_namespace_and_approved_replay() {
         use axum::{http::StatusCode, response::IntoResponse};
-        for deny_replay in [true,false] {
+        for deny_replay in [true, false] {
             let gate = ApprovalGate::new(Default::default());
             let mut events = gate.subscribe();
             let mut registry = SessionRegistry::new(gate.clone()).unwrap();
-            registry.add_stdio("local".into(),Path::new("/bin/sh"),&["-c".into(),SERVER.into()],Path::new("/")).await.unwrap();
+            registry
+                .add_stdio(
+                    "local".into(),
+                    Path::new("/bin/sh"),
+                    &["-c".into(), SERVER.into()],
+                    Path::new("/"),
+                )
+                .await
+                .unwrap();
             let model_calls = Arc::new(AtomicUsize::new(0));
             let http_calls = Arc::new(AtomicUsize::new(0));
             let model_seen = model_calls.clone();
@@ -398,32 +421,58 @@ IFS= read -r line
                     }
                 }));
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {panic!("IPv4");};
-            let server = tokio::spawn(async move {axum::serve(listener,router).await.unwrap();});
-            registry.add_http("remote".into(),address).await.unwrap();
-            registry.set_policy("local__read",McpPolicy::Auto).unwrap();
-            registry.set_policy("remote__read",McpPolicy::Auto).unwrap();
+            let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+                panic!("IPv4");
+            };
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            registry.add_http("remote".into(), address).await.unwrap();
+            registry.set_policy("local__read", McpPolicy::Auto).unwrap();
+            registry
+                .set_policy("remote__read", McpPolicy::Auto)
+                .unwrap();
             let provider = LocalModelProvider::for_test(address);
-            let names = BTreeSet::from(["local__read".into(),"remote__read".into()]);
+            let names = BTreeSet::from(["local__read".into(), "remote__read".into()]);
             let decisions = async {
                 for index in 0..4 {
-                    let request = tokio::time::timeout(std::time::Duration::from_secs(5),events.recv()).await.unwrap().unwrap();
-                    assert_eq!(request.tool,if index%2 == 0 {"agent__stage_result"} else {"agent__send_results"});
+                    let request =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        request.tool,
+                        if index % 2 == 0 {
+                            "agent__stage_result"
+                        } else {
+                            "agent__send_results"
+                        }
+                    );
                     if index == 3 {
                         assert!(request.preview.contains("FIRST_PRIVATE"));
                         assert!(request.preview.contains("HTTP_PRIVATE"));
                     }
-                    assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(),!(deny_replay && index == 3)).await);
+                    assert!(
+                        gate.resolve(
+                            uuid::Uuid::parse_str(&request.id).unwrap(),
+                            !(deny_replay && index == 3)
+                        )
+                        .await
+                    );
                 }
             };
-            let (result,()) = tokio::join!(run(&provider,&mut registry,"mixed question",&names),decisions);
-            assert_eq!(http_calls.load(Ordering::SeqCst),1);
+            let (result, ()) = tokio::join!(
+                run(&provider, &mut registry, "mixed question", &names),
+                decisions
+            );
+            assert_eq!(http_calls.load(Ordering::SeqCst), 1);
             if deny_replay {
-                assert_eq!(result.unwrap_err().reason,LoopError::ProviderFailed);
-                assert_eq!(model_calls.load(Ordering::SeqCst),2);
+                assert_eq!(result.unwrap_err().reason, LoopError::ProviderFailed);
+                assert_eq!(model_calls.load(Ordering::SeqCst), 2);
             } else {
-                assert_eq!(result.unwrap().text,"mixed done");
-                assert_eq!(model_calls.load(Ordering::SeqCst),3);
+                assert_eq!(result.unwrap().text, "mixed done");
+                assert_eq!(model_calls.load(Ordering::SeqCst), 3);
             }
             registry.retire_all().await.unwrap();
             server.abort();

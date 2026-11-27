@@ -113,11 +113,21 @@ impl McpCatalog {
     /// Merge disjoint, already validated snapshots without granting policy.
     /// Validate capacity and duplicate ownership before mutating the target.
     pub(super) fn merge_disjoint(&mut self, other: Self) -> Result<(), CatalogError> {
-        if other.connectors.keys().any(|id| self.connectors.contains_key(id)) {
+        if other
+            .connectors
+            .keys()
+            .any(|id| self.connectors.contains_key(id))
+        {
             return Err(CatalogError::Duplicate);
         }
         if self.connectors.len() + other.connectors.len() > MAX_CONNECTORS
-            || self.connectors.values().chain(other.connectors.values()).map(BTreeMap::len).sum::<usize>() > MAX_TOTAL_TOOLS
+            || self
+                .connectors
+                .values()
+                .chain(other.connectors.values())
+                .map(BTreeMap::len)
+                .sum::<usize>()
+                > MAX_TOTAL_TOOLS
         {
             return Err(CatalogError::Capacity);
         }
