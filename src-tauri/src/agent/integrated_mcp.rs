@@ -5,7 +5,10 @@
 use super::{
     local_model::LocalModelProvider,
     structured_planner::StructuredPlanner,
-    tool_loop::{self, AuthorizedExecutor, LoopAnswer, LoopError, LoopFailure, ModelStep, Observation, Planner, ProviderCall},
+    tool_loop::{
+        self, AuthorizedExecutor, LoopAnswer, LoopError, LoopFailure, ModelStep, Observation,
+        Planner, ProviderCall,
+    },
 };
 use crate::tools::{approvals::ApprovalGate, mcp_stdio_discovery::OwnedConnector};
 use serde_json::{json, Value};
@@ -22,9 +25,11 @@ pub(crate) async fn run(
         confirmed_executions: 0,
     };
     let catalog = connector.planning_catalog().map_err(|_| invalid())?;
-    let available: BTreeSet<String> = catalog.openai_functions().iter().filter_map(|tool| {
-        tool["function"]["name"].as_str().map(str::to_owned)
-    }).collect();
+    let available: BTreeSet<String> = catalog
+        .openai_functions()
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect();
     if !allowed_names.is_subset(&available) {
         return Err(invalid());
     }
@@ -45,9 +50,11 @@ fn preview(value: &Value) -> Result<String, ()> {
     if bytes.len() > 8192 {
         return Err(());
     }
-    let text: String = bytes.iter()
+    let text: String = bytes
+        .iter()
         .flat_map(|&byte| std::ascii::escape_default(byte))
-        .map(char::from).collect();
+        .map(char::from)
+        .collect();
     if text.len() > 8192 {
         return Err(());
     }
@@ -61,7 +68,11 @@ struct ConnectorExecutor<'a> {
 
 impl AuthorizedExecutor for ConnectorExecutor<'_> {
     async fn authorize_and_execute(&mut self, call: &ProviderCall) -> Result<String, ()> {
-        let result = self.connector.call(&call.name, call.arguments.clone()).await.map_err(|_| ())?;
+        let result = self
+            .connector
+            .call(&call.name, call.arguments.clone())
+            .await
+            .map_err(|_| ())?;
         serde_json::to_string(&result).map_err(|_| ())
     }
 
@@ -73,7 +84,10 @@ impl AuthorizedExecutor for ConnectorExecutor<'_> {
         })) else {
             return false;
         };
-        self.gate.require_explicit_ask("agent__stage_result", &text).await.is_ok()
+        self.gate
+            .require_explicit_ask("agent__stage_result", &text)
+            .await
+            .is_ok()
     }
 }
 
@@ -109,13 +123,18 @@ impl Planner for ReleasePlanner<'_> {
                 "destination":"configured loopback OpenAI-compatible provider",
                 "model":self.model,"tool_transcript":transcript
             }))?;
-            self.gate.require_explicit_ask("agent__send_results", &text).await.map_err(|_| ())?;
+            self.gate
+                .require_explicit_ask("agent__send_results", &text)
+                .await
+                .map_err(|_| ())?;
         }
         self.gate.ensure_running().map_err(|_| ())?;
         let step = self.inner.next(prompt, names, observations).await?;
         if let ModelStep::Call(call) = &step {
             self.calls.push(ProviderCall {
-                id:call.id.clone(), name:call.name.clone(), arguments:call.arguments.clone(),
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
             });
         }
         Ok(step)
@@ -127,7 +146,10 @@ mod tests {
     use super::*;
     use crate::tools::mcp_catalog::McpPolicy;
     use axum::{routing::post, Json, Router};
-    use std::{path::Path, sync::atomic::{AtomicUsize, Ordering}};
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
     use tokio::net::TcpListener;
 
     const SERVER: &str = r#"
@@ -151,10 +173,17 @@ IFS= read -r line
             let gate = ApprovalGate::new(Default::default());
             let mut events = gate.subscribe();
             let mut connector = OwnedConnector::connect(
-                "fixture".into(), Path::new("/bin/sh"),
-                &["-c".into(),SERVER.into()],Path::new("/"),gate.clone()
-            ).await.unwrap();
-            connector.set_policy("fixture__read", McpPolicy::Auto).unwrap();
+                "fixture".into(),
+                Path::new("/bin/sh"),
+                &["-c".into(), SERVER.into()],
+                Path::new("/"),
+                gate.clone(),
+            )
+            .await
+            .unwrap();
+            connector
+                .set_policy("fixture__read", McpPolicy::Auto)
+                .unwrap();
             let requests = Arc::new(AtomicUsize::new(0));
             let seen = requests.clone();
             let router = Router::new().route("/v1/chat/completions", post(
@@ -182,28 +211,46 @@ IFS= read -r line
             let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
                 panic!("IPv4 fixture");
             };
-            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
             let provider = LocalModelProvider::for_test(address);
             let names = BTreeSet::from(["fixture__read".into()]);
             let decisions = async {
                 for index in 0..4 {
                     let request = events.recv().await.unwrap();
-                    assert_eq!(request.tool, if index % 2 == 0 {"agent__stage_result"} else {"agent__send_results"});
+                    assert_eq!(
+                        request.tool,
+                        if index % 2 == 0 {
+                            "agent__stage_result"
+                        } else {
+                            "agent__send_results"
+                        }
+                    );
                     if index == 3 {
                         assert!(request.preview.contains("FIRST_PRIVATE"));
                         assert!(request.preview.contains("SECOND_PRIVATE"));
                     }
-                    assert!(gate.resolve(uuid::Uuid::parse_str(&request.id).unwrap(), !(deny_replay && index == 3)).await);
+                    assert!(
+                        gate.resolve(
+                            uuid::Uuid::parse_str(&request.id).unwrap(),
+                            !(deny_replay && index == 3)
+                        )
+                        .await
+                    );
                 }
             };
-            let (result, ()) = tokio::join!(run(&provider,&mut connector,"question",&names), decisions);
+            let (result, ()) = tokio::join!(
+                run(&provider, &mut connector, "question", &names),
+                decisions
+            );
             if deny_replay {
                 let error = result.unwrap_err();
                 assert_eq!(error.confirmed_executions, 2);
                 assert_eq!(error.reason, LoopError::ProviderFailed);
                 assert_eq!(requests.load(Ordering::SeqCst), 2);
             } else {
-                assert_eq!(result.unwrap().text,"done");
+                assert_eq!(result.unwrap().text, "done");
                 assert_eq!(requests.load(Ordering::SeqCst), 3);
             }
             connector.shutdown().await.unwrap();
