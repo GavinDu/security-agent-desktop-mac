@@ -385,7 +385,7 @@ impl McpAuthority {
 pub(super) fn valid_connector(id: &str) -> bool {
     // Lowercase ASCII IDs with no underscores cannot collide with the "__"
     // separator. Reserve both existing builtin connector namespaces.
-    !matches!(id, "filesystem" | "bash")
+    !matches!(id, "filesystem" | "bash" | "agent")
         && (1..=32).contains(&id.len())
         && id.as_bytes()[0].is_ascii_lowercase()
         && id
