@@ -67,6 +67,7 @@ enum Command {
 #[derive(Default)]
 struct Control {
     stopping: bool,
+    stopped_cleanly: bool,
     active: Option<SessionSignal>,
 }
 
@@ -109,6 +110,7 @@ impl WorkspaceWorker {
                 if ready.send(Ok(())).is_ok() {
                     runtime.block_on(serve(host, rx, worker_signal));
                 }
+                drop(runtime);
                 let _ = exit.send(());
             })
             .map_err(|_| "Workspace worker unavailable")?;
@@ -230,11 +232,33 @@ impl WorkspaceWorker {
         self.submit(Command::Retire(signal.session, tx))?;
         receive(rx).await
     }
+    // Trusted readback when the activation reply was delivered but the
+    // receiver was dropped before observing it. Never auto-activate again.
+    pub(crate) fn current_signal(&self) -> Result<Option<SessionSignal>, String> {
+        let control = self.signal.lock().map_err(|_| "Workspace signal unavailable")?;
+        Ok(control.active.clone())
+    }
+
+    fn stopped_cleanly(&self) -> Result<bool, String> {
+        self.signal.lock().map(|control| control.stopped_cleanly)
+            .map_err(|_| "Workspace signal unavailable".into())
+    }
+
     pub(crate) async fn stop(&mut self) -> Result<(), String> {
         close_current(&self.signal)?;
-        let (tx, rx) = oneshot::channel();
-        self.submit(Command::Stop(tx))?;
-        receive(rx).await?;
+        if !self.stopped_cleanly()? {
+            let (tx, rx) = oneshot::channel();
+            let result = match self.submit(Command::Stop(tx)) {
+                Ok(()) => receive(rx).await,
+                Err(error) => Err(error),
+            };
+            // An earlier canceled stop may have completed while this
+            // caller was submitting or waiting for its own acknowledgement.
+            if !self.stopped_cleanly()? {
+                result?;
+                return Err("Workspace worker stop unconfirmed".into());
+            }
+        }
         if let Some(exit) = self.exited.as_mut() {
             exit.await
                 .map_err(|_| "Workspace worker exit unconfirmed")?;
@@ -357,6 +381,7 @@ async fn serve<S: Store>(
                 if result.is_ok() {
                     if let Ok(mut current) = signal.lock() {
                         current.active = None;
+                        current.stopped_cleanly = true;
                     }
                     let _ = reply.send(Ok(()));
                     return;
@@ -492,6 +517,9 @@ IFS= read -r line
         assert!(second.gate().current_epoch().is_ok());
         worker.retire(&second).await.unwrap();
         worker.stop().await.unwrap();
+        worker.stop().await.unwrap();
+        assert!(worker.current_signal().unwrap().is_none());
+        assert!(worker.activate(a).await.is_err());
         server.abort();
     }
 }
