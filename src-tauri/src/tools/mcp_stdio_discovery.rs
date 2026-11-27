@@ -217,6 +217,7 @@ pub(crate) struct OwnedConnector {
     child: StdioDiscovery,
     authority: McpAuthority,
     gate: Arc<ApprovalGate>,
+    epoch: ApprovalEpoch,
     online: bool,
 }
 
@@ -228,15 +229,22 @@ impl OwnedConnector {
         cwd: &Path,
         gate: Arc<ApprovalGate>,
     ) -> Result<Self, DiscoveryError> {
+        let epoch = gate.current_epoch().map_err(|_| DiscoveryError::Catalog)?;
+        let dispatch = gate.clone();
+        let _lease = dispatch
+            .dispatch_for_epoch(epoch)
+            .await
+            .map_err(|_| DiscoveryError::Catalog)?;
         let child = StdioDiscovery::start(executable, args, cwd).await?;
         let mut owner = Self {
             connector,
             child,
             authority: McpAuthority::default(),
             gate,
+            epoch,
             online: false,
         };
-        if let Err(error) = owner.refresh().await {
+        if let Err(error) = owner.refresh_admitted().await {
             let _ = owner.shutdown().await;
             return Err(error);
         }
@@ -244,6 +252,16 @@ impl OwnedConnector {
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), DiscoveryError> {
+        let gate = self.gate.clone();
+        let _lease = gate
+            .dispatch_for_epoch(self.epoch)
+            .await
+            .map_err(|_| DiscoveryError::Catalog)?;
+        self.refresh_admitted().await
+    }
+
+    // Called only while holding the original epoch's dispatch lease.
+    async fn refresh_admitted(&mut self) -> Result<(), DiscoveryError> {
         if !self.child.usable {
             return Err(DiscoveryError::Process);
         }
@@ -269,6 +287,7 @@ impl OwnedConnector {
         function: &str,
         policy: McpPolicy,
     ) -> Result<(), DiscoveryError> {
+        self.epoch()?;
         if !self.online {
             return Err(DiscoveryError::Process);
         }
@@ -278,12 +297,21 @@ impl OwnedConnector {
     }
 
     pub(crate) fn planning_catalog(&self) -> Result<McpCatalog, DiscoveryError> {
+        self.epoch()?;
         if !self.online || !self.child.usable {
             return Err(DiscoveryError::Process);
         }
         self.authority
             .planning_catalog(&self.connector)
             .map_err(|_| DiscoveryError::Catalog)
+    }
+
+    /// Never grant a retained connector a new epoch implicitly.
+    pub(crate) fn epoch(&self) -> Result<ApprovalEpoch, DiscoveryError> {
+        self.gate
+            .ensure_epoch(self.epoch)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        Ok(self.epoch)
     }
 
     pub(crate) fn approval_gate(&self) -> Arc<ApprovalGate> {
@@ -297,11 +325,7 @@ impl OwnedConnector {
         function: &str,
         arguments: Value,
     ) -> Result<Value, DiscoveryError> {
-        let epoch = self
-            .gate
-            .current_epoch()
-            .map_err(|_| DiscoveryError::Catalog)?;
-        self.call_for_epoch(epoch, function, arguments).await
+        self.call_for_epoch(self.epoch, function, arguments).await
     }
 
     pub(crate) async fn call_for_epoch(
@@ -310,9 +334,10 @@ impl OwnedConnector {
         function: &str,
         arguments: Value,
     ) -> Result<Value, DiscoveryError> {
-        self.gate
-            .ensure_epoch(epoch)
-            .map_err(|_| DiscoveryError::Catalog)?;
+        if epoch != self.epoch {
+            return Err(DiscoveryError::Catalog);
+        }
+        self.epoch()?;
         if !self.online || !self.child.usable {
             return Err(DiscoveryError::Process);
         }
@@ -631,5 +656,65 @@ IFS= read -r line
             Err(DiscoveryError::Process)
         );
         owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_connector_cannot_launder_a_new_epoch() {
+        let script = format!(
+            "{START}{}",
+            r#"
+IFS= read -r line || exit 5
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}}'
+IFS= read -r line || exit 6
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[]}}'
+IFS= read -r line
+"#
+        );
+        let gate = ApprovalGate::new(Default::default());
+        let args = ["-c".into(), script];
+        let mut old = OwnedConnector::connect(
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &args,
+            Path::new("/"),
+            gate.clone(),
+        )
+        .await
+        .unwrap();
+        old.set_policy("fixture__read", McpPolicy::Auto).unwrap();
+        let previous = old.epoch().unwrap();
+        let current = gate.rotate_after_dispatch().await.unwrap();
+        assert!(previous != current);
+        assert!(old.epoch().is_err());
+        assert!(old.planning_catalog().is_err());
+        assert!(old.set_policy("fixture__read", McpPolicy::Auto).is_err());
+        assert_eq!(old.refresh().await, Err(DiscoveryError::Catalog));
+        assert_eq!(
+            old.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Catalog)
+        );
+        assert_eq!(
+            old.call_for_epoch(current, "fixture__read", json!({}))
+                .await,
+            Err(DiscoveryError::Catalog)
+        );
+        old.shutdown().await.unwrap();
+        let mut fresh = OwnedConnector::connect(
+            "fixture".into(),
+            Path::new("/bin/sh"),
+            &args,
+            Path::new("/"),
+            gate,
+        )
+        .await
+        .unwrap();
+        assert!(fresh.epoch().unwrap() == current);
+        assert_eq!(
+            fresh.call("fixture__read", json!({})).await,
+            Err(DiscoveryError::Catalog)
+        );
+        fresh.set_policy("fixture__read", McpPolicy::Auto).unwrap();
+        assert!(fresh.call("fixture__read", json!({})).await.is_ok());
+        fresh.shutdown().await.unwrap();
     }
 }
