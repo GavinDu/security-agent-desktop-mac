@@ -124,6 +124,7 @@ impl EnrollmentStore {
         let dir = AccountSettingsDirectory::open_under(&self.root, &leaf, false)?
             .ok_or("Enrollment directory unavailable")?;
         dir.save(&Default::default())?;
+        dir.sync_directory()?;
         let mut next = Manifest {
             version: 1,
             accounts: self.manifest.accounts.clone(),
