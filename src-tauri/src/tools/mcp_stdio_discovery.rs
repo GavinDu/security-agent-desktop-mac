@@ -277,6 +277,17 @@ impl OwnedConnector {
             .map_err(|_| DiscoveryError::Catalog)
     }
 
+    pub(crate) fn planning_catalog(&self) -> Result<McpCatalog, DiscoveryError> {
+        if !self.online || !self.child.usable {
+            return Err(DiscoveryError::Process);
+        }
+        self.authority.planning_catalog(&self.connector).map_err(|_| DiscoveryError::Catalog)
+    }
+
+    pub(crate) fn approval_gate(&self) -> Arc<ApprovalGate> {
+        self.gate.clone()
+    }
+
     /// Returns an explicitly undisclosed bounded result to the trusted caller.
     /// It is not an authorization to send that result to a model or peer.
     pub(crate) async fn call(
