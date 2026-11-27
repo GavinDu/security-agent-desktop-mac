@@ -14,7 +14,7 @@ pub(super) struct AccountSettingsDirectory {
     directory: File,
 }
 
-fn private_child(parent: &File, name: &CStr, create: bool) -> io::Result<File> {
+pub(super) fn private_child(parent: &File, name: &CStr, create: bool) -> io::Result<File> {
     if create {
         // SAFETY: parent owns an open directory and name is a fixed CString.
         let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
@@ -62,7 +62,15 @@ impl AccountSettingsDirectory {
             Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err("Account settings directory unavailable".into()),
         };
-        match private_child(&root, &leaf, create) {
+        Self::open_under(&root, &leaf, create)
+    }
+
+    pub(super) fn open_under(
+        root: &File,
+        leaf: &CStr,
+        create: bool,
+    ) -> Result<Option<Self>, String> {
+        match private_child(root, leaf, create) {
             Ok(directory) => Ok(Some(Self { directory })),
             Err(error) if !create && error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err("Account settings directory unavailable".into()),
