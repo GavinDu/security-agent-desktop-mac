@@ -589,14 +589,12 @@ IFS= read -r line
         .await
         .unwrap();
         owner.set_policy("fixture__read", McpPolicy::Auto).unwrap();
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(20),
-                owner.call("fixture__read", json!({}))
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            owner.call("fixture__read", json!({}))
+        )
+        .await
+        .is_err());
         assert_eq!(
             owner.call("fixture__read", json!({})).await,
             Err(DiscoveryError::Process)
