@@ -17,6 +17,10 @@ impl AccountId {
     pub(crate) fn issue() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub(crate) fn as_uuid(self) -> Uuid {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
