@@ -411,6 +411,14 @@ impl OwnedConnector {
     pub(crate) async fn shutdown(self) -> Result<(), DiscoveryError> {
         self.child.shutdown().await
     }
+
+    /// Retain the direct-child handle if waiting is interrupted or fails.
+    /// Never reopen admission after a retirement attempt.
+    pub(super) async fn retire(&mut self) -> Result<(), DiscoveryError> {
+        self.online = false;
+        self.child.usable = false;
+        reap(&mut self.child.child).await
+    }
 }
 
 async fn reap(child: &mut Child) -> Result<(), DiscoveryError> {
