@@ -82,10 +82,19 @@ impl SessionRegistry {
     ) -> Result<(), RegistryError> {
         self.admit_connector(&id)?;
         let gate = self.gate.clone();
-        let _lease = gate.dispatch_for_epoch(self.epoch).await.map_err(|_| RegistryError::Closed)?;
+        let _lease = gate
+            .dispatch_for_epoch(self.epoch)
+            .await
+            .map_err(|_| RegistryError::Closed)?;
         let owner = OwnedConnector::spawn_admitted(
-            id.clone(), executable, args, cwd, gate.clone(), self.epoch,
-        ).map_err(|_| RegistryError::Configuration)?;
+            id.clone(),
+            executable,
+            args,
+            cwd,
+            gate.clone(),
+            self.epoch,
+        )
+        .map_err(|_| RegistryError::Configuration)?;
         // Reserve the ID and retain the child BEFORE the first wire await.
         // Cancellation or handshake failure leaves it non-admissible and
         // explicitly removable. Never silently release the child handle.
@@ -96,8 +105,12 @@ impl SessionRegistry {
         let Owner::Stdio(owner) = &mut entry.owner else {
             return Err(RegistryError::Configuration);
         };
-        owner.initialize_admitted().await.map_err(|_| RegistryError::Configuration)?;
-        gate.ensure_epoch(self.epoch).map_err(|_| RegistryError::Closed)?;
+        owner
+            .initialize_admitted()
+            .await
+            .map_err(|_| RegistryError::Configuration)?;
+        gate.ensure_epoch(self.epoch)
+            .map_err(|_| RegistryError::Closed)?;
         entry.retiring = false;
         Ok(())
     }
@@ -375,11 +388,16 @@ IFS= read -r line
     async fn canceled_or_failed_startup_reserves_child_until_explicit_retirement() {
         let gate = ApprovalGate::new(Default::default());
         let mut registry = SessionRegistry::new(gate).unwrap();
-        let blocked = ["-c".into(),"IFS= read -r line; IFS= read -r line".into()];
+        let blocked = ["-c".into(), "IFS= read -r line; IFS= read -r line".into()];
         // A free dispatch lease and synchronous spawn complete in the first
         // poll; the child will never reply to initialize.
         {
-            let start = registry.add_stdio("blocked".into(),Path::new("/bin/sh"),&blocked,Path::new("/"));
+            let start = registry.add_stdio(
+                "blocked".into(),
+                Path::new("/bin/sh"),
+                &blocked,
+                Path::new("/"),
+            );
             tokio::pin!(start);
             tokio::select! {
                 biased;
@@ -388,17 +406,50 @@ IFS= read -r line
             }
         }
         assert!(registry.owners.get("blocked").unwrap().retiring);
-        assert!(registry.planning_catalog().unwrap().openai_functions().is_empty());
-        assert_eq!(registry.set_policy("blocked__read",McpPolicy::Auto),Err(RegistryError::Denied));
-        assert_eq!(registry.add_stdio("blocked".into(),Path::new("/bin/sh"),&blocked,Path::new("/")).await,Err(RegistryError::Configuration));
+        assert!(registry
+            .planning_catalog()
+            .unwrap()
+            .openai_functions()
+            .is_empty());
+        assert_eq!(
+            registry.set_policy("blocked__read", McpPolicy::Auto),
+            Err(RegistryError::Denied)
+        );
+        assert_eq!(
+            registry
+                .add_stdio(
+                    "blocked".into(),
+                    Path::new("/bin/sh"),
+                    &blocked,
+                    Path::new("/")
+                )
+                .await,
+            Err(RegistryError::Configuration)
+        );
         registry.remove("blocked").await.unwrap();
         assert!(!registry.owners.contains_key("blocked"));
 
-        let invalid = ["-c".into(),"IFS= read -r line; printf '%s\\n' '{}' ; IFS= read -r line".into()];
-        assert_eq!(registry.add_stdio("bad".into(),Path::new("/bin/sh"),&invalid,Path::new("/")).await,Err(RegistryError::Configuration));
+        let invalid = [
+            "-c".into(),
+            "IFS= read -r line; printf '%s\\n' '{}' ; IFS= read -r line".into(),
+        ];
+        assert_eq!(
+            registry
+                .add_stdio("bad".into(), Path::new("/bin/sh"), &invalid, Path::new("/"))
+                .await,
+            Err(RegistryError::Configuration)
+        );
         assert!(registry.owners.get("bad").unwrap().retiring);
         registry.remove("bad").await.unwrap();
-        registry.add_stdio("blocked".into(),Path::new("/bin/sh"),&["-c".into(),CHILD.into()],Path::new("/")).await.unwrap();
+        registry
+            .add_stdio(
+                "blocked".into(),
+                Path::new("/bin/sh"),
+                &["-c".into(), CHILD.into()],
+                Path::new("/"),
+            )
+            .await
+            .unwrap();
         assert!(!registry.owners.get("blocked").unwrap().retiring);
         registry.retire_all().await.unwrap();
         assert!(registry.owners.is_empty());

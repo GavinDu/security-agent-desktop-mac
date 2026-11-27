@@ -54,11 +54,7 @@ impl StdioDiscovery {
 
     // No await between successful spawn and return of its owned handle.
     // Even an unexpected missing piped FD remains tracked for retirement.
-    fn spawn(
-        executable: &Path,
-        args: &[String],
-        cwd: &Path,
-    ) -> Result<Self, DiscoveryError> {
+    fn spawn(executable: &Path, args: &[String], cwd: &Path) -> Result<Self, DiscoveryError> {
         if !executable.is_absolute()
             || !cwd.is_absolute()
             || args.len() > 32
@@ -84,7 +80,11 @@ impl StdioDiscovery {
             (Some(stdout), Some(stdin)) => Some(WireSession::new(stdout, stdin)),
             _ => None,
         };
-        Ok(Self { wire, child, usable: false })
+        Ok(Self {
+            wire,
+            child,
+            usable: false,
+        })
     }
 
     async fn initialize(&mut self) -> Result<(), DiscoveryError> {
@@ -276,7 +276,8 @@ impl OwnedConnector {
         gate: Arc<ApprovalGate>,
         epoch: ApprovalEpoch,
     ) -> Result<Self, DiscoveryError> {
-        gate.ensure_epoch(epoch).map_err(|_| DiscoveryError::Catalog)?;
+        gate.ensure_epoch(epoch)
+            .map_err(|_| DiscoveryError::Catalog)?;
         let child = StdioDiscovery::spawn(executable, args, cwd)?;
         Ok(Self {
             connector,
