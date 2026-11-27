@@ -4,14 +4,24 @@
 use super::{enrollment::EnrollmentStore, workspace::WorkspaceCoordinator, AgentSettings};
 use crate::{
     account_credentials::{AccountId, ActiveSession, CredentialRef, Purpose, Secret, Store},
-    tools::approvals::ApprovalGate,
+    agent::{
+        integrated_mcp,
+        local_model::LocalModelProvider,
+        tool_loop::{LoopAnswer, LoopError, LoopFailure},
+    },
+    tools::{
+        approvals::ApprovalGate,
+        mcp_catalog::{McpCatalog, McpPolicy},
+        mcp_session::SessionRegistry,
+    },
 };
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, net::SocketAddrV4, path::Path, sync::Arc};
 use uuid::Uuid;
 
 struct Running {
     session: ActiveSession,
     gate: Arc<ApprovalGate>,
+    connectors: SessionRegistry,
 }
 
 pub(crate) struct WorkspaceRuntime<S> {
@@ -52,7 +62,15 @@ impl<S: Store> WorkspaceRuntime<S> {
             .settings(&session)
             .map_err(|_| "Workspace unavailable")?;
         let gate = ApprovalGate::new(settings.policies.clone());
-        self.active = Some(Running { session, gate });
+        let connectors = match SessionRegistry::new(gate.clone()) {
+            Ok(connectors) => connectors,
+            Err(_) => {
+                let _ = gate.cancel_pending_for_shutdown();
+                let _ = self.workspace.deactivate(&session);
+                return Err("Workspace connector authority unavailable".into());
+            }
+        };
+        self.active = Some(Running { session, gate, connectors });
         Ok(session)
     }
 
@@ -64,6 +82,53 @@ impl<S: Store> WorkspaceRuntime<S> {
             .ok_or("Workspace session unavailable")?;
         active.gate.ensure_running()?;
         Ok(active)
+    }
+
+    fn current_mut(&mut self, session: &ActiveSession) -> Result<&mut Running, String> {
+        let active = self.active.as_mut()
+            .filter(|active| active.session == *session)
+            .ok_or("Workspace session unavailable")?;
+        active.gate.ensure_running()?;
+        Ok(active)
+    }
+
+    // Trusted host configuration only; neither an owner nor a mutable
+    // registry reference escapes this session. All errors are fixed classes.
+    pub(crate) async fn add_stdio(&mut self, session: &ActiveSession, id: String, executable: &Path, args: &[String], cwd: &Path) -> Result<(),String> {
+        self.current_mut(session)?.connectors.add_stdio(id,executable,args,cwd).await
+            .map_err(|_| "Workspace connector unavailable".into())
+    }
+
+    pub(crate) async fn add_http(&mut self, session: &ActiveSession, id: String, address: SocketAddrV4) -> Result<(),String> {
+        self.current_mut(session)?.connectors.add_http(id,address).await
+            .map_err(|_| "Workspace connector unavailable".into())
+    }
+
+    pub(crate) async fn remove_connector(&mut self, session: &ActiveSession, id: &str) -> Result<(),String> {
+        self.current_mut(session)?.connectors.remove(id).await
+            .map_err(|_| "Workspace connector retirement incomplete".into())
+    }
+
+    pub(crate) async fn refresh_connector(&mut self, session: &ActiveSession, id: &str) -> Result<(),String> {
+        self.current_mut(session)?.connectors.refresh(id).await
+            .map_err(|_| "Workspace connector unavailable".into())
+    }
+
+    pub(crate) fn set_connector_policy(&mut self, session: &ActiveSession, function: &str, policy: McpPolicy) -> Result<(),String> {
+        self.current_mut(session)?.connectors.set_policy(function,policy)
+            .map_err(|_| "Workspace connector policy unavailable".into())
+    }
+
+    pub(crate) fn planning_catalog(&self, session: &ActiveSession) -> Result<McpCatalog,String> {
+        self.current(session)?.connectors.planning_catalog()
+            .map_err(|_| "Workspace connector catalog unavailable".into())
+    }
+
+    pub(crate) async fn run_agent(&mut self, session: &ActiveSession, provider: &LocalModelProvider, prompt: &str, allowed: &BTreeSet<String>) -> Result<LoopAnswer,LoopFailure> {
+        let active = self.current_mut(session).map_err(|_| LoopFailure {
+            reason:LoopError::InvalidAuthority,confirmed_executions:0,
+        })?;
+        integrated_mcp::run(provider,&mut active.connectors,prompt,allowed).await
     }
 
     // Trusted host only: connector constructors receive this session's gate.
@@ -117,13 +182,14 @@ impl<S: Store> WorkspaceRuntime<S> {
     pub(crate) async fn retire(&mut self, session: &ActiveSession) -> Result<(), String> {
         let active = self
             .active
-            .as_ref()
+            .as_mut()
             .filter(|active| active.session == *session)
             .ok_or("Workspace session unavailable")?;
-        // Do not take active out until the terminal gate is drained and
-        // workspace deactivation succeeds. Cancellation leaves a closed
-        // gate and a retryable owner, not a new activation opportunity.
+        // Retain the closed session and any unreaped child on cancellation
+        // or retirement failure. Activation is forbidden until success.
         active.gate.retire_after_dispatch().await?;
+        active.connectors.retire_all().await
+            .map_err(|_| "Workspace connector retirement incomplete")?;
         self.workspace
             .deactivate(session)
             .map_err(|_| "Workspace retirement failed")?;
@@ -247,5 +313,41 @@ mod tests {
         assert!(host.gate(&first).is_err());
         assert!(host.accounts().unwrap() == [account]);
         assert!(host.activate(account).is_ok());
+    }
+
+    #[tokio::test]
+    async fn enrolled_account_owns_mixed_connector_catalog_until_retirement() {
+        const CHILD: &str = r#"
+IFS= read -r line || exit 1
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}'
+IFS= read -r line || exit 2
+IFS= read -r line || exit 3
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}}'
+IFS= read -r line
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = WorkspaceRuntime::open(dir.path(),FixtureStore::default()).unwrap();
+        let a = host.enroll().unwrap();
+        let b = host.enroll().unwrap();
+        let first = host.activate(a).unwrap();
+        let gate = host.gate(&first).unwrap();
+        let args = ["-c".into(),CHILD.into()];
+        host.add_stdio(&first,"fixture".into(),Path::new("/bin/sh"),&args,Path::new("/")).await.unwrap();
+        assert!(host.add_stdio(&first,"fixture".into(),Path::new("/bin/sh"),&args,Path::new("/")).await.is_err());
+        assert!(host.planning_catalog(&first).unwrap().openai_functions().is_empty());
+        host.set_connector_policy(&first,"fixture__read",McpPolicy::Auto).unwrap();
+        assert_eq!(host.planning_catalog(&first).unwrap().openai_functions().len(),1);
+        let reference = host.install(&first,Uuid::new_v4(),Purpose::Mcp,&Secret::new("fixture".into()).unwrap()).unwrap();
+        host.retire(&first).await.unwrap();
+        assert!(gate.current_epoch().is_err());
+        let second = host.activate(b).unwrap();
+        assert!(host.planning_catalog(&second).unwrap().openai_functions().is_empty());
+        assert!(host.planning_catalog(&first).is_err());
+        assert!(host.set_connector_policy(&second,"fixture__read",McpPolicy::Auto).is_err());
+        assert!(host.add_stdio(&first,"stale".into(),Path::new("/bin/sh"),&args,Path::new("/")).await.is_err());
+        assert!(host.read(&second,&reference).is_err());
+        host.add_stdio(&second,"fixture".into(),Path::new("/bin/sh"),&args,Path::new("/")).await.unwrap();
+        assert!(host.planning_catalog(&second).unwrap().openai_functions().is_empty());
+        host.retire(&second).await.unwrap();
     }
 }
