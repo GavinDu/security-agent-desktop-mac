@@ -37,7 +37,7 @@ pub(crate) async fn run(
         return Err(invalid());
     }
     let gate = connector.approval_gate();
-    let epoch = gate.current_epoch().map_err(|_| invalid())?;
+    let epoch = connector.epoch().map_err(|_| invalid())?;
     let mut planner = ReleasePlanner {
         inner: StructuredPlanner::new(provider, &catalog),
         gate: gate.clone(),
