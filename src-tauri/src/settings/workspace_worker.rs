@@ -503,7 +503,7 @@ IFS= read -r line
         assert!(worker.accounts().await.unwrap().is_empty());
         let a = worker.enroll().await.unwrap();
         let b = worker.enroll().await.unwrap();
-        assert_eq!(worker.accounts().await.unwrap(), vec![a, b]);
+        assert!(worker.accounts().await.unwrap() == vec![a, b]);
         let first = worker.activate(a).await.unwrap();
         let session = first.session();
         worker
