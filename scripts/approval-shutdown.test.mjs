@@ -41,3 +41,22 @@ test('shutdown and late approval cannot resurrect an old UUID (#208)', async () 
   assert.match(src, /fn poisoned_pending_shutdown_fails_closed_without_recovery_to_approve/);
   assert.match(src, /MAX_PENDING_APPROVALS/);
 });
+
+
+test('dormant workspace worker belongs only to trusted native lifecycle (#322)', async () => {
+  const app = await readFile('src-tauri/src/app.rs', 'utf8');
+  const invokes = app.slice(app.indexOf('.invoke_handler('), app.indexOf('.on_window_event('));
+  assert.doesNotMatch(invokes, /workspace|enroll|activate/i);
+  const setup = app.slice(app.indexOf('.setup('), app.indexOf('.build(tauri::generate_context'));
+  assert.ok(setup.indexOf('app.manage(instance)') < setup.indexOf('WorkspaceWorker::start('));
+  assert.ok(setup.indexOf('AgentState::new_with_local_model(') < setup.indexOf('WorkspaceWorker::start('));
+  assert.match(setup, /app\.manage\(WorkspaceHost::new\(worker\)\)/);
+  assert.doesNotMatch(setup, /worker\.(enroll|activate)\(/);
+  const events = app.slice(app.indexOf('.on_window_event('), app.indexOf('.setup('));
+  const destroyed = events.indexOf('if is_trusted_main_destroyed');
+  assert.ok(destroyed >= 0);
+  assert.doesNotMatch(events.slice(0, destroyed), /stop_workspace/);
+  assert.match(events.slice(destroyed), /stop_workspace\(window\.app_handle\(\)\)/);
+  const exit = app.slice(app.indexOf('if matches!(&event, tauri::RunEvent::Exit)'));
+  assert.match(exit, /stop_workspace\(app\)/);
+});
