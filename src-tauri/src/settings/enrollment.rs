@@ -38,10 +38,33 @@ fn checked_leaf(file: &File) -> Result<(), String> {
     Ok(())
 }
 
+// Own only a successfully acquired flock. Closing a single descriptor
+// does not release an open-file-description lock if a duplicate survives
+// (including a concurrent fork before exec). Explicit owner release does.
+struct EnrollmentLock(File);
+
+impl EnrollmentLock {
+    fn acquire(file: File) -> Result<Self, String> {
+        checked_leaf(&file)?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("Enrollment already owned".into());
+        }
+        Ok(Self(file))
+    }
+}
+
+impl Drop for EnrollmentLock {
+    fn drop(&mut self) {
+        // Best effort, not a cleanup acknowledgment. Never unlink the
+        // lock inode or unlock a descriptor whose acquisition failed.
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 pub(crate) struct EnrollmentStore {
     root: File,
     // Hold the advisory writer lock for the entire owner lifetime.
-    _lock: File,
+    _lock: EnrollmentLock,
     manifest: Manifest,
     usable: bool,
 }
@@ -58,10 +81,7 @@ impl EnrollmentStore {
             0o600,
         )
         .map_err(|_| "Enrollment lock unavailable")?;
-        checked_leaf(&lock)?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("Enrollment already owned".into());
-        }
+        let lock = EnrollmentLock::acquire(lock)?;
         let leaf = CString::new("enrollment-v1.json").unwrap();
         let manifest = match open_settings_at(
             &root,
@@ -199,6 +219,24 @@ mod tests {
     };
 
     #[test]
+    fn owner_drop_releases_lock_even_with_inherited_description() {
+        let base = tempfile::tempdir().unwrap();
+        let mut store = EnrollmentStore::open(base.path()).unwrap();
+        let account = store.enroll().unwrap();
+        let inherited = store._lock.0.try_clone().unwrap();
+        // Separate opens must not acquire or unlock a live owner's lock.
+        assert!(EnrollmentStore::open(base.path()).is_err());
+        assert!(EnrollmentStore::open(base.path()).is_err());
+        drop(store);
+        let next = EnrollmentStore::open(base.path()).unwrap();
+        assert!(next.accounts().unwrap() == [account]);
+        drop(inherited);
+        assert!(EnrollmentStore::open(base.path()).is_err());
+        drop(next);
+        assert!(EnrollmentStore::open(base.path()).is_ok());
+    }
+
+    #[test]
     fn enrollment_survives_restart_without_adopting_legacy_or_unlisted_directory() {
         let base = tempfile::tempdir().unwrap();
         fs::write(base.path().join("settings.json"), b"legacy authority").unwrap();
@@ -260,5 +298,8 @@ mod tests {
         fs::remove_file(&leaf).unwrap();
         fs::hard_link(&target, &leaf).unwrap();
         assert!(EnrollmentStore::open(base.path()).is_err());
+        fs::remove_file(&leaf).unwrap();
+        // Failed initialization must release its acquired writer lock.
+        assert!(EnrollmentStore::open(base.path()).is_ok());
     }
 }
