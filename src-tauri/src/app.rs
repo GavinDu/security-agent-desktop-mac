@@ -119,11 +119,9 @@ pub fn run() {
                 let support = dirs::home_dir()
                     .ok_or_else(|| std::io::Error::other("Home directory unavailable"))?
                     .join(crate::single_instance::DESKTOP_PRIVATE_DIRECTORY);
-                let worker = tauri::async_runtime::block_on(WorkspaceWorker::start(
-                    support,
-                    MacKeychain,
-                ))
-                .map_err(std::io::Error::other)?;
+                let worker =
+                    tauri::async_runtime::block_on(WorkspaceWorker::start(support, MacKeychain))
+                        .map_err(std::io::Error::other)?;
                 // No account activation, migration, or public workspace command.
                 app.manage(WorkspaceHost::new(worker));
             }
