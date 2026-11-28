@@ -43,6 +43,7 @@ impl SessionSignal {
 enum Command {
     Enroll(Reply<AccountId>),
     Activate(AccountId, Reply<SessionSignal>),
+    Replace(ActiveSession, AccountId, Reply<SessionSignal>),
     AddStdio(
         ActiveSession,
         String,
@@ -143,7 +144,57 @@ impl WorkspaceWorker {
     pub(crate) async fn activate(&self, account: AccountId) -> Result<SessionSignal, String> {
         let (tx, rx) = oneshot::channel();
         self.submit(Command::Activate(account, tx))?;
-        receive(rx).await
+        let next = receive(rx).await?;
+        self.confirm_activation(next)
+    }
+
+    // Trusted host only. Close the exact old gate even when the queue is
+    // full. No other command can run between retirement and activation.
+    pub(crate) async fn replace(
+        &self,
+        expected: &SessionSignal,
+        target: AccountId,
+    ) -> Result<SessionSignal, String> {
+        {
+            let control = self
+                .signal
+                .lock()
+                .map_err(|_| "Workspace signal unavailable")?;
+            if control.stopping {
+                return Err("Workspace worker stopping".into());
+            }
+            let old = control
+                .active
+                .as_ref()
+                .filter(|current| {
+                    current.session == expected.session && Arc::ptr_eq(&current.gate, &expected.gate)
+                })
+                .ok_or("Workspace session unavailable")?;
+            old.request_retirement()?;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.submit(Command::Replace(expected.session, target, tx))?;
+        let next = receive(rx).await?;
+        self.confirm_activation(next)
+    }
+
+    fn confirm_activation(&self, next: SessionSignal) -> Result<SessionSignal, String> {
+        let control = self
+            .signal
+            .lock()
+            .map_err(|_| "Workspace signal unavailable")?;
+        if control.stopping {
+            return Err("Workspace worker stopping".into());
+        }
+        let current = control
+            .active
+            .as_ref()
+            .filter(|current| {
+                current.session == next.session && Arc::ptr_eq(&current.gate, &next.gate)
+            })
+            .ok_or("Workspace session unavailable")?;
+        current.gate.ensure_running()?;
+        Ok(next)
     }
     pub(crate) async fn add_stdio(
         &self,
@@ -291,6 +342,47 @@ async fn receive<T>(rx: oneshot::Receiver<Result<T, String>>) -> Result<T, Strin
     rx.await.map_err(|_| "Workspace worker unavailable")?
 }
 
+async fn publish_activation<S: Store>(
+    host: &mut WorkspaceRuntime<S>,
+    active: &mut Option<ActiveSession>,
+    signal: &Mutex<Control>,
+    account: AccountId,
+    reply: Reply<SessionSignal>,
+) {
+    if reply.is_closed() {
+        return;
+    }
+    let result = host.activate(account).and_then(|session| {
+        *active = Some(session);
+        let next = SessionSignal {
+            session,
+            gate: host.gate(&session)?,
+        };
+        let mut control = match signal.lock() {
+            Ok(control) => control,
+            Err(_) => {
+                let _ = next.request_retirement();
+                return Err("Workspace signal unavailable".into());
+            }
+        };
+        if control.stopping {
+            let _ = next.request_retirement();
+            return Err("Workspace worker stopping".into());
+        }
+        control.active = Some(next.clone());
+        Ok(next)
+    });
+    if let Err(Ok(lost)) = reply.send(result) {
+        let _ = lost.request_retirement();
+        if host.retire(&lost.session).await.is_ok() {
+            *active = None;
+            if let Ok(mut current) = signal.lock() {
+                current.active = None;
+            }
+        }
+    }
+}
+
 async fn serve<S: Store>(
     mut host: WorkspaceRuntime<S>,
     mut rx: mpsc::Receiver<Command>,
@@ -313,38 +405,32 @@ async fn serve<S: Store>(
                 }
             }
             Command::Activate(account, reply) => {
-                if reply.is_closed() {
+                publish_activation(&mut host, &mut active, &signal, account, reply).await;
+            }
+            Command::Replace(expected, target, reply) => {
+                // A canceled queued replacement still retires the old
+                // session. It never activates a target without a receiver.
+                if active != Some(expected) {
+                    let _ = reply.send(Err("Workspace session unavailable".into()));
                     continue;
                 }
-                let result = host.activate(account).and_then(|session| {
-                    active = Some(session);
-                    let next = SessionSignal {
-                        session,
-                        gate: host.gate(&session)?,
-                    };
-                    let mut control = match signal.lock() {
-                        Ok(control) => control,
-                        Err(_) => {
-                            let _ = next.request_retirement();
-                            return Err("Workspace signal unavailable".into());
-                        }
-                    };
-                    if control.stopping {
-                        let _ = next.request_retirement();
-                        return Err("Workspace worker stopping".into());
-                    }
-                    control.active = Some(next.clone());
-                    Ok(next)
-                });
-                if let Err(Ok(lost)) = reply.send(result) {
-                    let _ = lost.request_retirement();
-                    if host.retire(&lost.session).await.is_ok() {
-                        active = None;
-                        if let Ok(mut current) = signal.lock() {
-                            current.active = None;
-                        }
-                    }
+                if let Err(error) = host.retire(&expected).await {
+                    let _ = reply.send(Err(error));
+                    continue;
                 }
+                active = None;
+                let may_activate = signal
+                    .lock()
+                    .map(|mut control| {
+                        control.active = None;
+                        !control.stopping
+                    })
+                    .unwrap_or(false);
+                if !may_activate {
+                    let _ = reply.send(Err("Workspace worker stopping".into()));
+                    continue;
+                }
+                publish_activation(&mut host, &mut active, &signal, target, reply).await;
             }
             Command::AddStdio(session, id, exe, args, cwd, reply) => {
                 if !reply.is_closed() {
@@ -440,6 +526,42 @@ IFS= read -r line || exit 4
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"fixture"}]}}'
 IFS= read -r line
 "#;
+    #[tokio::test]
+    async fn replacement_is_exact_session_and_failure_never_restores_old_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        let a = worker.enroll().await.unwrap();
+        let b = worker.enroll().await.unwrap();
+        let first = worker.activate(a).await.unwrap();
+        let second = worker.replace(&first, b).await.unwrap();
+        assert!(first.gate().ensure_running().is_err());
+        assert!(second.gate().ensure_running().is_ok());
+        assert!(worker.replace(&first, a).await.is_err());
+        assert!(second.gate().ensure_running().is_ok());
+        assert!(worker.replace(&second, AccountId::issue()).await.is_err());
+        assert!(second.gate().ensure_running().is_err());
+        assert!(worker.current_signal().unwrap().is_none());
+
+        let third = worker.activate(a).await.unwrap();
+        // Model a dropped caller after admission but before the queued
+        // command starts. Its target must not become active.
+        third.request_retirement().unwrap();
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        worker
+            .submit(Command::Replace(third.session(), b, tx))
+            .unwrap();
+        // Serialized activation is a barrier after canceled replacement.
+        let fresh = worker.activate(a).await.unwrap();
+        assert!(third.gate().ensure_running().is_err());
+        assert!(fresh.gate().ensure_running().is_ok());
+        assert!(worker.confirm_activation(third).is_err());
+        worker.stop().await.unwrap();
+        assert!(worker.replace(&fresh, b).await.is_err());
+    }
+
     #[tokio::test]
     async fn retirement_signal_interrupts_busy_agent_and_queue_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
