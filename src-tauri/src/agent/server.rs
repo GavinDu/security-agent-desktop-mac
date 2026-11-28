@@ -694,6 +694,43 @@ mod tests {
         task.abort();
     }
 
+    #[tokio::test]
+    async fn terminal_shutdown_drains_pending_ask_and_rejects_unpolled_file_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "RETIRED_FILE_CANARY").unwrap();
+        let state = AgentState::new(
+            "terminal-file-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![root.path().to_string_lossy().into_owned()],
+                ..AgentSettings::default()
+            },
+        ).unwrap();
+        state.gate.set_policy("filesystem__read_file", crate::tools::approvals::Policy::Auto);
+        let app = router(state.clone());
+        let request = || {
+            let mut req = Request::builder().method("POST").uri("/tools")
+                .header("authorization", "Bearer terminal-file-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name":"filesystem__read_file","arguments":{"path":file}}).to_string())).unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127,0,0,1],41000))));
+            req
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        state.gate.set_policy("filesystem__read_file", crate::tools::approvals::Policy::Ask);
+        let mut events = state.gate.subscribe();
+        let pending = tokio::spawn(app.oneshot(request()));
+        let approval = tokio::time::timeout(Duration::from_secs(5),events.recv()).await.unwrap().unwrap();
+        state.begin_shutdown();
+        assert!(!state.gate.resolve(uuid::Uuid::parse_str(&approval.id).unwrap(),true).await);
+        assert_eq!(pending.await.unwrap().unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),json!({"error":"File read authorization changed"}));
+        assert!(!String::from_utf8_lossy(&bytes).contains("RETIRED_FILE_CANARY"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn loopback_file_response_first_frame_denies_after_clear() {
         let root = tempfile::tempdir().unwrap();
