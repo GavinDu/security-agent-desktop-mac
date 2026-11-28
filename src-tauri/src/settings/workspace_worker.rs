@@ -53,6 +53,8 @@ enum Command {
         Reply<()>,
     ),
     AddHttp(ActiveSession, String, SocketAddrV4, Reply<()>),
+    Refresh(ActiveSession, String, Reply<()>),
+    Remove(ActiveSession, String, Reply<()>),
     Policy(ActiveSession, String, McpPolicy, Reply<()>),
     Run(
         ActiveSession,
@@ -257,6 +259,32 @@ impl WorkspaceWorker {
         self.submit(Command::AddHttp(session, id, address, tx))?;
         receive(rx).await
     }
+    pub(crate) async fn refresh_connector(
+        &self,
+        session: ActiveSession,
+        id: String,
+    ) -> Result<(), String> {
+        if !crate::tools::mcp_catalog::valid_connector(&id) {
+            return Err("Workspace connector configuration rejected".into());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.submit(Command::Refresh(session, id, tx))?;
+        receive(rx).await
+    }
+
+    pub(crate) async fn remove_connector(
+        &self,
+        session: ActiveSession,
+        id: String,
+    ) -> Result<(), String> {
+        if !crate::tools::mcp_catalog::valid_connector(&id) {
+            return Err("Workspace connector configuration rejected".into());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.submit(Command::Remove(session, id, tx))?;
+        receive(rx).await
+    }
+
     pub(crate) async fn set_policy(
         &self,
         session: ActiveSession,
@@ -470,6 +498,16 @@ async fn serve<S: Store>(
                     let _ = reply.send(host.add_http(&session, id, address).await);
                 }
             }
+            Command::Refresh(session, id, reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(host.refresh_connector(&session, &id).await);
+                }
+            }
+            Command::Remove(session, id, reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(host.remove_connector(&session, &id).await);
+                }
+            }
             Command::Policy(session, function, policy, reply) => {
                 if !reply.is_closed() {
                     let _ = reply.send(host.set_connector_policy(&session, &function, policy));
@@ -621,6 +659,102 @@ IFS= read -r line
         assert!(worker.confirm_activation(third).is_err());
         worker.stop().await.unwrap();
         assert!(worker.replace(&fresh, b).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn connector_refresh_and_remove_are_exact_session_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        let a = worker.enroll().await.unwrap();
+        let b = worker.enroll().await.unwrap();
+        let first = worker.activate(a).await.unwrap();
+        let session = first.session();
+        let script = CHILD.replace(
+            r#"{"content":[{"type":"text","text":"fixture"}]}"#,
+            r#"{"tools":[{"name":"new","inputSchema":{"type":"object","additionalProperties":false}}]}"#,
+        );
+        let args = vec!["-c".into(), script];
+        worker
+            .add_stdio(
+                session,
+                "local".into(),
+                "/bin/sh".into(),
+                args.clone(),
+                "/".into(),
+            )
+            .await
+            .unwrap();
+        worker
+            .set_policy(session, "local__read".into(), McpPolicy::Ask)
+            .await
+            .unwrap();
+        // A canceled queued removal must not mutate the owner.
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        worker
+            .submit(Command::Remove(session, "local".into(), tx))
+            .unwrap();
+        worker
+            .refresh_connector(session, "local".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .set_policy(session, "local__read".into(), McpPolicy::Ask)
+            .await
+            .is_err());
+        worker
+            .set_policy(session, "local__new".into(), McpPolicy::Ask)
+            .await
+            .unwrap();
+        assert!(worker
+            .remove_connector(session, "bad__id".into())
+            .await
+            .is_err());
+        worker
+            .remove_connector(session, "local".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .refresh_connector(session, "local".into())
+            .await
+            .is_err());
+        worker
+            .add_stdio(
+                session,
+                "local".into(),
+                "/bin/sh".into(),
+                args.clone(),
+                "/".into(),
+            )
+            .await
+            .unwrap();
+        worker.retire(&first).await.unwrap();
+        let second = worker.activate(b).await.unwrap();
+        let fresh = second.session();
+        worker
+            .add_stdio(fresh, "local".into(), "/bin/sh".into(), args, "/".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .refresh_connector(session, "local".into())
+            .await
+            .is_err());
+        assert!(worker
+            .remove_connector(session, "local".into())
+            .await
+            .is_err());
+        worker
+            .refresh_connector(fresh, "local".into())
+            .await
+            .unwrap();
+        worker
+            .remove_connector(fresh, "local".into())
+            .await
+            .unwrap();
+        worker.retire(&second).await.unwrap();
+        worker.stop().await.unwrap();
     }
 
     #[tokio::test]

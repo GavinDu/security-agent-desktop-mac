@@ -392,7 +392,7 @@ impl McpAuthority {
     }
 }
 
-pub(super) fn valid_connector(id: &str) -> bool {
+pub(crate) fn valid_connector(id: &str) -> bool {
     // Lowercase ASCII IDs with no underscores cannot collide with the "__"
     // separator. Reserve both existing builtin connector namespaces.
     !matches!(id, "filesystem" | "bash" | "agent")
