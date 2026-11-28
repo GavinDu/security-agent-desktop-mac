@@ -584,30 +584,70 @@ mod tests {
             }
         }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {panic!("IPv4")};
-        let task = tokio::spawn(async move { axum::serve(listener,fake).await.unwrap(); });
-        let state = AgentState::new_with_local_model("terminal-token".into(),"127.0.0.1:8080".parse().unwrap(),AgentSettings::default(),Some(LocalModelProvider::for_test(address))).unwrap();
+        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            panic!("IPv4")
+        };
+        let task = tokio::spawn(async move {
+            axum::serve(listener, fake).await.unwrap();
+        });
+        let state = AgentState::new_with_local_model(
+            "terminal-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+            Some(LocalModelProvider::for_test(address)),
+        )
+        .unwrap();
         let app = router(state.clone());
         let request = |method: &str, path: &str, auth: bool| {
-            let mut builder = Request::builder().method(method).uri(path).header("content-type","application/json");
-            if auth {builder = builder.header("authorization","Bearer terminal-token");}
-            let mut request = builder.body(Body::from(r#"{"message":"question"}"#)).unwrap();
-            request.extensions_mut().insert(ConnectInfo("127.0.0.1:41000".parse::<SocketAddr>().unwrap()));
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json");
+            if auth {
+                builder = builder.header("authorization", "Bearer terminal-token");
+            }
+            let mut request = builder
+                .body(Body::from(r#"{"message":"question"}"#))
+                .unwrap();
+            request.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+            ));
             request
         };
-        let run = tokio::spawn(app.clone().oneshot(request("POST","/chat",true)));
-        tokio::time::timeout(Duration::from_secs(5),entered.notified()).await.unwrap();
+        let run = tokio::spawn(app.clone().oneshot(request("POST", "/chat", true)));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
         state.begin_shutdown();
         state.begin_shutdown();
         release.notify_one();
         let response = run.await.unwrap().unwrap();
-        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert!(!String::from_utf8_lossy(&bytes).contains("RETIRED_PRIVATE_ANSWER"));
-        for (method,path) in [("GET","/health"),("GET","/tools"),("POST","/chat"),("POST","/tools"),("GET","/pairing")] {
-            assert_eq!(app.clone().oneshot(request(method,path,true)).await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+        for (method, path) in [
+            ("GET", "/health"),
+            ("GET", "/tools"),
+            ("POST", "/chat"),
+            ("POST", "/tools"),
+            ("GET", "/pairing"),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(method, path, true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
         }
-        assert_eq!(app.oneshot(request("POST","/chat",false)).await.unwrap().status(),StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            app.oneshot(request("POST", "/chat", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert!(state.ensure_running().is_err());
         task.abort();
     }
@@ -706,28 +746,55 @@ mod tests {
                 allowed_roots: vec![root.path().to_string_lossy().into_owned()],
                 ..AgentSettings::default()
             },
-        ).unwrap();
-        state.gate.set_policy("filesystem__read_file", crate::tools::approvals::Policy::Auto);
+        )
+        .unwrap();
+        state.gate.set_policy(
+            "filesystem__read_file",
+            crate::tools::approvals::Policy::Auto,
+        );
         let app = router(state.clone());
         let request = || {
-            let mut req = Request::builder().method("POST").uri("/tools")
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/tools")
                 .header("authorization", "Bearer terminal-file-token")
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"name":"filesystem__read_file","arguments":{"path":file}}).to_string())).unwrap();
-            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127,0,0,1],41000))));
+                .body(Body::from(
+                    json!({"name":"filesystem__read_file","arguments":{"path":file}}).to_string(),
+                ))
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))));
             req
         };
         let response = app.clone().oneshot(request()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        state.gate.set_policy("filesystem__read_file", crate::tools::approvals::Policy::Ask);
+        state.gate.set_policy(
+            "filesystem__read_file",
+            crate::tools::approvals::Policy::Ask,
+        );
         let mut events = state.gate.subscribe();
         let pending = tokio::spawn(app.oneshot(request()));
-        let approval = tokio::time::timeout(Duration::from_secs(5),events.recv()).await.unwrap().unwrap();
+        let approval = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
         state.begin_shutdown();
-        assert!(!state.gate.resolve(uuid::Uuid::parse_str(&approval.id).unwrap(),true).await);
-        assert_eq!(pending.await.unwrap().unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !state
+                .gate
+                .resolve(uuid::Uuid::parse_str(&approval.id).unwrap(), true)
+                .await
+        );
+        assert_eq!(
+            pending.await.unwrap().unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),json!({"error":"File read authorization changed"}));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"File read authorization changed"})
+        );
         assert!(!String::from_utf8_lossy(&bytes).contains("RETIRED_FILE_CANARY"));
     }
 

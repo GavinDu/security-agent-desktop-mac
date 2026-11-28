@@ -6,12 +6,16 @@ test('trusted process Exit, not WebView CloseRequested, cancels pending Ask (#20
   const app = await readFile('src-tauri/src/app.rs', 'utf8');
   assert.match(app, /matches!\(&event, tauri::RunEvent::Exit\)/);
   assert.match(app, /app\.try_state::<Arc<AgentState>>\(\)/);
-  assert.match(app, /state\.gate\.cancel_pending_for_shutdown\(\)/);
+  assert.match(app, /state\.begin_shutdown\(\)/);
+  const state = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  const terminal = state.slice(state.indexOf('fn begin_shutdown('), state.indexOf('fn ensure_running('));
+  assert.match(terminal, /self\.registry\.begin_shutdown\(\)/);
+  assert.match(terminal, /self\.gate\.cancel_pending_for_shutdown\(\)/);
   assert.match(app, /WindowEvent::CloseRequested \{ api, \.\. \}/);
   assert.match(app, /api\.prevent_close\(\)/);
   assert.match(app, /window\.hide\(\)/);
   const invokes = app.slice(app.indexOf('.invoke_handler('), app.indexOf('.on_window_event('));
-  assert.doesNotMatch(invokes, /cancel_pending_for_shutdown/);
+  assert.doesNotMatch(invokes, /begin_shutdown|cancel_pending_for_shutdown/);
   const server = await readFile('src-tauri/src/agent/server.rs', 'utf8');
   const routes = server.slice(server.indexOf('pub fn router('), server.indexOf('pub async fn serve('));
   assert.doesNotMatch(routes, /shutdown|cancel_pending/);
