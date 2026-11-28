@@ -527,6 +527,39 @@ printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text
 IFS= read -r line
 "#;
     #[tokio::test]
+    async fn replacement_queue_pressure_closes_exact_old_gate_before_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        let a = worker.enroll().await.unwrap();
+        let b = worker.enroll().await.unwrap();
+        let first = worker.activate(a).await.unwrap();
+        // Keep the receiver alive without consuming commands to make
+        // saturation deterministic rather than racing the owner thread.
+        let (tx, _rx) = mpsc::channel(CAPACITY);
+        let saturated = WorkspaceWorker {
+            tx,
+            signal: Arc::new(Mutex::new(Control {
+                active: Some(first.clone()),
+                ..Control::default()
+            })),
+            exited: None,
+        };
+        for _ in 0..CAPACITY {
+            let (tx, rx) = oneshot::channel();
+            saturated.submit(Command::Enroll(tx)).unwrap();
+            drop(rx);
+        }
+        assert!(saturated.replace(&first, b).await.is_err());
+        assert!(first.gate().ensure_running().is_err());
+        // The actual owner can still explicitly retry the transition.
+        let second = worker.replace(&first, b).await.unwrap();
+        assert!(second.gate().ensure_running().is_ok());
+        worker.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn replacement_is_exact_session_and_failure_never_restores_old_authority() {
         let dir = tempfile::tempdir().unwrap();
         let mut worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
