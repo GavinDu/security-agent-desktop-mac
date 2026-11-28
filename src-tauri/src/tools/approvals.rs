@@ -235,7 +235,10 @@ impl ApprovalGate {
         &self,
         epoch: ApprovalEpoch,
     ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, String> {
-        let lease = self.dispatch.try_read().map_err(|_| "Approval context unavailable")?;
+        let lease = self
+            .dispatch
+            .try_read()
+            .map_err(|_| "Approval context unavailable")?;
         self.ensure_epoch(epoch)?;
         Ok(lease)
     }

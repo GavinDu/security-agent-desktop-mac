@@ -405,10 +405,22 @@ impl ModelDelivery {
     fn reserve(state: &Arc<AgentState>) -> Result<Self, Response> {
         state.ensure_running().map_err(|_| retired_response())?;
         let epoch = state.gate.current_epoch().map_err(|_| retired_response())?;
-        let slot = state.model_delivery_slots.clone().try_acquire_owned().map_err(|_| {
-            (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Model response capacity exceeded"}))).into_response()
-        })?;
-        Ok(Self { state:state.clone(),epoch,_slot:slot })
+        let slot = state
+            .model_delivery_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error":"Model response capacity exceeded"})),
+                )
+                    .into_response()
+            })?;
+        Ok(Self {
+            state: state.clone(),
+            epoch,
+            _slot: slot,
+        })
     }
 }
 
@@ -431,9 +443,11 @@ impl http_body::Body for FencedModelBody {
         // to a socket. Never block on a queued epoch transition writer.
         let _lease = match delivery.state.gate.try_dispatch_for_epoch(delivery.epoch) {
             Ok(lease) if delivery.state.ensure_running().is_ok() => lease,
-            _ => return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
-                b"{\"error\":\"Agent session retired\"}",
-            ))))),
+            _ => {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
+                    b"{\"error\":\"Agent session retired\"}",
+                )))))
+            }
         };
         Poll::Ready(Some(Ok(http_body::Frame::data(data))))
     }
@@ -443,16 +457,25 @@ impl http_body::Body for FencedModelBody {
     }
 }
 
-fn model_success(completion: crate::agent::local_model::Completion, delivery: ModelDelivery) -> Response {
+fn model_success(
+    completion: crate::agent::local_model::Completion,
+    delivery: ModelDelivery,
+) -> Response {
     let data = match serde_json::to_vec(&completion) {
         Ok(bytes) => Bytes::from(bytes),
         Err(_) => return retired_response(),
     };
     let mut response = Response::new(Body::new(FencedModelBody {
-        pending:Some((data,delivery)),
+        pending: Some((data, delivery)),
     }));
-    response.headers_mut().insert(header::CONTENT_TYPE,axum::http::HeaderValue::from_static("application/json"));
-    response.headers_mut().insert(header::CACHE_CONTROL,axum::http::HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
     response
 }
 
@@ -634,41 +657,72 @@ mod tests {
             Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"MODEL_FRAME_CANARY"}}]}))
         }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {panic!("IPv4")};
-        let server = tokio::spawn(async move {axum::serve(listener,fake).await.unwrap();});
-        let state = AgentState::new_with_local_model("frame-fixture".into(),"127.0.0.1:8080".parse().unwrap(),AgentSettings::default(),Some(LocalModelProvider::for_test(address))).unwrap();
+        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            panic!("IPv4")
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(listener, fake).await.unwrap();
+        });
+        let state = AgentState::new_with_local_model(
+            "frame-fixture".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+            Some(LocalModelProvider::for_test(address)),
+        )
+        .unwrap();
         let app = router(state.clone());
         let request = || {
-            let mut req = Request::builder().method("POST").uri("/chat")
-                .header("authorization","Bearer frame-fixture").header("content-type","application/json")
-                .body(Body::from(r#"{"message":"question"}"#)).unwrap();
-            req.extensions_mut().insert(ConnectInfo("127.0.0.1:41000".parse::<SocketAddr>().unwrap()));
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header("authorization", "Bearer frame-fixture")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"question"}"#))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+            ));
             req
         };
         let control = app.clone().oneshot(request()).await.unwrap();
-        assert_eq!(control.status(),StatusCode::OK);
-        assert_eq!(control.headers()[header::CACHE_CONTROL],"no-store");
+        assert_eq!(control.status(), StatusCode::OK);
+        assert_eq!(control.headers()[header::CACHE_CONTROL], "no-store");
         assert!(!control.headers().contains_key(header::CONTENT_LENGTH));
-        assert!(String::from_utf8_lossy(&control.into_body().collect().await.unwrap().to_bytes()).contains("MODEL_FRAME_CANARY"));
+        assert!(
+            String::from_utf8_lossy(&control.into_body().collect().await.unwrap().to_bytes())
+                .contains("MODEL_FRAME_CANARY")
+        );
         let stale = app.clone().oneshot(request()).await.unwrap();
         state.gate.rotate_after_dispatch().await.unwrap();
         let bytes = stale.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),json!({"error":"Agent session retired"}));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"Agent session retired"})
+        );
         let mut held = Vec::new();
         for _ in 0..crate::agent::MAX_CONCURRENT_TOOL_REQUESTS {
             let response = app.clone().oneshot(request()).await.unwrap();
-            assert_eq!(response.status(),StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::OK);
             held.push(response);
         }
-        assert_eq!(app.clone().oneshot(request()).await.unwrap().status(),StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
         drop(held.pop());
         let fresh = app.oneshot(request()).await.unwrap();
-        assert_eq!(fresh.status(),StatusCode::OK);
+        assert_eq!(fresh.status(), StatusCode::OK);
         state.begin_shutdown();
         let bytes = fresh.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),json!({"error":"Agent session retired"}));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"Agent session retired"})
+        );
         drop(held);
-        assert_eq!(state.model_delivery_slots.available_permits(),crate::agent::MAX_CONCURRENT_TOOL_REQUESTS);
+        assert_eq!(
+            state.model_delivery_slots.available_permits(),
+            crate::agent::MAX_CONCURRENT_TOOL_REQUESTS
+        );
         server.abort();
     }
 
