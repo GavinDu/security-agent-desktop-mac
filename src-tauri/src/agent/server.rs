@@ -322,6 +322,8 @@ fn remote_file_read_denied() -> Response {
 // first poll or drop; the generation is trusted and never supplied by JSON.
 struct FileDelivery {
     registry: Arc<ToolRegistry>,
+    gate: Arc<crate::tools::approvals::ApprovalGate>,
+    epoch: crate::tools::approvals::ApprovalEpoch,
     generation: u64,
     _slot: tokio::sync::OwnedSemaphorePermit,
 }
@@ -331,9 +333,12 @@ impl FileDelivery {
         if name != "filesystem__read_file" {
             return Ok(None);
         }
+        let epoch = state.gate.current_epoch()?;
         let (generation, slot) = state.registry.reserve_http_file_delivery()?;
         Ok(Some(Self {
             registry: Arc::clone(&state.registry),
+            gate: Arc::clone(&state.gate),
+            epoch,
             generation,
             _slot: slot,
         }))
@@ -357,6 +362,16 @@ impl http_body::Body for FencedFileBody {
         };
         // The first frame handoff is the linearization boundary, NOT socket
         // delivery or client receipt. Reject rather than wait in poll_frame.
+        // Lock order: approval epoch then root admission. Neither can
+        // wait at this publication boundary; stale or busy means denial.
+        let _lease = match delivery.gate.try_dispatch_for_epoch(delivery.epoch) {
+            Ok(lease) => lease,
+            Err(_) => {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
+                    b"{\"error\":\"File read authorization changed\"}",
+                )))))
+            }
+        };
         let _guard = match delivery.registry.try_http_file_handoff(delivery.generation) {
             Ok(guard) => guard,
             Err(_) => {
@@ -1031,6 +1046,71 @@ mod tests {
                 json!({"error":"File read authorization changed"})
             );
             assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_FILE_CANARY"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_file_first_frame_requires_original_approval_epoch_on_both_routes() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("canary.txt");
+        std::fs::write(&file, "APPROVAL_EPOCH_FILE_CANARY").unwrap();
+        let state = AgentState::new(
+            "epoch-file-token".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings {
+                allowed_roots: vec![root.path().to_string_lossy().into_owned()],
+                ..AgentSettings::default()
+            },
+        )
+        .unwrap();
+        state.gate.set_policy(
+            "filesystem__read_file",
+            crate::tools::approvals::Policy::Auto,
+        );
+        let app = router(Arc::clone(&state));
+        let request = |route: &str| {
+            let call = json!({
+                "name":"filesystem__read_file",
+                "arguments":{"path":file}
+            });
+            let payload = if route == "/chat" {
+                json!({"message":"read","tool_call":call})
+            } else {
+                call
+            };
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(route)
+                .header("authorization", "Bearer epoch-file-token")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000))));
+            request
+        };
+        let tools = app.clone().oneshot(request("/tools")).await.unwrap();
+        let chat = app.clone().oneshot(request("/chat")).await.unwrap();
+        for response in [&tools, &chat] {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        }
+        // Do not alter root generation: the approval epoch alone denies.
+        state.gate.rotate_after_dispatch().await.unwrap();
+        for response in [tools, chat] {
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap(),
+                json!({"error":"File read authorization changed"})
+            );
+        }
+        for route in ["/tools", "/chat"] {
+            let response = app.clone().oneshot(request(route)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&bytes).contains("APPROVAL_EPOCH_FILE_CANARY"));
         }
     }
 
