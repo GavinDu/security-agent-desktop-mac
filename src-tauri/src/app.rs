@@ -16,6 +16,22 @@ fn is_trusted_main_destroyed(label: &str, event: &WindowEvent) -> bool {
     label == "main" && matches!(event, WindowEvent::Destroyed)
 }
 
+#[cfg(target_os = "macos")]
+fn stop_workspace(app: &tauri::AppHandle) {
+    use crate::settings::workspace_worker::WorkspaceHost;
+    if let Some(host) = app.try_state::<WorkspaceHost>() {
+        if let Some(mut worker) = host.take_for_shutdown() {
+            // Exit may terminate before this acknowledgement; never block
+            // the native lifecycle callback on storage or child reaping.
+            tauri::async_runtime::spawn(async move {
+                if worker.stop().await.is_err() {
+                    eprintln!("Workspace worker shutdown unconfirmed");
+                }
+            });
+        }
+    }
+}
+
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -63,6 +79,8 @@ pub fn run() {
                 if let Some(state) = window.app_handle().try_state::<Arc<AgentState>>() {
                     state.begin_shutdown();
                 }
+                #[cfg(target_os = "macos")]
+                stop_workspace(window.app_handle());
             }
         })
         .setup(|app| {
@@ -91,6 +109,24 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
             let state = AgentState::new_with_local_model(token, bind, settings, local_model)
                 .map_err(std::io::Error::other)?;
+
+            #[cfg(target_os = "macos")]
+            {
+                use crate::{
+                    account_credentials::MacKeychain,
+                    settings::workspace_worker::{WorkspaceHost, WorkspaceWorker},
+                };
+                let support = dirs::home_dir()
+                    .ok_or_else(|| std::io::Error::other("Home directory unavailable"))?
+                    .join(crate::single_instance::DESKTOP_PRIVATE_DIRECTORY);
+                let worker = tauri::async_runtime::block_on(WorkspaceWorker::start(
+                    support,
+                    MacKeychain,
+                ))
+                .map_err(std::io::Error::other)?;
+                // No account activation, migration, or public workspace command.
+                app.manage(WorkspaceHost::new(worker));
+            }
 
             // Tauri's default auto-created window lacks a navigation hook.
             // Create exactly one trusted bundled UI; never create a remote
@@ -162,6 +198,8 @@ pub fn run() {
                 if let Some(state) = app.try_state::<Arc<AgentState>>() {
                     state.begin_shutdown();
                 }
+                #[cfg(target_os = "macos")]
+                stop_workspace(app);
             }
             // macOS sends NSApplicationDelegate applicationShouldHandleReopen
             // when Finder/Dock reactivates the already running app. Reuse the
