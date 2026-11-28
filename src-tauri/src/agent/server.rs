@@ -394,6 +394,91 @@ fn tool_success(value: Value, delivery: Option<FileDelivery>) -> Response {
     response
 }
 
+/// Owned bounded response admission travels with the deferred first frame.
+struct ModelDelivery {
+    state: Arc<AgentState>,
+    epoch: crate::tools::approvals::ApprovalEpoch,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ModelDelivery {
+    fn reserve(state: &Arc<AgentState>) -> Result<Self, Response> {
+        state.ensure_running().map_err(|_| retired_response())?;
+        let epoch = state.gate.current_epoch().map_err(|_| retired_response())?;
+        let slot = state
+            .model_delivery_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error":"Model response capacity exceeded"})),
+                )
+                    .into_response()
+            })?;
+        Ok(Self {
+            state: state.clone(),
+            epoch,
+            _slot: slot,
+        })
+    }
+}
+
+struct FencedModelBody {
+    pending: Option<(Bytes, ModelDelivery)>,
+}
+
+impl http_body::Body for FencedModelBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Infallible>>> {
+        let Some((data, delivery)) = self.pending.take() else {
+            return Poll::Ready(None);
+        };
+        // Linearization is this admitted frame handoff, not transmission
+        // to a socket. Never block on a queued epoch transition writer.
+        let _lease = match delivery.state.gate.try_dispatch_for_epoch(delivery.epoch) {
+            Ok(lease) if delivery.state.ensure_running().is_ok() => lease,
+            _ => {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(Bytes::from_static(
+                    b"{\"error\":\"Agent session retired\"}",
+                )))))
+            }
+        };
+        Poll::Ready(Some(Ok(http_body::Frame::data(data))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.pending.is_none()
+    }
+}
+
+fn model_success(
+    completion: crate::agent::local_model::Completion,
+    delivery: ModelDelivery,
+) -> Response {
+    let data = match serde_json::to_vec(&completion) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => return retired_response(),
+    };
+    let mut response = Response::new(Body::new(FencedModelBody {
+        pending: Some((data, delivery)),
+    }));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 fn delivery_error(error: String) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response()
 }
@@ -482,10 +567,11 @@ async fn chat(
         )
             .into_response();
     }
-    let epoch = match state.gate.current_epoch() {
-        Ok(epoch) => epoch,
-        Err(_) => return retired_response(),
+    let delivery = match ModelDelivery::reserve(&state) {
+        Ok(delivery) => delivery,
+        Err(response) => return response,
     };
+    let epoch = delivery.epoch;
     let _lease = match state.gate.dispatch_for_epoch(epoch).await {
         Ok(lease) => lease,
         Err(_) => return retired_response(),
@@ -498,7 +584,7 @@ async fn chat(
         return retired_response();
     }
     match result {
-        Ok(completion) => Json(completion).into_response(),
+        Ok(completion) => model_success(completion, delivery),
         Err(error) => {
             let status = match error {
                 ModelError::InvalidPrompt => StatusCode::BAD_REQUEST,
@@ -563,6 +649,82 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn local_model_first_frame_denies_after_epoch_rotation_or_terminal_shutdown() {
+        use crate::agent::local_model::LocalModelProvider;
+        let fake = Router::new().route("/v1/chat/completions",post(|| async {
+            Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"MODEL_FRAME_CANARY"}}]}))
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+            panic!("IPv4")
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(listener, fake).await.unwrap();
+        });
+        let state = AgentState::new_with_local_model(
+            "frame-fixture".into(),
+            "127.0.0.1:8080".parse().unwrap(),
+            AgentSettings::default(),
+            Some(LocalModelProvider::for_test(address)),
+        )
+        .unwrap();
+        let app = router(state.clone());
+        let request = || {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/chat")
+                .header("authorization", "Bearer frame-fixture")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"question"}"#))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+            ));
+            req
+        };
+        let control = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(control.status(), StatusCode::OK);
+        assert_eq!(control.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(!control.headers().contains_key(header::CONTENT_LENGTH));
+        assert!(
+            String::from_utf8_lossy(&control.into_body().collect().await.unwrap().to_bytes())
+                .contains("MODEL_FRAME_CANARY")
+        );
+        let stale = app.clone().oneshot(request()).await.unwrap();
+        state.gate.rotate_after_dispatch().await.unwrap();
+        let bytes = stale.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"Agent session retired"})
+        );
+        let mut held = Vec::new();
+        for _ in 0..crate::agent::MAX_CONCURRENT_TOOL_REQUESTS {
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        drop(held.pop());
+        let fresh = app.oneshot(request()).await.unwrap();
+        assert_eq!(fresh.status(), StatusCode::OK);
+        state.begin_shutdown();
+        let bytes = fresh.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"error":"Agent session retired"})
+        );
+        drop(held);
+        assert_eq!(
+            state.model_delivery_slots.available_permits(),
+            crate::agent::MAX_CONCURRENT_TOOL_REQUESTS
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn terminal_shutdown_denies_new_authenticated_routes_and_discards_delayed_model_answer() {
