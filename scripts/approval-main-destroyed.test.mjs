@@ -14,10 +14,14 @@ test('only real native main window destruction latches approval shutdown (#215)'
   assert.match(events, /window\.hide\(\)/);
   assert.match(events, /if is_trusted_main_destroyed\(window\.label\(\), event\) \{/);
   assert.match(events, /window\.app_handle\(\)\.try_state::<Arc<AgentState>>\(\)/);
-  assert.match(events, /state\.gate\.cancel_pending_for_shutdown\(\)/);
+  assert.match(events, /state\.begin_shutdown\(\)/);
 
+  const state = await readFile('src-tauri/src/agent/mod.rs', 'utf8');
+  const terminal = state.slice(state.indexOf('fn begin_shutdown('), state.indexOf('fn ensure_running('));
+  assert.match(terminal, /self\.registry\.begin_shutdown\(\)/);
+  assert.match(terminal, /self\.gate\.cancel_pending_for_shutdown\(\)/);
   const invokes = app.slice(app.indexOf('.invoke_handler('), app.indexOf('.on_window_event('));
-  assert.doesNotMatch(invokes, /cancel_pending_for_shutdown|is_trusted_main_destroyed/);
+  assert.doesNotMatch(invokes, /begin_shutdown|cancel_pending_for_shutdown|is_trusted_main_destroyed/);
   assert.match(app, /matches!\(&event, tauri::RunEvent::Exit\)/);
   assert.match(app, /\.emit_to\("main", "security-agent:\/\/tool-approval", event\)/);
 });
