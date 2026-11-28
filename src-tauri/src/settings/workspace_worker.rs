@@ -167,7 +167,8 @@ impl WorkspaceWorker {
                 .active
                 .as_ref()
                 .filter(|current| {
-                    current.session == expected.session && Arc::ptr_eq(&current.gate, &expected.gate)
+                    current.session == expected.session
+                        && Arc::ptr_eq(&current.gate, &expected.gate)
                 })
                 .ok_or("Workspace session unavailable")?;
             old.request_retirement()?;
