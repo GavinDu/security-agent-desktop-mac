@@ -116,6 +116,11 @@ impl LocalModelProvider {
         &self.model
     }
 
+    // Trusted immutable destination used by the actual HTTP request.
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     async fn request_bytes(&self, payload: &Value) -> Result<Vec<u8>, ModelError> {
         let body = serde_json::to_vec(payload).map_err(|_| ModelError::InvalidPrompt)?;
         if body.len() > MAX_RESPONSE_BYTES {
