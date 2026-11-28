@@ -143,6 +143,19 @@ impl AgentState {
         }))
     }
 
+    /// Terminal only: this AgentState incarnation never reopens. The
+    /// registry latch denies new root/file work; the gate drains pending Ask
+    /// and prevents new epoch dispatch. Previously admitted effects may finish.
+    pub(crate) fn begin_shutdown(&self) {
+        self.registry.begin_shutdown();
+        let _ = self.gate.cancel_pending_for_shutdown();
+    }
+
+    pub(crate) fn ensure_running(&self) -> Result<(), String> {
+        self.registry.ensure_running()?;
+        self.gate.ensure_running()
+    }
+
     /// Export an operator-safe status, without credentials or OS paths.
     pub async fn status_snapshot(&self) -> serde_json::Value {
         serde_json::json!({

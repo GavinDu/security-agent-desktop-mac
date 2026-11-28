@@ -586,6 +586,8 @@ impl ToolRegistry {
     }
 
     pub async fn invoke(&self, call: ToolCall) -> Result<Value, String> {
+        self.ensure_running()?;
+        self.gate.ensure_running()?;
         if !Self::is_known(&call.name) {
             return Err("Unknown tool".into());
         }

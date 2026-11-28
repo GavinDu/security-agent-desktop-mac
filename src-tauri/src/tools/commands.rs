@@ -27,6 +27,7 @@ pub async fn get_agent_settings(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<AgentSettingsSnapshot, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     // The same mutex protects root mutations AND their revision. Taking it
     // before the settings lock yields a coherent snapshot with no mixed epoch.
     let revision = state.root_mutations.lock().await;
@@ -69,6 +70,7 @@ pub async fn list_tools(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Vec<Value>, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     #[cfg(target_os = "macos")]
     if super::native_transport::available(&window) {
         return Ok(state.registry.list());
@@ -83,6 +85,7 @@ pub async fn invoke_tool(
     call: ToolCall,
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     invoke_native_tool(&state.registry, call).await
 }
 
@@ -107,6 +110,7 @@ pub async fn get_agent_status(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Value, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     Ok(state.status_snapshot().await)
 }
 
@@ -117,6 +121,7 @@ pub fn list_pending_approvals(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<Vec<ApprovalRequest>, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     state.gate.pending_snapshot()
 }
 
@@ -128,6 +133,7 @@ pub async fn respond_approval(
     allow: bool,
 ) -> Result<bool, String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     let id = Uuid::parse_str(&id).map_err(|_| "Invalid approval ID")?;
     Ok(state.gate.resolve(id, allow).await)
 }
@@ -327,6 +333,7 @@ pub async fn set_allowed_roots(
     expected_root_revision: String,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     commit_serialized_roots(
         &*state,
         roots,
@@ -345,6 +352,7 @@ pub async fn clear_allowed_roots(
     state: State<'_, Arc<AgentState>>,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     commit_serialized_roots(
         &*state,
         Vec::new(),
@@ -382,10 +390,12 @@ pub async fn set_tool_policy(
     policy: Policy,
 ) -> Result<(), String> {
     navigation::ensure_privileged_webview(&window)?;
+    state.ensure_running()?;
     if !ToolRegistry::is_known(&tool) {
         return Err("Unknown tool".into());
     }
     let mut settings = state.settings.lock().await;
+    state.ensure_running()?;
     persist_tool_policy(
         &mut settings,
         &state.gate,

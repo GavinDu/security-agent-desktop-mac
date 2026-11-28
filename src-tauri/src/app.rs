@@ -61,7 +61,7 @@ pub fn run() {
                     host.close();
                 }
                 if let Some(state) = window.app_handle().try_state::<Arc<AgentState>>() {
-                    let _ = state.gate.cancel_pending_for_shutdown();
+                    state.begin_shutdown();
                 }
             }
         })
@@ -160,8 +160,7 @@ pub fn run() {
                     host.close();
                 }
                 if let Some(state) = app.try_state::<Arc<AgentState>>() {
-                    state.registry.begin_shutdown();
-                    let _ = state.gate.cancel_pending_for_shutdown();
+                    state.begin_shutdown();
                 }
             }
             // macOS sends NSApplicationDelegate applicationShouldHandleReopen
