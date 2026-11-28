@@ -653,7 +653,7 @@ IFS= read -r line
         let right = host.client().unwrap();
         let (a, b) = tokio::join!(left.enroll(), right.enroll());
         let (a, b) = (a.unwrap(), b.unwrap());
-        assert_ne!(a, b);
+        assert!(a != b);
         drop(left);
         let first = right.activate(a).await.unwrap();
         let gate = first.gate();
