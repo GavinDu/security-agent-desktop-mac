@@ -32,7 +32,7 @@ pub(crate) enum DiscoveryError {
 }
 
 pub(crate) struct StdioDiscovery {
-    wire: WireSession<ChildStdout, ChildStdin>,
+    wire: Option<WireSession<ChildStdout, ChildStdin>>,
     child: Child,
     usable: bool,
 }
@@ -43,6 +43,18 @@ impl StdioDiscovery {
         args: &[String],
         cwd: &Path,
     ) -> Result<Self, DiscoveryError> {
+        let mut client = Self::spawn(executable, args, cwd)?;
+        if let Err(error) = client.initialize().await {
+            let _ = client.shutdown().await;
+            return Err(error);
+        }
+        client.usable = true;
+        Ok(client)
+    }
+
+    // No await between successful spawn and return of its owned handle.
+    // Even an unexpected missing piped FD remains tracked for retirement.
+    fn spawn(executable: &Path, args: &[String], cwd: &Path) -> Result<Self, DiscoveryError> {
         if !executable.is_absolute()
             || !cwd.is_absolute()
             || args.len() > 32
@@ -64,26 +76,22 @@ impl StdioDiscovery {
             .kill_on_drop(true)
             .spawn()
             .map_err(|_| DiscoveryError::Process)?;
-        let (Some(stdout), Some(stdin)) = (child.stdout.take(), child.stdin.take()) else {
-            let _ = reap(&mut child).await;
-            return Err(DiscoveryError::Process);
+        let wire = match (child.stdout.take(), child.stdin.take()) {
+            (Some(stdout), Some(stdin)) => Some(WireSession::new(stdout, stdin)),
+            _ => None,
         };
-        let mut client = Self {
-            wire: WireSession::new(stdout, stdin),
+        Ok(Self {
+            wire,
             child,
             usable: false,
-        };
-        if client.initialize().await.is_err() {
-            let _ = client.shutdown().await;
-            return Err(DiscoveryError::Protocol);
-        }
-        client.usable = true;
-        Ok(client)
+        })
     }
 
     async fn initialize(&mut self) -> Result<(), DiscoveryError> {
         let reply = self
             .wire
+            .as_mut()
+            .ok_or(DiscoveryError::Process)?
             .request(
                 "initialize",
                 json!({
@@ -113,6 +121,8 @@ impl StdioDiscovery {
             return Err(DiscoveryError::Protocol);
         }
         self.wire
+            .as_mut()
+            .ok_or(DiscoveryError::Process)?
             .notify_initialized()
             .await
             .map_err(|_| DiscoveryError::Protocol)
@@ -151,6 +161,8 @@ impl StdioDiscovery {
             };
             let reply = self
                 .wire
+                .as_mut()
+                .ok_or(DiscoveryError::Process)?
                 .request("tools/list", params)
                 .await
                 .map_err(|_| DiscoveryError::Protocol)?;
@@ -246,20 +258,42 @@ impl OwnedConnector {
             .dispatch_for_epoch(epoch)
             .await
             .map_err(|_| DiscoveryError::Catalog)?;
-        let child = StdioDiscovery::start(executable, args, cwd).await?;
-        let mut owner = Self {
+        let mut owner = Self::spawn_admitted(connector, executable, args, cwd, gate, epoch)?;
+        if let Err(error) = owner.initialize_admitted().await {
+            let _ = owner.shutdown().await;
+            return Err(error);
+        }
+        Ok(owner)
+    }
+
+    /// The registry calls this while holding its original dispatch lease,
+    /// then inserts the non-admissible owner before any wire await.
+    pub(super) fn spawn_admitted(
+        connector: String,
+        executable: &Path,
+        args: &[String],
+        cwd: &Path,
+        gate: Arc<ApprovalGate>,
+        epoch: ApprovalEpoch,
+    ) -> Result<Self, DiscoveryError> {
+        gate.ensure_epoch(epoch)
+            .map_err(|_| DiscoveryError::Catalog)?;
+        let child = StdioDiscovery::spawn(executable, args, cwd)?;
+        Ok(Self {
             connector,
             child,
             authority: McpAuthority::default(),
             gate,
             epoch,
             online: false,
-        };
-        if let Err(error) = owner.refresh_admitted().await {
-            let _ = owner.shutdown().await;
-            return Err(error);
-        }
-        Ok(owner)
+        })
+    }
+
+    pub(super) async fn initialize_admitted(&mut self) -> Result<(), DiscoveryError> {
+        self.epoch()?;
+        self.child.initialize().await?;
+        self.child.usable = true;
+        self.refresh_admitted().await
     }
 
     pub(crate) async fn refresh(&mut self) -> Result<(), DiscoveryError> {
@@ -391,6 +425,8 @@ impl OwnedConnector {
         let result = self
             .child
             .wire
+            .as_mut()
+            .ok_or(DiscoveryError::Process)?
             .request(
                 "tools/call",
                 json!({"name":remote,"arguments":plan.arguments()}),
@@ -428,6 +464,7 @@ impl OwnedConnector {
     pub(super) async fn retire(&mut self) -> Result<(), DiscoveryError> {
         self.online = false;
         self.child.usable = false;
+        drop(self.child.wire.take());
         reap(&mut self.child.child).await
     }
 }
