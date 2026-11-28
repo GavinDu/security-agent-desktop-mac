@@ -229,6 +229,20 @@ impl ApprovalGate {
         self.rotate_epoch()
     }
 
+    /// A response body cannot await in poll_frame. Deny if a transition
+    /// writer is active or queued; check the original epoch while admitted.
+    pub(crate) fn try_dispatch_for_epoch(
+        &self,
+        epoch: ApprovalEpoch,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, String> {
+        let lease = self
+            .dispatch
+            .try_read()
+            .map_err(|_| "Approval context unavailable")?;
+        self.ensure_epoch(epoch)?;
+        Ok(lease)
+    }
+
     /// Terminal per-session retirement: latch admission closed and drain
     /// pending Ask before waiting on existing bounded transport exchanges.
     /// Cancellation while waiting never reopens the retired gate.
