@@ -83,6 +83,7 @@ pub struct AgentState {
     pub(crate) local_model: Option<local_model::LocalModelProvider>,
     pub gate: Arc<ApprovalGate>,
     pub dispatch_permits: Arc<Semaphore>,
+    pub(crate) model_delivery_slots: Arc<Semaphore>,
     pub(crate) source_rate_limiter: rate_limit::SourceRateLimiter,
     /// Separate unauthenticated readiness budget, so probe floods cannot
     /// steal authenticated tool/catalog request admission.
@@ -130,6 +131,7 @@ impl AgentState {
             local_model,
             gate,
             dispatch_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
+            model_delivery_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_TOOL_REQUESTS)),
             source_rate_limiter: rate_limit::SourceRateLimiter::default(),
             health_rate_limiter: rate_limit::SourceRateLimiter::with_limit(
                 rate_limit::HEALTH_REQUESTS_PER_WINDOW,
