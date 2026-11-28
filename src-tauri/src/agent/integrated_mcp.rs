@@ -100,6 +100,7 @@ pub(crate) async fn run<C: AgentConnector>(
         gate: gate.clone(),
         epoch,
         model: provider.model_name(),
+        endpoint: provider.endpoint(),
         calls: Vec::new(),
     };
     let mut executor = ConnectorExecutor {
@@ -170,6 +171,7 @@ struct ReleasePlanner<'a> {
     gate: Arc<ApprovalGate>,
     epoch: ApprovalEpoch,
     model: &'a str,
+    endpoint: &'a str,
     calls: Vec<ProviderCall>,
 }
 
@@ -195,7 +197,7 @@ impl Planner for ReleasePlanner<'_> {
             // Approve the exact complete replay batch for this destination,
             // not just the newest result. A denial never invokes HTTP.
             let text = preview(&json!({
-                "destination":"configured loopback OpenAI-compatible provider",
+                "destination":self.endpoint,
                 "model":self.model,"tool_transcript":transcript
             }))?;
             self.gate
@@ -310,6 +312,11 @@ IFS= read -r line
                             "agent__send_results"
                         }
                     );
+                    if index % 2 == 1 {
+                        let destination = format!("http://{address}/v1/chat/completions");
+                        assert!(request.preview.contains(&destination));
+                        assert!(request.preview.contains("fixture-model"));
+                    }
                     if rotate_before_send && index == 1 {
                         gate.rotate_after_dispatch().await.unwrap();
                         assert!(
