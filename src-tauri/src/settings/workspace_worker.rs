@@ -494,7 +494,13 @@ IFS= read -r line
         );
         let args = vec!["-c".into(), script];
         worker
-            .add_stdio(session, "local".into(), "/bin/sh".into(), args.clone(), "/".into())
+            .add_stdio(
+                session,
+                "local".into(),
+                "/bin/sh".into(),
+                args.clone(),
+                "/".into(),
+            )
             .await
             .unwrap();
         worker
@@ -504,22 +510,66 @@ IFS= read -r line
         // A canceled queued removal must not mutate the owner.
         let (tx, rx) = oneshot::channel();
         drop(rx);
-        worker.submit(Command::Remove(session, "local".into(), tx)).unwrap();
-        worker.refresh_connector(session, "local".into()).await.unwrap();
-        assert!(worker.set_policy(session, "local__read".into(), McpPolicy::Ask).await.is_err());
-        worker.set_policy(session, "local__new".into(), McpPolicy::Ask).await.unwrap();
-        assert!(worker.remove_connector(session, "bad__id".into()).await.is_err());
-        worker.remove_connector(session, "local".into()).await.unwrap();
-        assert!(worker.refresh_connector(session, "local".into()).await.is_err());
-        worker.add_stdio(session, "local".into(), "/bin/sh".into(), args.clone(), "/".into()).await.unwrap();
+        worker
+            .submit(Command::Remove(session, "local".into(), tx))
+            .unwrap();
+        worker
+            .refresh_connector(session, "local".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .set_policy(session, "local__read".into(), McpPolicy::Ask)
+            .await
+            .is_err());
+        worker
+            .set_policy(session, "local__new".into(), McpPolicy::Ask)
+            .await
+            .unwrap();
+        assert!(worker
+            .remove_connector(session, "bad__id".into())
+            .await
+            .is_err());
+        worker
+            .remove_connector(session, "local".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .refresh_connector(session, "local".into())
+            .await
+            .is_err());
+        worker
+            .add_stdio(
+                session,
+                "local".into(),
+                "/bin/sh".into(),
+                args.clone(),
+                "/".into(),
+            )
+            .await
+            .unwrap();
         worker.retire(&first).await.unwrap();
         let second = worker.activate(b).await.unwrap();
         let fresh = second.session();
-        worker.add_stdio(fresh, "local".into(), "/bin/sh".into(), args, "/".into()).await.unwrap();
-        assert!(worker.refresh_connector(session, "local".into()).await.is_err());
-        assert!(worker.remove_connector(session, "local".into()).await.is_err());
-        worker.refresh_connector(fresh, "local".into()).await.unwrap();
-        worker.remove_connector(fresh, "local".into()).await.unwrap();
+        worker
+            .add_stdio(fresh, "local".into(), "/bin/sh".into(), args, "/".into())
+            .await
+            .unwrap();
+        assert!(worker
+            .refresh_connector(session, "local".into())
+            .await
+            .is_err());
+        assert!(worker
+            .remove_connector(session, "local".into())
+            .await
+            .is_err());
+        worker
+            .refresh_connector(fresh, "local".into())
+            .await
+            .unwrap();
+        worker
+            .remove_connector(fresh, "local".into())
+            .await
+            .unwrap();
         worker.retire(&second).await.unwrap();
         worker.stop().await.unwrap();
     }
