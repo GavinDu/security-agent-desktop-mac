@@ -12,14 +12,71 @@ use super::{
 };
 use crate::tools::{
     approvals::{ApprovalEpoch, ApprovalGate},
+    mcp_catalog::McpCatalog,
+    mcp_session::SessionRegistry,
     mcp_stdio_discovery::OwnedConnector,
 };
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc};
 
-pub(crate) async fn run(
+/// Trusted Rust-owned transport authority. Each concrete implementation
+/// independently validates policy, schema and the original epoch at dispatch.
+/// No model/IPC code can implement or select an authority.
+pub(crate) trait AgentConnector {
+    fn catalog(&self) -> Result<McpCatalog, ()>;
+    fn gate(&self) -> Arc<ApprovalGate>;
+    fn captured_epoch(&self) -> Result<ApprovalEpoch, ()>;
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()>;
+}
+
+impl AgentConnector for OwnedConnector {
+    fn catalog(&self) -> Result<McpCatalog, ()> {
+        self.planning_catalog().map_err(|_| ())
+    }
+    fn gate(&self) -> Arc<ApprovalGate> {
+        self.approval_gate()
+    }
+    fn captured_epoch(&self) -> Result<ApprovalEpoch, ()> {
+        self.epoch().map_err(|_| ())
+    }
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()> {
+        self.call_for_epoch(epoch, name, args).await.map_err(|_| ())
+    }
+}
+
+impl AgentConnector for SessionRegistry {
+    fn catalog(&self) -> Result<McpCatalog, ()> {
+        self.planning_catalog().map_err(|_| ())
+    }
+    fn gate(&self) -> Arc<ApprovalGate> {
+        self.approval_gate()
+    }
+    fn captured_epoch(&self) -> Result<ApprovalEpoch, ()> {
+        self.epoch().map_err(|_| ())
+    }
+    async fn dispatch(
+        &mut self,
+        epoch: ApprovalEpoch,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ()> {
+        self.call_for_epoch(epoch, name, args).await.map_err(|_| ())
+    }
+}
+
+pub(crate) async fn run<C: AgentConnector>(
     provider: &LocalModelProvider,
-    connector: &mut OwnedConnector,
+    connector: &mut C,
     prompt: &str,
     allowed_names: &BTreeSet<String>,
 ) -> Result<LoopAnswer, LoopFailure> {
@@ -27,7 +84,7 @@ pub(crate) async fn run(
         reason: LoopError::InvalidAuthority,
         confirmed_executions: 0,
     };
-    let catalog = connector.planning_catalog().map_err(|_| invalid())?;
+    let catalog = connector.catalog().map_err(|_| invalid())?;
     let available: BTreeSet<String> = catalog
         .openai_functions()
         .iter()
@@ -36,8 +93,8 @@ pub(crate) async fn run(
     if !allowed_names.is_subset(&available) {
         return Err(invalid());
     }
-    let gate = connector.approval_gate();
-    let epoch = connector.epoch().map_err(|_| invalid())?;
+    let gate = connector.gate();
+    let epoch = connector.captured_epoch().map_err(|_| invalid())?;
     let mut planner = ReleasePlanner {
         inner: StructuredPlanner::new(provider, &catalog),
         gate: gate.clone(),
@@ -78,19 +135,18 @@ fn preview(value: &Value) -> Result<String, ()> {
     Ok(text)
 }
 
-struct ConnectorExecutor<'a> {
-    connector: &'a mut OwnedConnector,
+struct ConnectorExecutor<'a, C> {
+    connector: &'a mut C,
     gate: Arc<ApprovalGate>,
     epoch: ApprovalEpoch,
 }
 
-impl AuthorizedExecutor for ConnectorExecutor<'_> {
+impl<C: AgentConnector> AuthorizedExecutor for ConnectorExecutor<'_, C> {
     async fn authorize_and_execute(&mut self, call: &ProviderCall) -> Result<String, ()> {
         let result = self
             .connector
-            .call_for_epoch(self.epoch, &call.name, call.arguments.clone())
-            .await
-            .map_err(|_| ())?;
+            .dispatch(self.epoch, &call.name, call.arguments.clone())
+            .await?;
         serde_json::to_string(&result).map_err(|_| ())
     }
 
@@ -302,5 +358,124 @@ IFS= read -r line
     fn oversized_escaped_preview_is_denied_not_truncated() {
         assert!(preview(&json!({"result":"x".repeat(8192)})).is_err());
         assert!(preview(&json!({"result":"\\n".repeat(2048)})).is_err());
+    }
+
+    #[tokio::test]
+    async fn mixed_registry_agent_uses_exact_namespace_and_approved_replay() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        for deny_replay in [true, false] {
+            let gate = ApprovalGate::new(Default::default());
+            let mut events = gate.subscribe();
+            let mut registry = SessionRegistry::new(gate.clone()).unwrap();
+            registry
+                .add_stdio(
+                    "local".into(),
+                    Path::new("/bin/sh"),
+                    &["-c".into(), SERVER.into()],
+                    Path::new("/"),
+                )
+                .await
+                .unwrap();
+            let model_calls = Arc::new(AtomicUsize::new(0));
+            let http_calls = Arc::new(AtomicUsize::new(0));
+            let model_seen = model_calls.clone();
+            let http_seen = http_calls.clone();
+            let router = Router::new()
+                .route("/mcp",post(move |Json(body):Json<Value>| {
+                    let seen = http_seen.clone();
+                    async move {
+                        let id = body["id"].as_u64().unwrap_or_default();
+                        let result = match body["method"].as_str().unwrap() {
+                            "initialize" => json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
+                            "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
+                            "tools/list" => json!({"tools":[{"name":"read","inputSchema":{"type":"object","additionalProperties":false}}]}),
+                            "tools/call" => {
+                                seen.fetch_add(1,Ordering::SeqCst);
+                                assert_eq!(body["params"]["name"],"read");
+                                json!({"content":[{"type":"text","text":"HTTP_PRIVATE"}]})
+                            }
+                            _ => panic!("unexpected method"),
+                        };
+                        Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+                    }
+                }))
+                .route("/v1/chat/completions",post(move |Json(body):Json<Value>| {
+                    let seen = model_seen.clone();
+                    async move {
+                        assert_eq!(body["tools"].as_array().unwrap().len(),2);
+                        assert_eq!(body["tools"][0]["function"]["name"],"local__read");
+                        assert_eq!(body["tools"][1]["function"]["name"],"remote__read");
+                        let index = seen.fetch_add(1,Ordering::SeqCst);
+                        if index > 0 {
+                            assert!(body["messages"][2]["content"].as_str().unwrap().contains("FIRST_PRIVATE"));
+                        }
+                        if index == 2 {
+                            assert!(body["messages"][4]["content"].as_str().unwrap().contains("HTTP_PRIVATE"));
+                            Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"mixed done"}}]}))
+                        } else {
+                            let name = if index == 0 {"local__read"} else {"remote__read"};
+                            Json(json!({"choices":[{"finish_reason":"tool_calls","message":{
+                                "role":"assistant","content":null,"tool_calls":[{"id":format!("mixed{index}"),"type":"function","function":{"name":name,"arguments":"{}"}}]
+                            }}]}))
+                        }
+                    }
+                }));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+                panic!("IPv4");
+            };
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            registry.add_http("remote".into(), address).await.unwrap();
+            registry.set_policy("local__read", McpPolicy::Auto).unwrap();
+            registry
+                .set_policy("remote__read", McpPolicy::Auto)
+                .unwrap();
+            let provider = LocalModelProvider::for_test(address);
+            let names = BTreeSet::from(["local__read".into(), "remote__read".into()]);
+            let decisions = async {
+                for index in 0..4 {
+                    let request =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        request.tool,
+                        if index % 2 == 0 {
+                            "agent__stage_result"
+                        } else {
+                            "agent__send_results"
+                        }
+                    );
+                    if index == 3 {
+                        assert!(request.preview.contains("FIRST_PRIVATE"));
+                        assert!(request.preview.contains("HTTP_PRIVATE"));
+                    }
+                    assert!(
+                        gate.resolve(
+                            uuid::Uuid::parse_str(&request.id).unwrap(),
+                            !(deny_replay && index == 3)
+                        )
+                        .await
+                    );
+                }
+            };
+            let (result, ()) = tokio::join!(
+                run(&provider, &mut registry, "mixed question", &names),
+                decisions
+            );
+            assert_eq!(http_calls.load(Ordering::SeqCst), 1);
+            if deny_replay {
+                assert_eq!(result.unwrap_err().reason, LoopError::ProviderFailed);
+                assert_eq!(model_calls.load(Ordering::SeqCst), 2);
+            } else {
+                assert_eq!(result.unwrap().text, "mixed done");
+                assert_eq!(model_calls.load(Ordering::SeqCst), 3);
+            }
+            registry.retire_all().await.unwrap();
+            server.abort();
+        }
     }
 }
