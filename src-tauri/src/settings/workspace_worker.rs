@@ -73,10 +73,26 @@ struct Control {
     active: Option<SessionSignal>,
 }
 
+/// Cloneable trusted command lease. Weak sender cannot keep an abandoned
+/// worker alive; only the lifecycle owner holds the strong sender.
+#[derive(Clone)]
+pub(crate) struct WorkspaceClient {
+    tx: mpsc::WeakSender<Command>,
+    signal: Arc<Mutex<Control>>,
+}
+
 pub(crate) struct WorkspaceWorker {
     tx: mpsc::Sender<Command>,
-    signal: Arc<Mutex<Control>>,
+    client: WorkspaceClient,
     exited: Option<oneshot::Receiver<()>>,
+}
+
+impl std::ops::Deref for WorkspaceWorker {
+    type Target = WorkspaceClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
 }
 
 /// Process-owned dormant worker. Taking it is terminal and never waits for
@@ -92,6 +108,15 @@ impl WorkspaceHost {
         Self {
             worker: Mutex::new(Some(worker)),
         }
+    }
+
+    pub(crate) fn client(&self) -> Result<WorkspaceClient, String> {
+        let slot = self
+            .worker
+            .lock()
+            .map_err(|_| "Workspace host unavailable")?;
+        let worker = slot.as_ref().ok_or("Workspace host unavailable")?;
+        Ok(worker.client.clone())
     }
 
     pub(crate) fn take_for_shutdown(&self) -> Option<WorkspaceWorker> {
@@ -144,22 +169,30 @@ impl WorkspaceWorker {
             })
             .map_err(|_| "Workspace worker unavailable")?;
         opened.await.map_err(|_| "Workspace worker unavailable")??;
+        let client = WorkspaceClient {
+            tx: tx.downgrade(),
+            signal,
+        };
         Ok(Self {
             tx,
-            signal,
+            client,
             exited: Some(exited),
         })
     }
+}
 
+impl WorkspaceClient {
     fn submit(&self, command: Command) -> Result<(), String> {
         let control = self
             .signal
             .lock()
             .map_err(|_| "Workspace signal unavailable")?;
-        if control.stopping && !matches!(&command, Command::Stop(_) | Command::Retire(_, _)) {
+        if control.stopping || matches!(&command, Command::Stop(_)) {
             return Err("Workspace worker stopping".into());
         }
         self.tx
+            .upgrade()
+            .ok_or("Workspace worker unavailable")?
             .try_send(command)
             .map_err(|_| "Workspace worker busy or unavailable".into())
     }
@@ -274,6 +307,9 @@ impl WorkspaceWorker {
                 .signal
                 .lock()
                 .map_err(|_| "Workspace signal unavailable")?;
+            if control.stopping {
+                return Err("Workspace worker stopping".into());
+            }
             let current = control
                 .active
                 .as_ref()
@@ -294,9 +330,14 @@ impl WorkspaceWorker {
             .signal
             .lock()
             .map_err(|_| "Workspace signal unavailable")?;
+        if control.stopping {
+            return Err("Workspace worker stopping".into());
+        }
         Ok(control.active.clone())
     }
+}
 
+impl WorkspaceWorker {
     fn stopped_cleanly(&self) -> Result<bool, String> {
         self.signal
             .lock()
@@ -308,9 +349,9 @@ impl WorkspaceWorker {
         close_current(&self.signal)?;
         if !self.stopped_cleanly()? {
             let (tx, rx) = oneshot::channel();
-            let result = match self.submit(Command::Stop(tx)) {
+            let result = match self.tx.try_send(Command::Stop(tx)) {
                 Ok(()) => receive(rx).await,
-                Err(error) => Err(error),
+                Err(_) => Err("Workspace worker busy or unavailable".into()),
             };
             // An earlier canceled stop may have completed while this
             // caller was submitting or waiting for its own acknowledgement.
@@ -602,6 +643,61 @@ IFS= read -r line
     }
 
     #[tokio::test]
+    async fn trusted_clients_do_not_own_shutdown_or_keep_abandoned_worker_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        let host = WorkspaceHost::new(worker);
+        let left = host.client().unwrap();
+        let right = host.client().unwrap();
+        let (a, b) = tokio::join!(left.enroll(), right.enroll());
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_ne!(a, b);
+        drop(left);
+        let first = right.activate(a).await.unwrap();
+        let gate = first.gate();
+        gate.set_policy("local__read", crate::tools::approvals::Policy::Ask);
+        let mut events = gate.subscribe();
+        let ask_gate = gate.clone();
+        let ask = tokio::spawn(async move { ask_gate.require("local__read", "preview").await });
+        let request = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut worker = host.take_for_shutdown().unwrap();
+        assert!(host.client().is_err());
+        assert!(host.take_for_shutdown().is_none());
+        assert!(right.enroll().await.is_err());
+        assert!(right.activate(b).await.is_err());
+        assert!(right.retire(&first).await.is_err());
+        assert!(right.current_signal().is_err());
+        assert!(
+            !gate
+                .resolve(uuid::Uuid::parse_str(&request.id).unwrap(), true)
+                .await
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(5), ask)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        // Dropping the owner must close the channel despite retained clients.
+        let exit = worker.exited.take().unwrap();
+        drop(worker);
+        tokio::time::timeout(Duration::from_secs(5), exit)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut fresh = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        assert!(fresh.current_signal().unwrap().is_none());
+        assert!(right.activate(b).await.is_err());
+        fresh.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn process_owner_is_dormant_and_terminal_take_releases_enrollment_lock() {
         let dir = tempfile::tempdir().unwrap();
         let worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
@@ -709,7 +805,7 @@ IFS= read -r line
         worker.retire(&second).await.unwrap();
         worker.stop().await.unwrap();
         worker.stop().await.unwrap();
-        assert!(worker.current_signal().unwrap().is_none());
+        assert!(worker.current_signal().is_err());
         assert!(worker.activate(a).await.is_err());
         server.abort();
     }
