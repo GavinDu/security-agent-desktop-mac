@@ -78,6 +78,33 @@ pub(crate) struct WorkspaceWorker {
     exited: Option<oneshot::Receiver<()>>,
 }
 
+/// Process-owned dormant worker. Taking it is terminal and never waits for
+/// storage or transport cleanup on the native event thread.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct WorkspaceHost {
+    worker: Mutex<Option<WorkspaceWorker>>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WorkspaceHost {
+    pub(crate) fn new(worker: WorkspaceWorker) -> Self {
+        Self {
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+
+    pub(crate) fn take_for_shutdown(&self) -> Option<WorkspaceWorker> {
+        let mut slot = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let worker = slot.take()?;
+        // Terminal intent is independent of the async stop acknowledgement.
+        let _ = close_current(&worker.signal);
+        Some(worker)
+    }
+}
+
 impl WorkspaceWorker {
     pub(crate) async fn start<S: Store + Send + 'static>(
         support: PathBuf,
@@ -594,6 +621,31 @@ IFS= read -r line
         assert!(worker.confirm_activation(third).is_err());
         worker.stop().await.unwrap();
         assert!(worker.replace(&fresh, b).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_owner_is_dormant_and_terminal_take_releases_enrollment_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        assert!(worker.current_signal().unwrap().is_none());
+        let host = WorkspaceHost::new(worker);
+        assert!(
+            WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+                .await
+                .is_err()
+        );
+        let mut worker = host.take_for_shutdown().unwrap();
+        assert!(host.take_for_shutdown().is_none());
+        assert!(worker.enroll().await.is_err());
+        assert!(worker.activate(AccountId::issue()).await.is_err());
+        worker.stop().await.unwrap();
+        let mut restarted = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        assert!(restarted.current_signal().unwrap().is_none());
+        restarted.stop().await.unwrap();
     }
 
     #[tokio::test]
