@@ -158,7 +158,14 @@ pub(crate) async fn chat_text(
     message: String,
 ) -> Result<Completion, String> {
     navigation::ensure_privileged_webview(&window)?;
-    complete_native_text(state.local_model.as_ref(), &message).await
+    state.ensure_running()?;
+    let epoch = state.gate.current_epoch()?;
+    let _lease = state.gate.dispatch_for_epoch(epoch).await?;
+    state.ensure_running()?;
+    let result = complete_native_text(state.local_model.as_ref(), &message).await;
+    state.ensure_running()?;
+    state.gate.ensure_epoch(epoch)?;
+    result
 }
 
 async fn complete_native_text(

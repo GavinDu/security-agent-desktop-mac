@@ -194,7 +194,24 @@ async fn authorize(
                 .into_response();
         }
     }
-    next.run(request).await
+    if state.ensure_running().is_err() {
+        return retired_response();
+    }
+    let response = next.run(request).await;
+    // This is a handler return check, not a socket-delivery guarantee.
+    // Existing file responses also retain their first-frame root fence.
+    if state.ensure_running().is_err() {
+        return retired_response();
+    }
+    response
+}
+
+fn retired_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error":"Agent session retired"})),
+    )
+        .into_response()
 }
 
 /// Bound all methods at /health with a separate source budget, and every
@@ -465,7 +482,22 @@ async fn chat(
         )
             .into_response();
     }
-    match provider.complete(&request.message).await {
+    let epoch = match state.gate.current_epoch() {
+        Ok(epoch) => epoch,
+        Err(_) => return retired_response(),
+    };
+    let _lease = match state.gate.dispatch_for_epoch(epoch).await {
+        Ok(lease) => lease,
+        Err(_) => return retired_response(),
+    };
+    if state.ensure_running().is_err() {
+        return retired_response();
+    }
+    let result = provider.complete(&request.message).await;
+    if state.ensure_running().is_err() || state.gate.ensure_epoch(epoch).is_err() {
+        return retired_response();
+    }
+    match result {
         Ok(completion) => Json(completion).into_response(),
         Err(error) => {
             let status = match error {
@@ -531,6 +563,54 @@ mod tests {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn terminal_shutdown_denies_new_authenticated_routes_and_discards_delayed_model_answer() {
+        use crate::agent::local_model::LocalModelProvider;
+        use tokio::sync::Notify;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let fake = Router::new().route("/v1/chat/completions", post({
+            let entered = entered.clone();
+            let release = release.clone();
+            move |Json(_): Json<Value>| {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"RETIRED_PRIVATE_ANSWER"}}]}))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let SocketAddr::V4(address) = listener.local_addr().unwrap() else {panic!("IPv4")};
+        let task = tokio::spawn(async move { axum::serve(listener,fake).await.unwrap(); });
+        let state = AgentState::new_with_local_model("terminal-token".into(),"127.0.0.1:8080".parse().unwrap(),AgentSettings::default(),Some(LocalModelProvider::for_test(address))).unwrap();
+        let app = router(state.clone());
+        let request = |method: &str, path: &str, auth: bool| {
+            let mut builder = Request::builder().method(method).uri(path).header("content-type","application/json");
+            if auth {builder = builder.header("authorization","Bearer terminal-token");}
+            let mut request = builder.body(Body::from(r#"{"message":"question"}"#)).unwrap();
+            request.extensions_mut().insert(ConnectInfo("127.0.0.1:41000".parse::<SocketAddr>().unwrap()));
+            request
+        };
+        let run = tokio::spawn(app.clone().oneshot(request("POST","/chat",true)));
+        tokio::time::timeout(Duration::from_secs(5),entered.notified()).await.unwrap();
+        state.begin_shutdown();
+        state.begin_shutdown();
+        release.notify_one();
+        let response = run.await.unwrap().unwrap();
+        assert_eq!(response.status(),StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&bytes).contains("RETIRED_PRIVATE_ANSWER"));
+        for (method,path) in [("GET","/health"),("GET","/tools"),("POST","/chat"),("POST","/tools"),("GET","/pairing")] {
+            assert_eq!(app.clone().oneshot(request(method,path,true)).await.unwrap().status(),StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert_eq!(app.oneshot(request("POST","/chat",false)).await.unwrap().status(),StatusCode::UNAUTHORIZED);
+        assert!(state.ensure_running().is_err());
+        task.abort();
+    }
 
     #[tokio::test]
     async fn local_model_chat_obeys_auth_and_never_relays_tunnel_prompts() {
