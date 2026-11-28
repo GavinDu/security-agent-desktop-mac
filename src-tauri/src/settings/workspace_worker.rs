@@ -42,6 +42,8 @@ impl SessionSignal {
 
 enum Command {
     Enroll(Reply<AccountId>),
+    Accounts(Reply<Vec<AccountId>>),
+    Catalog(ActiveSession, Reply<Vec<serde_json::Value>>),
     Activate(AccountId, Reply<SessionSignal>),
     AddStdio(
         ActiveSession,
@@ -145,6 +147,45 @@ impl WorkspaceWorker {
         self.submit(Command::Activate(account, tx))?;
         receive(rx).await
     }
+    // Trusted host readback only. Never use these snapshots as execution
+    // authority or publish them to an external caller without a new fence.
+    pub(crate) async fn accounts(&self) -> Result<Vec<AccountId>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.submit(Command::Accounts(tx))?;
+        let accounts = receive(rx).await?;
+        let control = self
+            .signal
+            .lock()
+            .map_err(|_| "Workspace signal unavailable")?;
+        if control.stopping {
+            return Err("Workspace worker stopping".into());
+        }
+        Ok(accounts)
+    }
+
+    pub(crate) async fn planning_catalog(
+        &self,
+        session: ActiveSession,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.submit(Command::Catalog(session, tx))?;
+        let catalog = receive(rx).await?;
+        let control = self
+            .signal
+            .lock()
+            .map_err(|_| "Workspace signal unavailable")?;
+        if control.stopping {
+            return Err("Workspace worker stopping".into());
+        }
+        let active = control
+            .active
+            .as_ref()
+            .filter(|active| active.session == session)
+            .ok_or("Workspace session unavailable")?;
+        active.gate.ensure_running()?;
+        Ok(catalog)
+    }
+
     pub(crate) async fn add_stdio(
         &self,
         session: ActiveSession,
@@ -312,6 +353,19 @@ async fn serve<S: Store>(
                     let _ = reply.send(host.enroll());
                 }
             }
+            Command::Accounts(reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(host.accounts().map(|accounts| accounts.to_vec()));
+                }
+            }
+            Command::Catalog(session, reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(
+                        host.planning_catalog(&session)
+                            .map(|catalog| catalog.openai_functions()),
+                    );
+                }
+            }
             Command::Activate(account, reply) => {
                 if reply.is_closed() {
                     continue;
@@ -440,6 +494,51 @@ IFS= read -r line || exit 4
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"fixture"}]}}'
 IFS= read -r line
 "#;
+    #[tokio::test]
+    async fn trusted_readback_is_policy_filtered_and_exact_session_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = WorkspaceWorker::start(dir.path().to_owned(), Fixture::default())
+            .await
+            .unwrap();
+        assert!(worker.accounts().await.unwrap().is_empty());
+        let a = worker.enroll().await.unwrap();
+        let b = worker.enroll().await.unwrap();
+        assert_eq!(worker.accounts().await.unwrap(), vec![a, b]);
+        let first = worker.activate(a).await.unwrap();
+        let session = first.session();
+        worker
+            .add_stdio(
+                session,
+                "local".into(),
+                "/bin/sh".into(),
+                vec!["-c".into(), CHILD.into()],
+                "/".into(),
+            )
+            .await
+            .unwrap();
+        assert!(worker.planning_catalog(session).await.unwrap().is_empty());
+        worker
+            .set_policy(session, "local__read".into(), McpPolicy::Ask)
+            .await
+            .unwrap();
+        let functions = worker.planning_catalog(session).await.unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0]["function"]["name"], "local__read");
+        first.request_retirement().unwrap();
+        assert!(worker.planning_catalog(session).await.is_err());
+        worker.retire(&first).await.unwrap();
+        let second = worker.activate(b).await.unwrap();
+        assert!(worker.planning_catalog(session).await.is_err());
+        assert!(worker
+            .planning_catalog(second.session())
+            .await
+            .unwrap()
+            .is_empty());
+        worker.retire(&second).await.unwrap();
+        worker.stop().await.unwrap();
+        assert!(worker.accounts().await.is_err());
+    }
+
     #[tokio::test]
     async fn retirement_signal_interrupts_busy_agent_and_queue_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
